@@ -2,7 +2,6 @@
 Configuration settings for the Report Generator API.
 """
 
-import os
 from pathlib import Path
 
 from pydantic_settings import BaseSettings
@@ -13,7 +12,12 @@ logger = get_logger(__name__)
 
 
 class Settings(BaseSettings):
-    """Application settings."""
+    """Application settings with environment-based configuration."""
+
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+
+    # Environment configuration
+    environment: str = "development"  # "development" or "production"
 
     # App configuration
     app_name: str = "Report Generator API"
@@ -23,22 +27,54 @@ class Settings(BaseSettings):
     # Server configuration
     host: str = "0.0.0.0"
     port: int = 50100
-    
-    # Base directories for different project types
-    base_dir_bipresents: Path = Path("C:/inetpub/wwwroot/bipresents/bsr_slides")
-    base_dir_nw: Path = Path("C:/inetpub/wwwroot/nw2/nw_slides")
 
-    # File paths
-    base_dir: Path = Path("C:/inetpub/wwwroot/CreativePythonAPI")
-    nw_files_dir: Path = base_dir / "NW_Files"
-    powerpoint_dir: Path = nw_files_dir / "PowerPoint_files"
-    output_dir: Path = nw_files_dir / "output_images"
+    @property
+    def base_dir_bipresents(self) -> Path:
+        """Get base directory for bipresents based on environment"""
+        if self.environment.lower() == "production":
+            return Path("C:/inetpub/wwwroot/bipresents/bsr_slides")
+        else:
+            return Path("NW_Files") / "bipresents" / "bsr_slides"
 
-    # Application paths
+    @property
+    def base_dir_nw(self) -> Path:
+        """Get base directory for nw based on environment"""
+        if self.environment.lower() == "production":
+            return Path("C:/inetpub/wwwroot/nw2/nw_slides")
+        else:
+            return Path("NW_Files") / "nw2" / "nw_slides"
+
+    @property
+    def base_dir(self) -> Path:
+        """Get base directory based on environment"""
+        if self.environment.lower() == "production":
+            return Path("C:/inetpub/wwwroot/CreativePythonAPI")
+        else:
+            return Path("NW_Files") / "CreativePythonAPI"
+
+    @property
+    def nw_files_dir(self) -> Path:
+        """Get NW files directory based on environment"""
+        if self.environment.lower() == "production":
+            return Path("C:/inetpub/wwwroot/CreativePythonAPI/NW_Files")
+        else:
+            return Path("NW_Files")
+
+    @property
+    def powerpoint_dir(self) -> Path:
+        """Get PowerPoint directory"""
+        return self.nw_files_dir / "PowerPoint_files"
+
+    @property
+    def output_dir(self) -> Path:
+        """Get output directory"""
+        return self.nw_files_dir / "output_images"
+
+    # Application paths (static, not environment dependent)
     app_dir: Path = Path(__file__).parent.parent.parent.resolve()
     static_dir: Path = app_dir / "static"
     default_images_dir: Path = static_dir / "default_images"
-    
+
     # SQL Server connection string for BI_GUIDELINES
     sql_connection_string: str = (
         "DRIVER={SQL Server};"
@@ -64,6 +100,16 @@ class Settings(BaseSettings):
     default_chart_height: float = 3.5
     chart_dpi: int = 100
 
+    @property
+    def is_production(self) -> bool:
+        """Check if running in production environment"""
+        return self.environment.lower() == "production"
+
+    @property
+    def is_development(self) -> bool:
+        """Check if running in development environment"""
+        return self.environment.lower() == "development"
+
     # Document settings
     default_font_name: str = "Calibri"
     default_font_size: int = 11
@@ -75,11 +121,11 @@ class Settings(BaseSettings):
     # File cleanup settings
     cleanup_older_than_hours: int = 24
     max_file_size_mb: int = 100
-    
+
     # Projects types
     PROJECT_TYPE_BIPRESENTS: str = "bipresents"
     PROJECT_TYPE_NW: str = "nw"
-    
+
     def get_base_dir_for_project_type(self, project_type: str) -> Path:
         """Get the base directory for a specific project type."""
         if project_type == self.PROJECT_TYPE_BIPRESENTS:
@@ -88,6 +134,19 @@ class Settings(BaseSettings):
             return self.base_dir_nw
         else:
             raise ValueError(f"Unknown project type: {project_type}")
+
+    def get_environment_info(self) -> dict:
+        """Get current environment configuration info"""
+        return {
+            "environment": self.environment,
+            "is_production": self.is_production,
+            "is_development": self.is_development,
+            "base_dir_bipresents": str(self.base_dir_bipresents),
+            "base_dir_nw": str(self.base_dir_nw),
+            "nw_files_dir": str(self.nw_files_dir),
+            "host": self.host,
+            "port": self.port,
+        }
 
     def ensure_directories(self):
         """Create necessary directories if they don't exist"""
@@ -103,7 +162,7 @@ class Settings(BaseSettings):
         for directory in directories:
             try:
                 directory.mkdir(parents=True, exist_ok=True)
-                logger.info(f"Ensured directory exists: {directory}")
+                logger.info("Ensured directory exists: %s", directory)
             except Exception as e:
                 logger.error(
                     "Warning: Could not create directory %s: %s", directory, str(e)

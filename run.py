@@ -7,11 +7,23 @@ import uvicorn
 from app.config.settings import settings
 from app.utils.logging_utils import print_blue
 
+
 def main():
     """Main function to start the FastAPI application"""
-    print_blue(f"Starting {settings.app_name} – FastAPI service for PPTX conversion")
-    print_blue(f"Documentation available at: http://{settings.host}:{settings.port}/docs")
-    print_blue(f"Server starting on: http://{settings.host}:{settings.port}")
+    # Display environment configuration
+    env_info = settings.get_environment_info()
+    print_blue(f"🚀 Starting {settings.app_name} – FastAPI service for PPTX conversion")
+    print_blue(f"🌍 Environment: {env_info['environment'].upper()}")
+    print_blue("📁 Base directories:")
+    print_blue(f"   - NW Projects: {env_info['base_dir_nw']}")
+    print_blue(f"   - BI Presents: {env_info['base_dir_bipresents']}")
+    print_blue(
+        f"📖 Documentation available at: http://{settings.host}:{settings.port}/docs"
+    )
+    print_blue(
+        f"✨ Modern docs (Scalar): http://{settings.host}:{settings.port}/scalar"
+    )
+    print_blue(f"🌐 Server starting on: http://{settings.host}:{settings.port}")
 
     try:
         uvicorn.run(

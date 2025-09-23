@@ -4,14 +4,14 @@ FastAPI main application file
 
 import logging
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-import pyodbc
+from scalar_fastapi import get_scalar_api_reference
 
-from app.api.routes import files, pptx_conversion, bi_guidelines
+from app.api.routes import bi_guidelines, files, pptx_conversion
 from app.config.settings import settings
-from app.utils.logging_utils import setup_logging, print_blue
+from app.utils.logging_utils import setup_logging
 
 # Ensure directories exist before mounting static files
 settings.ensure_directories()
@@ -26,7 +26,7 @@ app = FastAPI(
     description="API for generating professional converting PowerPoint files",
     version=settings.app_version,
     docs_url="/docs",
-    root_path="/CreativePythonAPI"
+    root_path="/CreativePythonAPI",
 )
 
 # CORS configuration
@@ -51,6 +51,7 @@ app.mount(
     name="default_images",
 )
 
+
 @app.get("/", summary="Root endpoint")
 async def root():
     """Root endpoint - returns basic API information"""
@@ -58,10 +59,22 @@ async def root():
         "message": settings.app_name,
         "version": settings.app_version,
         "docs": "/docs",
+        "scalar_docs": "/scalar",
     }
+
+
+@app.get("/scalar", include_in_schema=False)
+async def scalar_html():
+    """
+    Modern API documentation using Scalar
+    """
+    return get_scalar_api_reference(
+        openapi_url=app.openapi_url,
+        title=f"{settings.app_name} - API Documentation",
+    )
+
 
 @app.get("/health", summary="Health check endpoint")
 async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "message": f"{settings.app_name} is running"}
-
