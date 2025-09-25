@@ -29,38 +29,38 @@ class PPTXService:
     def sanitize_folder_name(self, folder_name: str) -> str:
         """
         Sanitize folder name to be safe for filesystem usage.
-        
+
         Args:
             folder_name: Original folder name
-            
+
         Returns:
             Sanitized folder name safe for filesystem
         """
         # Remove invalid characters for Windows/Linux filesystems
-        sanitized = re.sub(r'[<>:"/\\|?*]', '', folder_name)
-        
+        sanitized = re.sub(r'[<>:"/\\|?*]', "", folder_name)
+
         # Replace spaces and special characters with underscores
-        sanitized = re.sub(r'[\s\-\.]+', '_', sanitized)
-        
+        sanitized = re.sub(r"[\s\-\.]+", "_", sanitized)
+
         # Remove leading/trailing underscores and dots
-        sanitized = sanitized.strip('_.')
-        
+        sanitized = sanitized.strip("_.")
+
         # Ensure it's not empty and not too long
         if not sanitized:
             sanitized = "unnamed_project"
-        
+
         # Limit length (Windows has 255 char limit, but we'll be conservative)
         sanitized = sanitized[:50]
-        
+
         return sanitized.upper()
-    
+
     def get_project_base_dir(self, project_type: str) -> Path:
         """
         Get the base directory for a specific project type.
-        
+
         Args:
             project_type: Type of project ('bipresents' or 'nw')
-            
+
         Returns:
             Base directory path for the project type
         """
@@ -83,7 +83,7 @@ class PPTXService:
         """
         # Get the base directory for the project type
         base_dir = self.get_project_base_dir(project_type)
-        
+
         # Use display_name as the conversion ID (folder name)
         conversion_id = display_name
         project_folder = base_dir / conversion_id
@@ -93,7 +93,7 @@ class PPTXService:
         if project_folder.exists():
             logger.warning(
                 "Project folder already exists: %s. It will be overwritten.",
-                project_folder
+                project_folder,
             )
             # Remove existing folder to avoid conflicts
             shutil.rmtree(project_folder)
@@ -113,11 +113,13 @@ class PPTXService:
                 "PPTX file saved: %s (%s) for project: %s",
                 pptx_file_path,
                 FileUtils.format_file_size(len(file_content)),
-                conversion_id
+                conversion_id,
             )
 
             # Convert PPTX to images and extract titles
-            slide_results = self._pptx_to_images_with_titles(pptx_file_path, project_folder, thumbnails_folder)
+            slide_results = self._pptx_to_images_with_titles(
+                pptx_file_path, project_folder, thumbnails_folder
+            )
 
             # Create response data
             image_urls = []
@@ -138,13 +140,18 @@ class PPTXService:
                 title = result["title"]
                 image_filename = Path(image_path).name
                 thumbnail_filename = Path(thumbnail_path).name
-                    # Build the image and thumbnail URLs based on project type
+                # Build the image and thumbnail URLs based on project type
                 if url_base:
                     image_url = f"{url_base}/{conversion_id}/{image_filename}"
-                    thumbnail_url = f"{url_base}/{conversion_id}/Thumbnails/{thumbnail_filename}"
+                    thumbnail_url = (
+                        f"{url_base}/{conversion_id}/Thumbnails/{thumbnail_filename}"
+                    )
                 else:
                     image_url = f"files/download/{project_type}/{conversion_id}/{image_filename}"
-                    thumbnail_url = f"files/download/{project_type}/{conversion_id}/Thumbnails/{thumbnail_filename}"
+                    thumbnail_url = (
+                        f"files/download/{project_type}/{conversion_id}/"
+                        f"Thumbnails/{thumbnail_filename}"
+                    )
                 image_urls.append(image_url)
                 thumbnail_urls.append(thumbnail_url)
                 titles.append(title)
@@ -156,8 +163,13 @@ class PPTXService:
                 "images": image_urls,
                 "thumbnails": thumbnail_urls,
                 "titles": titles,
-                "pptx_file": f"files/download/{project_type}/{conversion_id}/{filename}",
-                "message": f"Conversion successful for '{conversion_id}'. Generated {len(image_urls)} images.",
+                "pptx_file": (
+                    f"files/download/{project_type}/{conversion_id}/{filename}"
+                ),
+                "message": (
+                    f"Conversion successful for '{conversion_id}'. "
+                    f"Generated {len(image_urls)} images."
+                ),
             }
 
         except Exception as e:
@@ -206,28 +218,40 @@ class PPTXService:
             for i in range(1, presentation.Slides.Count + 1):
                 # Generate filename with zero-padding
                 img_filename = f"{i:03d}.png"  # 001.png, 002.png, etc.
-                
+
                 # Full-size image path
                 img_path = os.path.join(project_folder_abs, img_filename)
-                # Thumbnail image path  
+                # Thumbnail image path
                 thumbnail_path = os.path.join(thumbnails_folder_abs, img_filename)
 
                 # Export slide as full-size image
                 slide = presentation.Slides(i)
                 slide.Export(img_path, self.image_format)
-                
+
                 # Export slide as thumbnail (smaller size)
                 # Using a smaller resolution for thumbnails
-                slide.Export(thumbnail_path, self.image_format, 150, 113)  # Smaller dimensions for thumbnails
+                slide.Export(
+                    thumbnail_path, self.image_format, 150, 113
+                )  # Smaller dimensions for thumbnails
 
                 # Extract slide title
                 title = self._extract_slide_title(slide)
 
                 logger.info(
-                    "Slide %d exported as %s and %s with title: %s", i, img_path, thumbnail_path, title
+                    "Slide %d exported as %s and %s with title: %s",
+                    i,
+                    img_path,
+                    thumbnail_path,
+                    title,
                 )
 
-                results.append({"image_path": str(Path(img_path)), "thumbnail_path": str(Path(thumbnail_path)), "title": title})
+                results.append(
+                    {
+                        "image_path": str(Path(img_path)),
+                        "thumbnail_path": str(Path(thumbnail_path)),
+                        "title": title,
+                    }
+                )
 
         except Exception as e:
             logger.error("Error processing PPTX with PowerPoint: %s", str(e))
@@ -278,12 +302,16 @@ class PPTXService:
         base_dir = self.get_project_base_dir(project_type)
         return base_dir / conversion_id
 
-    def get_image_path(self, conversion_id: str, image_name: str, project_type: str) -> Path:
+    def get_image_path(
+        self, conversion_id: str, image_name: str, project_type: str
+    ) -> Path:
         """Get the path to a specific image."""
         base_dir = self.get_project_base_dir(project_type)
         return base_dir / conversion_id / image_name
-    
-    def get_thumbnail_path(self, conversion_id: str, image_name: str, project_type: str) -> Path:
+
+    def get_thumbnail_path(
+        self, conversion_id: str, image_name: str, project_type: str
+    ) -> Path:
         """Get the path to a specific thumbnail."""
         base_dir = self.get_project_base_dir(project_type)
         return base_dir / conversion_id / "Thumbnails" / image_name
@@ -320,7 +348,9 @@ class PPTXService:
         with zipfile.ZipFile(zip_path, "w") as zipf:
             # Add all files in the project folder
             for file in project_folder.rglob("*"):
-                if file.is_file() and file != zip_path:  # Don't include the zip file itself
+                if (
+                    file.is_file() and file != zip_path
+                ):  # Don't include the zip file itself
                     # Get relative path for the archive
                     arcname = file.relative_to(project_folder)
                     zipf.write(file, arcname=arcname)
@@ -345,14 +375,17 @@ class PPTXService:
         """Clean up old conversion files to prevent disk space issues."""
         try:
             # Clean up both project types
-            for project_type in [settings.PROJECT_TYPE_BIPRESENTS, settings.PROJECT_TYPE_NW]:
+            for project_type in [
+                settings.PROJECT_TYPE_BIPRESENTS,
+                settings.PROJECT_TYPE_NW,
+            ]:
                 base_dir = self.get_project_base_dir(project_type)
-                
+
                 if not base_dir.exists():
                     continue
-                    
+
                 project_folders = [d for d in base_dir.iterdir() if d.is_dir()]
-                
+
                 if len(project_folders) > max_conversions:
                     project_folders.sort(key=lambda x: x.stat().st_mtime)
                     folders_to_delete = project_folders[:-max_conversions]
@@ -364,51 +397,59 @@ class PPTXService:
         except Exception as e:
             logger.error("Error cleaning up old conversions: %s", str(e))
             raise
-        
+
     def list_conversions(self, project_type: str = None) -> List[Dict[str, Any]]:
         """
         List all available conversions.
-        
+
         Args:
             project_type: Optional project type filter
-            
+
         Returns:
             List of conversion information
         """
         conversions = []
-        
-        project_types = [project_type] if project_type else [
-            settings.PROJECT_TYPE_BIPRESENTS, 
-            settings.PROJECT_TYPE_NW
-        ]
-        
+
+        project_types = (
+            [project_type]
+            if project_type
+            else [settings.PROJECT_TYPE_BIPRESENTS, settings.PROJECT_TYPE_NW]
+        )
+
         for ptype in project_types:
             try:
                 base_dir = self.get_project_base_dir(ptype)
                 if not base_dir.exists():
                     continue
-                    
+
                 for project_folder in base_dir.iterdir():
                     if project_folder.is_dir():
                         # Count images (excluding thumbnails folder)
-                        image_count = len([f for f in project_folder.iterdir() 
-                                         if f.is_file() and f.suffix.lower() == '.png'])
-                        
+                        image_count = len(
+                            [
+                                f
+                                for f in project_folder.iterdir()
+                                if f.is_file() and f.suffix.lower() == ".png"
+                            ]
+                        )
+
                         # Get creation time
                         creation_time = project_folder.stat().st_mtime
-                        
-                        conversions.append({
-                            "conversion_id": project_folder.name,
-                            "project_type": ptype,
-                            "image_count": image_count,
-                            "creation_time": creation_time,
-                            "folder_path": str(project_folder)
-                        })
-            except Exception as e:
-                logger.error(f"Error listing conversions for {ptype}: {str(e)}")
-                
+
+                        conversions.append(
+                            {
+                                "conversion_id": project_folder.name,
+                                "project_type": ptype,
+                                "image_count": image_count,
+                                "creation_time": creation_time,
+                                "folder_path": str(project_folder),
+                            }
+                        )
+            except (OSError, PermissionError, FileNotFoundError) as e:
+                logger.error("Error listing conversions for %s: %s", ptype, str(e))
+
         return conversions
-    
+
 
 # Global PPTX service instance
 pptx_service = PPTXService()

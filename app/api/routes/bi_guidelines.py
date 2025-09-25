@@ -1,65 +1,62 @@
-from fastapi import APIRouter
-from fastapi.responses import JSONResponse
-from fastapi import FastAPI, HTTPException
-from app.models.nw_master_request import DetailItem, PresentationData
-import pyodbc
+"""Routes for BI Guidelines API.
+
+This module provides endpoints to query and create BI Guideline presentations
+from the BI_GUIDELINES database.
+"""
+
 import logging
+
+import pyodbc
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse
+
+from app.config.settings import settings
+from app.models.nw_master_request import PresentationData
 
 router = APIRouter(prefix="/bi_guidelines", tags=["BI Guidelines"])
 logger = logging.getLogger(__name__)
 
 
 def get_db_connection():
-    """
-    Returns a connection to the BI_GUIDELINES database using the provided connection string.
-    """
-    from app.config.settings import settings
+    """Return a connection to the BI_GUIDELINES database."""
     connection_string = settings.sql_connection_string
     try:
-        conn = pyodbc.connect(connection_string)
+        conn = pyodbc.connect(connection_string)  # pylint: disable=c-extension-no-member
         logger.info("Database connection established successfully.")
         return conn
-    except Exception as e:
-        logger.error(f"Error connecting to database: {e}")
+    except pyodbc.Error as e:  # pylint: disable=c-extension-no-member
+        logger.error("Database connection error: %s", e)
         return None
 
-@router.get("/nw-master")
-async def get_nw_master():
-    """
-    Returns the top 1000 rows from BI_GUIDELINES.dbo.nw_Master
-    """
-    conn = get_db_connection()
-    if not conn:
-        return JSONResponse(status_code=500, content={"error": "Could not connect to database."})
-    try:
-        cursor = conn.cursor()
-        query = """
-        SELECT TOP (1000) [PresentationId], [Project], [DisplayName], [MainPptFileName], [NameCandidateFileName], [NameCandidateBGType], [NameCandidateBGName], [NameCandidateStartingSlide], [UploadedBy], [UploadedDate], [PresentationStatus], [PresentationOpenDate], [NotesExplore], [NotesAvoid], [LastUpdateDate], [PresentationType], [BSRDisplayName], [isParticipantsVote], [show_EngKat_in_groups], [isWideScreenPPT], [isAWSLinkReq], [isWide] FROM [BI_GUIDELINES].[dbo].[nw_Master]
-        """
-        cursor.execute(query)
-        columns = [column[0] for column in cursor.description]
-        rows = cursor.fetchall()
-        result = [dict(zip(columns, row)) for row in rows]
-        cursor.close()
-        conn.close()
-        return result
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
+
+class PresentationNotFoundError(Exception):
+    """Custom exception for when a presentation is not found."""
+
 
 @router.post("/presentations/", status_code=201)
 async def create_presentation(data: PresentationData):
     """
     Creates a new master presentation record and its associated detail records.
 
-    This endpoint replicates the logic of the 'UploadConfigurationInfo' function from the VB.NET application.
+    This endpoint handles the creation of presentation records:
     1. Starts a transaction.
-    2. Calls the `nw_InsertPresentationMaster_sep2025` stored procedure to create the master record.
+    2. Calls the `nw_InsertPresentationMaster_sep2025` stored procedure
+       to create the master record.
     3. Gets the returned `PresentationId`.
-    4. Iterates over the details and calls `nw_InsertPresentationDetail_copy` for each one.
-    5. If everything is successful, it commits the transaction. If anything fails, it rolls back.
+    4. Iterates over the details and calls `nw_InsertPresentationDetail_copy`
+       for each one.
+    5. If everything is successful, it commits the transaction.
+       If anything fails, it rolls back.
     """
+    conn = None
     try:
         conn = get_db_connection()
+        if not conn:
+            raise HTTPException(
+                status_code=500,
+                detail="Could not connect to database."
+            )
+
         cursor = conn.cursor()
 
         cursor.execute("SELECT DB_NAME(), @@SERVERNAME;")
@@ -67,7 +64,9 @@ async def create_presentation(data: PresentationData):
         print(f"Connected to DB: {db_row[0]} on Server: {db_row[1]}")
 
         # Start transaction
-        cursor.execute("SET NOCOUNT ON;")  # Prevents empty result sets from 'X rows affected'
+        cursor.execute(
+            "SET NOCOUNT ON;"
+        )  # Prevents empty result sets from 'X rows affected'
 
         # 1. Insert into the master table
         master_sql = """
@@ -90,7 +89,7 @@ async def create_presentation(data: PresentationData):
             data.bsr_display_name,
             data.participant_vote,
             data.is_wide_ppt,
-            data.is_aws_email
+            data.is_aws_email,
         )
 
         print("Executing master stored procedure...")
@@ -105,13 +104,15 @@ async def create_presentation(data: PresentationData):
                     presentation_id = row[0]
                     print(f"PresentationId found: {presentation_id}")
                     break
-            except Exception:
+            except pyodbc.Error:  # pylint: disable=c-extension-no-member
                 pass
             if not cursor.nextset():
                 break
 
         if not presentation_id:
-            raise Exception("Could not get PresentationId from the master record.")
+            raise PresentationNotFoundError(
+                "Could not get PresentationId from the master record."
+            )
 
         # 2. Insert into the details table
         detail_sql = """
@@ -123,10 +124,20 @@ async def create_presentation(data: PresentationData):
         """
         for item in data.details:
             detail_params = (
-                presentation_id, item.slide_number, item.slide_type, item.slide_bg_file_name,
-                item.slide_description, item.group_name, item.category, item.name,
-                item.rationale, item.notation, item.kana, item.logo_filename,
-                item.template_id, item.name_sub_group
+                presentation_id,
+                item.slide_number,
+                item.slide_type,
+                item.slide_bg_file_name,
+                item.slide_description,
+                item.group_name,
+                item.category,
+                item.name,
+                item.rationale,
+                item.notation,
+                item.kana,
+                item.logo_filename,
+                item.template_id,
+                item.name_sub_group,
             )
             cursor.execute(detail_sql, detail_params)
 
@@ -136,14 +147,20 @@ async def create_presentation(data: PresentationData):
 
         return {
             "message": "Presentation created successfully.",
-            "presentation_id": presentation_id
+            "presentation_id": presentation_id,
         }
 
-    except Exception as e:
-        print(f"ERROR in create_presentation: {e}")
+    except pyodbc.Error as e:  # pylint: disable=c-extension-no-member
+        logger.exception("Transaction failed: %s", e)
         if conn:
             conn.rollback()
-        raise HTTPException(status_code=500, detail=f"Transaction error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Transaction error: {e}") from e
+
+    except PresentationNotFoundError as e:
+        logger.error("Presentation creation failed: %s", e)
+        if conn:
+            conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
     finally:
         if conn:
@@ -157,33 +174,40 @@ async def get_presentation(presentation_id: int):
     """
     conn = get_db_connection()
     if not conn:
-        return JSONResponse(status_code=500, content={"error": "Could not connect to database."})
+        return JSONResponse(
+            status_code=500, content={"error": "Could not connect to database."}
+        )
     try:
         cursor = conn.cursor()
 
         # Get master record
         master_query = """
-        SELECT [PresentationId], [Project], [DisplayName], [MainPptFileName], [NameCandidateFileName], 
-               [NameCandidateBGType], [NameCandidateBGName], [NameCandidateStartingSlide], [UploadedBy], 
-               [UploadedDate], [PresentationStatus], [PresentationOpenDate], [NotesExplore], [NotesAvoid], 
-               [LastUpdateDate], [PresentationType], [BSRDisplayName], [isParticipantsVote], 
-               [show_EngKat_in_groups], [isWideScreenPPT], [isAWSLinkReq], [isWide] 
-        FROM [BI_GUIDELINES].[dbo].[nw_Master] 
+        SELECT [PresentationId], [Project], [DisplayName], [MainPptFileName],
+               [NameCandidateFileName], [NameCandidateBGType], [NameCandidateBGName],
+               [NameCandidateStartingSlide], [UploadedBy], [UploadedDate],
+               [PresentationStatus], [PresentationOpenDate], [NotesExplore],
+               [NotesAvoid], [LastUpdateDate], [PresentationType], [BSRDisplayName],
+               [isParticipantsVote], [show_EngKat_in_groups], [isWideScreenPPT],
+               [isAWSLinkReq], [isWide]
+        FROM [BI_GUIDELINES].[dbo].[nw_Master]
         WHERE PresentationId = ?
         """
         cursor.execute(master_query, (presentation_id,))
         master_columns = [column[0] for column in cursor.description]
         master_row = cursor.fetchone()
         if not master_row:
-            return JSONResponse(status_code=404, content={"error": "Presentation not found."})
+            return JSONResponse(
+                status_code=404, content={"error": "Presentation not found."}
+            )
         master_data = dict(zip(master_columns, master_row))
 
         # Get detail records
         detail_query = """
-        SELECT [PresentationId], [SlideNumber], [SlideType], [SlideBGFileName], [SlideDescription], 
-               [NameGroup], [NameCategory], [Name], [NameRationale], [NameNotation], [KanaNames], 
-               [NameLogo], [TemplateId], [NameSubGroup] 
-        FROM [BI_GUIDELINES].[dbo].[nw_Details] 
+        SELECT [PresentationId], [SlideNumber], [SlideType], [SlideBGFileName],
+               [SlideDescription], [NameGroup], [NameCategory], [Name],
+               [NameRationale], [NameNotation], [KanaNames], [NameLogo],
+               [TemplateId], [NameSubGroup]
+        FROM [BI_GUIDELINES].[dbo].[nw_Details]
         WHERE PresentationId = ?
         ORDER BY SlideNumber
         """
@@ -195,12 +219,10 @@ async def get_presentation(presentation_id: int):
         cursor.close()
         conn.close()
 
-        return {
-            "master": master_data,
-            "details": detail_data
-        }
+        return {"master": master_data, "details": detail_data}
 
-    except Exception as e:
+    except pyodbc.Error as e:  # pylint: disable=c-extension-no-member
+        logger.error("Database query failed: %s", e)
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 

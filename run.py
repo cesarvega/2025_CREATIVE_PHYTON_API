@@ -17,13 +17,15 @@ def main():
     print_blue("📁 Base directories:")
     print_blue(f"   - NW Projects: {env_info['base_dir_nw']}")
     print_blue(f"   - BI Presents: {env_info['base_dir_bipresents']}")
-    print_blue(
-        f"📖 Documentation available at: http://{settings.host}:{settings.port}/docs"
-    )
-    print_blue(
-        f"✨ Modern docs (Scalar): http://{settings.host}:{settings.port}/scalar"
-    )
-    print_blue(f"🌐 Server starting on: http://{settings.host}:{settings.port}")
+
+    # Set URLs based on environment
+    base_url = f"http://localhost:{settings.port}"
+    if settings.environment.lower() == "production":
+        base_url += "/CreativePythonAPI"
+
+    print_blue(f"📖 Documentation available at: {base_url}/docs")
+    print_blue(f"✨ Modern docs (Scalar): {base_url}/scalar")
+    print_blue(f"🌐 Server starting on: {base_url}")
 
     try:
         uvicorn.run(

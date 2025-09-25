@@ -60,37 +60,42 @@ class Settings(BaseSettings):
         else:
             return Path("NW_Files")
 
-    @property
-    def powerpoint_dir(self) -> Path:
-        """Get PowerPoint directory"""
-        return self.nw_files_dir / "PowerPoint_files"
-
-    @property
-    def output_dir(self) -> Path:
-        """Get output directory"""
-        return self.nw_files_dir / "output_images"
-
     # Application paths (static, not environment dependent)
     app_dir: Path = Path(__file__).parent.parent.parent.resolve()
     static_dir: Path = app_dir / "static"
     default_images_dir: Path = static_dir / "default_images"
 
     # SQL Server connection string for BI_GUIDELINES
+    # This value is loaded from the SQL_CONNECTION_STRING environment variable in .env file
     sql_connection_string: str = (
-        "DRIVER={SQL Server};"
-        "SERVER=192.168.0.85;"
-        "DATABASE=BI_GUIDELINES;"
-        "UID=sqlguide;"
-        "PWD=sqlguidepwd;"
-        "TrustServerCertificate=yes;"
-        "Connection Timeout=30;"
-        "Encrypt=no;"
+        "DRIVER={SQL Server};SERVER=localhost;DATABASE=master;Trusted_Connection=yes;"
     )
 
     # CORS settings
-    cors_origins: list = ["*"]
-    cors_methods: list = ["*"]
-    cors_headers: list = ["*"]
+    cors_origins: str = "*"  # Comma-separated list or "*" for all
+    cors_methods: str = "*"  # Comma-separated list or "*" for all
+    cors_headers: str = "*"  # Comma-separated list or "*" for all
+
+    @property
+    def cors_origins_list(self) -> list:
+        """Get CORS origins as a list"""
+        if self.cors_origins == "*":
+            return ["*"]
+        return [origin.strip() for origin in self.cors_origins.split(",")]
+
+    @property
+    def cors_methods_list(self) -> list:
+        """Get CORS methods as a list"""
+        if self.cors_methods == "*":
+            return ["*"]
+        return [method.strip() for method in self.cors_methods.split(",")]
+
+    @property
+    def cors_headers_list(self) -> list:
+        """Get CORS headers as a list"""
+        if self.cors_headers == "*":
+            return ["*"]
+        return [header.strip() for header in self.cors_headers.split(",")]
 
     # Logging configuration
     log_level: str = "INFO"
@@ -155,8 +160,6 @@ class Settings(BaseSettings):
             self.base_dir_nw,
             self.default_images_dir,
             self.nw_files_dir,
-            self.output_dir,
-            self.powerpoint_dir,
         ]
 
         for directory in directories:
@@ -178,7 +181,5 @@ BASE_DIR = settings.base_dir
 BASE_DIR_BIPRESENTS = settings.base_dir_bipresents
 BASE_DIR_NW = settings.base_dir_nw
 NW_FILES_DIR = settings.nw_files_dir
-POWERPOINT_DIR = settings.powerpoint_dir
-OUTPUT_DIR = settings.output_dir
 APP_DIR = settings.app_dir
 DEFAULT_IMAGES_DIR = settings.default_images_dir

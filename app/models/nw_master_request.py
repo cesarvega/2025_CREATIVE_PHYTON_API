@@ -1,8 +1,10 @@
 from pydantic import BaseModel
 from typing import List, Optional
 
+
 class DetailItem(BaseModel):
     """Represents a single record in the nw_Details table."""
+
     slide_number: int
     slide_type: str
     slide_bg_file_name: Optional[str] = None
@@ -17,8 +19,10 @@ class DetailItem(BaseModel):
     template_id: int
     name_sub_group: Optional[str] = None
 
+
 class PresentationData(BaseModel):
     """Represents the complete payload for creating a new presentation."""
+
     project: str
     display_name: str
     powerpoint_file: str

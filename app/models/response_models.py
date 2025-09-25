@@ -12,9 +12,9 @@ class PPTXConversionResponse(BaseModel):
 
     message: str
     conversion_id: str
-    project_type: str 
+    project_type: str
     total_images: int
     images: List[str]
-    thumbnails: List[str] = [] 
+    thumbnails: List[str] = []
     titles: List[str]
     pptx_file: str = ""

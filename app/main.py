@@ -6,10 +6,14 @@ import logging
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from scalar_fastapi import get_scalar_api_reference
 
-from app.api.routes import bi_guidelines, files, pptx_conversion
+from app.api.routes import (
+    bi_guidelines,
+    excel_processing,
+    pptx_conversion,
+    presentation_routes,
+)
 from app.config.settings import settings
 from app.utils.logging_utils import setup_logging
 
@@ -26,29 +30,26 @@ app = FastAPI(
     description="API for generating professional converting PowerPoint files",
     version=settings.app_version,
     docs_url="/docs",
-    root_path="/CreativePythonAPI",
+    root_path=(
+        "/CreativePythonAPI" if settings.environment.lower() == "production" else ""
+    ),
 )
 
 # CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins,
+    allow_origins=settings.cors_origins_list,
     allow_credentials=True,
-    allow_methods=settings.cors_methods,
-    allow_headers=settings.cors_headers,
+    allow_methods=settings.cors_methods_list,
+    allow_headers=settings.cors_headers_list,
 )
 
 # Include API routes
 app.include_router(pptx_conversion.router, prefix="/api", tags=["PPTX Conversion"])
-app.include_router(files.router, prefix="/api", tags=["Files"])
+app.include_router(excel_processing.router, prefix="/api", tags=["Excel Processing"])
 app.include_router(bi_guidelines.router, prefix="/api", tags=["BI Guidelines"])
-
-# Mount static file directories
-app.mount("/images", StaticFiles(directory=str(settings.output_dir)), name="images")
-app.mount(
-    "/default-images",
-    StaticFiles(directory=str(settings.default_images_dir)),
-    name="default_images",
+app.include_router(
+    presentation_routes.router, prefix="/api", tags=["Presentation Creation"]
 )
 
 
