@@ -19,6 +19,7 @@ from app.utils.path_utils import (
     build_relative_slide_path,
     get_project_base_dir,
     get_relative_slide_root,
+    resolve_project_output,
     sanitize_folder_name,
 )
 
@@ -46,13 +47,20 @@ class PPTXService:
         Returns:
             Dictionary with conversion results
         """
-        # Get the base directory for the project type
-        base_dir = get_project_base_dir(project_type)
-
-        # Use display_name as the conversion ID (folder name)
-        conversion_id = display_name
-        project_folder = base_dir / conversion_id
+        # Resolve destination folder (sanitized) and ensure deterministic ID
+        conversion_id = sanitize_folder_name(display_name)
+        project_folder, used_fallback = resolve_project_output(
+            display_name,
+            project_type,
+        )
         thumbnails_folder = project_folder / "Thumbnails"
+
+        if used_fallback:
+            logger.warning(
+                "Project type '%s' does not map to a configured base directory; using fallback at %s",
+                project_type,
+                project_folder,
+            )
 
         # Check if folder already exists and handle it
         if project_folder.exists():
