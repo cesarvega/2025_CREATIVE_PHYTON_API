@@ -3,21 +3,31 @@ Presentation creation orchestration service.
 """
 
 import time
-from typing import Any, Dict, List
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from fastapi import HTTPException
 
-from app.api.routes.bi_guidelines import get_db_connection
+from app.config import get_project_root
+from app.config.db import DatabaseConnectionError, create_connection
 from app.models.excel_models import (
-    CreatePresentationRequest,
-    CreatePresentationResponse,
-    PPTXConversionResponse,
     ProcessedExcelData,
 )
-from app.models.nw_master_request import DetailItem, PresentationData
-from app.services.excel_service import excel_processing_service
+from app.models.presentation_models import (
+    CreatePresentationRequest,
+    CreatePresentationResponse,
+    DetailItem,
+    PresentationData,
+)
+from app.models.response_models import PPTXConversionResponse
+from app.services.excel_service import GROUP_MARKERS, excel_processing_service
 from app.services.pptx_service import pptx_service
+from app.services.pptx_builder_service import pptx_builder_service
+from app.services.word_service import word_service
+from app.services.email_service import email_service
 from app.utils.logging_utils import get_logger
+
 
 logger = get_logger(__name__)
 
@@ -28,6 +38,8 @@ class PresentationService:
     def __init__(self):
         self.excel_service = excel_processing_service
         self.pptx_service = pptx_service
+        self.word_service = word_service
+        self.email_service = email_service
 
     def create_presentation(
         self, request: CreatePresentationRequest
@@ -48,30 +60,54 @@ class PresentationService:
             logger.info("Processing Excel file: %s", request.excel_filename)
             excel_data = self._process_excel_file(request)
 
-            # 2. Convert PPTX file
+            # 2. Persist Excel artifacts for downstream usage
+            excel_artifacts = self._persist_excel_artifacts(request)
+
+            # 3. Convert PPTX file
             logger.info("Converting PPTX file: %s", request.pptx_filename)
             pptx_data = self._convert_pptx_file(request)
 
-            # 3. Generate slides from Excel arrays
+            # 4. Generate slides from Excel arrays
             logger.info("Generating slides from Excel data")
             slides_data = self._generate_slides_from_excel(
-                excel_data, pptx_data, request
+                excel_data=excel_data,
+                pptx_data=pptx_data,
+                request=request,
+                excel_artifacts=excel_artifacts,
             )
 
-            # 4. Apply templates if specified
+            # 5. Apply templates if specified
             if request.template_rotation:
                 slides_data = self._apply_template_rotation(
                     slides_data, request.template_rotation
                 )
 
-            # 5. Create presentation in DB
+            logger.info(
+                "Slides data generated: %d detail items, background=%s, rotation_applied=%s",
+                len(slides_data.get("details", [])),
+                slides_data.get("background_name"),
+                bool(request.template_rotation),
+            )
+
+            # 6. Create presentation in DB
             logger.info("Creating presentation in database")
             presentation_result = self._create_presentation_in_db(slides_data, request)
+
+            # presentation_id = presentation_result.get("presentation_id")
+            # if presentation_id:
+            #     feedback_path = self._generate_feedback_document(
+            #         presentation_id, request, excel_data
+            #     )
+            #     if feedback_path:
+            #         logger.info("Feedback document generated: %s", feedback_path)
+
+            #     self._send_notification_emails(presentation_id, request)
 
             processing_time = time.time() - start_time
 
             return CreatePresentationResponse(
                 message="Presentation created successfully",
+                # presentation_id='1212',
                 presentation_id=presentation_result.get("presentation_id"),
                 total_slides=len(slides_data["details"]),
                 excel_data=excel_data,
@@ -105,6 +141,45 @@ class PresentationService:
             logger.error("Error processing Excel file: %s", str(e))
             raise
 
+    def _persist_excel_artifacts(self, request: CreatePresentationRequest) -> Dict[str, str]:
+        """Persist the Excel file in an organized directory structure (placeholder)."""
+        if not callable(get_project_root):
+            logger.debug(
+                "Skipping Excel artifact persistence because get_project_root is not available."
+            )
+            return {}
+
+        try:
+            project_root = get_project_root(request.project_type)
+            project_dir = project_root / request.display_name
+            src_dir = project_dir / "Src"
+            downloads_dir = project_dir / "Downloads"
+
+            # Create directory structure
+            for folder in (project_dir, src_dir, downloads_dir):
+                folder.mkdir(parents=True, exist_ok=True)
+
+            # Save source file
+            source_path = src_dir / request.excel_filename
+            source_path.write_bytes(request.excel_file)
+
+            # Save download copy
+            download_path = downloads_dir / request.excel_filename
+            download_path.write_bytes(request.excel_file)
+
+            logger.info("Excel artifacts saved: %s, %s", source_path, download_path)
+
+            return {
+                "src": str(source_path),
+                "download": str(download_path),
+                "project_dir": str(project_dir),
+            }
+
+        except Exception as e:
+            logger.error("Error persisting Excel artifacts: %s", str(e))
+            # Return empty dict to not break the flow
+            return {}
+
     def _convert_pptx_file(
         self, request: CreatePresentationRequest
     ) -> PPTXConversionResponse:
@@ -132,135 +207,433 @@ class PresentationService:
 
     def _generate_slides_from_excel(
         self,
+        *,
         excel_data: ProcessedExcelData,
         pptx_data: PPTXConversionResponse,
         request: CreatePresentationRequest,
-    ) -> Dict[str, Any]:
-        """
-        Generate slides data from Excel arrays - matching VB.NET logic.
-        """
-        slides = []
+        excel_artifacts: Dict[str, str],
+    ) -> PresentationData:
+        details: List[DetailItem] = []
+        last_group_name = ""
+        default_template = self._get_template_metadata("Default")
+        default_template_id = default_template["template_id"]
+
+    # 1) Initial PPTX slides (before the Excel-generated slides)
+        ppt_images = pptx_data.images or []
+        prefix_count = 0
+        if request.page_number > 1 and ppt_images:
+            prefix_count = min(request.page_number - 1, len(ppt_images))
+            for idx in range(prefix_count):
+                image_path = ppt_images[idx]
+                description = Path(image_path).stem.replace("_", " ") if image_path else f"Slide {idx+1}"
+                details.append(DetailItem(
+                    slide_number=idx + 1,
+                    slide_type="Image",
+                    slide_bg_file_name=Path(image_path).as_posix() if image_path else "",
+                    slide_description=description,
+                    group_name="",
+                    category="",
+                    name="",
+                    rationale="",
+                    notation="",
+                    kana="",
+                    logo_filename="",
+                    template_id=0,
+                    name_sub_group=""
+                ))
+
+    # 2) Slides generated from the Excel data
         slide_number = request.page_number
+        total_rows = excel_data.total_rows_processed
 
-        # Determine slide type based on lst_types (A-Z = groups, numbers = individual)
-        for j in range(excel_data.lst_max_item_number + 1):
-            if (
-                excel_data.lst_types[j]
-                and excel_data.lst_types[j].upper() in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-            ):
-                # Group slide
-                slide = self._create_group_slide(
-                    excel_data, pptx_data, j, slide_number, request
+        for index in range(total_rows):
+            marker = (excel_data.lst_types[index] or "").strip().upper()
+            category = (excel_data.lst_categories[index] or "").strip()
+            name = (excel_data.lst_names[index] or "").strip()
+            rationale = (excel_data.lst_rationales[index] or "").strip()
+            notation = (excel_data.lst_notations[index] or "").strip()
+            kana = (excel_data.lst_kana[index] or "").strip()
+            logo = (excel_data.lst_logos[index] or "").strip()
+            name_sub_group = (excel_data.lst_name_sub_groups[index] or "").strip()
+
+            is_group_marker = marker in GROUP_MARKERS
+            has_delimiter = "##" in name or "$$" in name
+            is_grouped_slide = bool(name_sub_group)
+            
+            if category and (not name and not rationale and not notation and not kana and not logo):
+                logger.info(
+                    "🖼️ Adding category header image slide: Index=%s, Category='%s', Name=%s, Rationale=%s, Notation=%s, Kana=%s",
+                    index,
+                    category,
+                    name,
+                    rationale,
+                    notation,
+                    kana
                 )
+                image_path = pptx_builder_service.generate_category_slide_image(
+                    category=category,
+                    display_name=request.display_name,
+                    slide_number=slide_number,
+                    project_type=request.project_type,
+                )
+                details.append(DetailItem(
+                    slide_number=slide_number,
+                    slide_type="Image",
+                    slide_bg_file_name=image_path or "",
+                    slide_description=category,
+                    group_name=last_group_name,
+                    category=category,
+                    name=name,
+                    rationale=excel_data.lst_rationales[index],
+                    notation=excel_data.lst_notations[index],
+                    kana=excel_data.lst_kana[index],
+                    logo_filename=excel_data.lst_logos[index],
+                    template_id=0,
+                    name_sub_group=name_sub_group,
+                ))
+                slide_number += 1
+
+            # 🟢 Group header slide ("A", "B", "C", etc.)
+            elif is_group_marker:
+                logger.info(f"🟢 Adding group header slide: Index={index}, Marker='{marker}'")
+                detail = self._create_group_slide(
+                    excel_data=excel_data,
+                    index=index,
+                    slide_number=slide_number,
+                    request=request,
+                    default_template_id=default_template_id,
+                )
+                last_group_name = detail.group_name or last_group_name
+                details.append(detail)
+                slide_number += 1
+
+            # 🟡 Grouped slide (has a subgroup or delimiter)
+            elif is_grouped_slide or has_delimiter:
+                logger.info(f"🟡 Adding grouped names slide: Index={index}, SubGroup='{name_sub_group}'")
+                detail = self._create_individual_slide(
+                    excel_data=excel_data,
+                    index=index,
+                    slide_number=slide_number,
+                    request=request,
+                    current_group=last_group_name,
+                    default_template_id=default_template_id,
+                )
+                details.append(detail)
+                slide_number += 1
+
+            # 🔵 Individual slide
             else:
-                # Individual slide
-                slide = self._create_individual_slide(
-                    excel_data, pptx_data, j, slide_number, request
+                logger.info(f"🔵 Adding individual name slide: Index={index}, Name='{name}'")
+                detail = self._create_individual_slide(
+                    excel_data=excel_data,
+                    index=index,
+                    slide_number=slide_number,
+                    request=request,
+                    current_group=last_group_name,
+                    default_template_id=default_template_id,
                 )
+                details.append(detail)
+                slide_number += 1
 
-            slides.append(slide)
+    # 3) Summary slide for NW/DW
+        if request.project_type.lower() in {"nw", "dw"}:
+            summary_slide = self._create_summary_slide(
+                slide_number=slide_number,
+                last_group=last_group_name,
+                request=request,
+                default_template_id=default_template_id,
+            )
+            details.append(summary_slide)
             slide_number += 1
 
-        # Create complete structure for DB
-        presentation_data = {
-            "project": request.project,
-            "display_name": request.display_name,
-            "powerpoint_file": f"{request.project}_{request.display_name}.pptx",
-            "excel_file": f"{request.project}_candidates.xlsx",
-            "background_type": request.background_type,
-            "background_name": request.background_name,
-            "page_number": request.page_number,
-            "presentation_type": request.presentation_type,
-            "user_name": request.user_name,
-            "bsr_display_name": request.bsr_display_name or request.display_name,
-            "mobile_link_bsr": request.mobile_link_bsr,
-            "participant_vote": request.participant_vote,
-            "is_wide_ppt": request.is_wide_ppt,
-            "is_aws_email": request.is_aws_email,
-            "details": slides,
-        }
+    # 4) Remaining PPTX slides (after the Excel slides)
+        if ppt_images and prefix_count < len(ppt_images):
+            for tail_idx, image_path in enumerate(ppt_images[prefix_count:], start=1):
+                description = Path(image_path).stem.replace("_", " ") if image_path else f"Slide {prefix_count + tail_idx}"
+                details.append(DetailItem(
+                    slide_number=slide_number,
+                    slide_type="Image",
+                    slide_bg_file_name=Path(image_path).as_posix() if image_path else "",
+                    slide_description=description,
+                    group_name="",
+                    category="",
+                    name="",
+                    rationale="",
+                    notation="",
+                    kana="",
+                    logo_filename="",
+                    template_id=0,
+                    name_sub_group=""
+                ))
+                slide_number += 1
 
-        return presentation_data
+    # Background and template info
+        if request.template_rotation:
+            background_type = "Rotate"
+            background_name = "|".join(request.template_rotation)
+        else:
+            background_type = "Default"
+            background_name = "Default"
 
+        powerpoint_file = pptx_data.pptx_file or ""
+        if not powerpoint_file and excel_artifacts.get("project_dir"):
+            fallback = Path(excel_artifacts["project_dir"]) / "PPT" / f"{request.display_name}.pptx"
+            powerpoint_file = str(fallback)
+
+        excel_file = excel_artifacts.get("download") or excel_artifacts.get("src", "")
+
+        return PresentationData(
+            project=request.project,
+            display_name=request.display_name,
+            powerpoint_file=powerpoint_file,
+            excel_file=excel_file,
+            background_type=request.background_type or background_type,
+            background_name=request.background_name or background_name,
+            page_number=request.page_number,
+            presentation_type=request.presentation_type,
+            user_name=request.user_name,
+            bsr_display_name=request.bsr_display_name or request.display_name,
+            mobile_link_bsr=request.mobile_link_bsr,
+            participant_vote=request.participant_vote,
+            is_wide_ppt=request.is_wide_ppt,
+            is_aws_email=request.is_aws_email,
+            is_design_mode=request.is_design_mode,
+            is_printed=request.presentation_type.lower() == "design",
+            details=details,
+        ).model_dump()
+
+    
     def _create_group_slide(
         self,
         excel_data: ProcessedExcelData,
-        _pptx_data: PPTXConversionResponse,
         index: int,
         slide_number: int,
         request: CreatePresentationRequest,
-    ) -> Dict[str, Any]:
-        """Create a group slide (A-Z types)."""
-        return {
-            "slide_number": slide_number,
-            "slide_type": "Image",
-            "slide_bg_file_name": f"nw_slides/{request.project}/{slide_number:03d}.jpg",
-            "slide_description": excel_data.lst_categories[index],
-            "group_name": excel_data.lst_categories[index],
-            "category": excel_data.lst_categories[index],
-            "name": excel_data.lst_categories[index],  # Group name
-            "rationale": "",
-            "notation": "",
-            "kana": "",
-            "logo_filename": "",
-            "template_id": 0,
-            "name_sub_group": "",
-        }
+        default_template_id: int,
+    ) -> DetailItem:
+        """Create a group slide (A-Z slide types) with improved metadata handling."""
+        slide_type = self._get_slide_type_for_group(
+            request.project_type, request.presentation_type
+        )
+        group_name = excel_data.lst_categories[index] or excel_data.lst_names[index]
 
+        return DetailItem(
+            slide_number=slide_number,
+            slide_type=slide_type,
+            slide_bg_file_name=self._get_default_group_background(
+                request, slide_number
+            ),
+            slide_description=group_name,
+            group_name=group_name,
+            category=excel_data.lst_categories[index],
+            name=group_name,
+            rationale="",
+            notation="",
+            kana="",
+            logo_filename="",
+            template_id=default_template_id,
+            name_sub_group="",
+        )
+        
     def _create_individual_slide(
         self,
         excel_data: ProcessedExcelData,
-        _pptx_data: PPTXConversionResponse,
         index: int,
         slide_number: int,
-        _request: CreatePresentationRequest,
-    ) -> Dict[str, Any]:
-        """Create an individual name evaluation slide."""
-        return {
-            "slide_number": slide_number,
-            "slide_type": "NameEvaluation",
-            "slide_bg_file_name": "",  # Will be assigned with template rotation
-            "slide_description": f"{excel_data.lst_names[index]} - Name Evaluation",
-            "group_name": excel_data.lst_categories[index] or "Default",
-            "category": excel_data.lst_categories[index],
-            "name": excel_data.lst_names[index],
-            "rationale": excel_data.lst_rationales[index],
-            "notation": excel_data.lst_notations[index],
-            "kana": excel_data.lst_kana[index],
-            "logo_filename": excel_data.lst_logos[index],
-            "template_id": 0,  # Will be updated with template
-            "name_sub_group": excel_data.lst_name_sub_groups[index],
-        }
+        request: CreatePresentationRequest,
+        current_group: str,
+        default_template_id: int,
+    ) -> DetailItem:
+        """Create an individual name evaluation slide while tracking the current group."""
+        slide_type = self._get_slide_type_for_individual(
+            request.project_type, request.presentation_type
+        )
+        group_name = current_group or excel_data.lst_categories[index]
+
+        return DetailItem(
+            slide_number=slide_number,
+            slide_type=slide_type,
+            slide_bg_file_name="",  # Will be assigned with template rotation
+            slide_description=f"{excel_data.lst_names[index]} - Name Evaluation",
+            group_name=group_name,
+            category=excel_data.lst_categories[index],
+            name=excel_data.lst_names[index],
+            rationale=excel_data.lst_rationales[index],
+            notation=excel_data.lst_notations[index],
+            kana=excel_data.lst_kana[index],
+            logo_filename=excel_data.lst_logos[index],
+            template_id=default_template_id,  # May be updated with template rotation
+            name_sub_group=excel_data.lst_name_sub_groups[index],
+        )
+
+    def _create_summary_slide(
+        self,
+        slide_number: int,
+        last_group: str,
+        request: CreatePresentationRequest,
+        default_template_id: int,
+    ) -> DetailItem:
+        """Create a summary slide for NW/DW projects."""
+        return DetailItem(
+            slide_number=slide_number,
+            slide_type="NameSummary",
+            slide_bg_file_name=self._get_default_group_background(
+                request, slide_number
+            ),
+            slide_description="Brainstorm",
+            group_name=last_group,
+            category="",
+            name="",
+            rationale="",
+            notation="",
+            kana="",
+            logo_filename="",
+            template_id=default_template_id,
+            name_sub_group="",
+        )
+
+    def _create_existing_ppt_slides(
+        self,
+        pptx_data: PPTXConversionResponse,
+        *,
+        max_slides: Optional[int] = None,
+        start_slide_number: int = 0,
+    ) -> Tuple[List[Dict[str, Any]], int]:
+        """Create slides from existing PPT images.
+
+        Returns a tuple of (slides, last_slide_number).
+        """
+        slides: List[Dict[str, Any]] = []
+        slide_number = start_slide_number
+
+        for index, image_path in enumerate(pptx_data.images, start=1):
+            if max_slides is not None and len(slides) >= max_slides:
+                break
+
+            slide_number += 1
+
+            slide_description = f"Slide {index}"
+            slide_source = ""
+
+            if image_path:
+                slide_source = image_path
+
+                if "://" in image_path:
+                    parsed = urlparse(image_path)
+                    filename = Path(parsed.path).name
+                    if filename:
+                        slide_description = Path(filename).stem.replace("_", " ")
+                else:
+                    slide_description = Path(image_path).stem.replace("_", " ")
+                    slide_source = Path(image_path).as_posix()
+
+            slides.append(
+                {
+                    "slide_number": slide_number,
+                    "slide_type": "Image",
+                    "slide_bg_file_name": slide_source,
+                    "slide_description": slide_description,
+                    "group_name": "",
+                    "category": "",
+                    "name": "",
+                    "rationale": "",
+                    "notation": "",
+                    "kana": "",
+                    "logo_filename": "",
+                    "template_id": 0,
+                    "name_sub_group": "",
+                }
+            )
+
+        return slides, slide_number
+
+    def _get_default_group_background(
+        self, request: CreatePresentationRequest, slide_number: int
+    ) -> str:
+        """Get the default background image path for group slides."""
+        project_folder = request.display_name if request.display_name else request.project
+        base_folder = (
+            "BRS_slides"
+            if request.project_type.lower() in {"bsr", "nsr"}
+            else "nw_slides"
+        )
+        return f"{base_folder}/{project_folder}/{slide_number:03d}.jpg"
+
+    def _get_slide_type_for_group(self, project_type: str, presentation_type: str) -> str:
+        """Get the slide type for group slides based on the project type."""
+        if presentation_type == "Normal-NoNeutral":
+            return "NameEvaluation_noNeutral"
+        if project_type.lower() == "bsr":
+            return "BSR_Group"
+        if project_type.lower() == "nsr":
+            return "NSR_Group"
+        return "NameEvaluation"
+
+    def _get_slide_type_for_individual(
+        self, project_type: str, presentation_type: str
+    ) -> str:
+        """Get the slide type for individual slides based on the project type."""
+        if presentation_type == "Normal-NoNeutral":
+            return "NameEvaluation_noNeutral"
+        if project_type.lower() == "bsr":
+            return "BSR-Japan" if "Japan" in presentation_type else "BSR"
+        if project_type.lower() == "nsr":
+            return "NSR-Japan" if "Japan" in presentation_type else "NSR"
+        return "NameEvaluation"
 
     def _apply_template_rotation(
         self, slides_data: Dict[str, Any], template_rotation: List[str]
     ) -> Dict[str, Any]:
-        """Apply template rotation to slides."""
+        """Apply template rotation to slides with improved logic."""
         if not template_rotation:
             return slides_data
 
-        for i, slide in enumerate(slides_data["details"]):
-            template_index = i % len(template_rotation)
-            slide["slide_bg_file_name"] = template_rotation[template_index]
-            slide["template_id"] = self._get_template_id(
-                template_rotation[template_index]
+        templates = [item.strip() for item in template_rotation if item and item.strip()]
+        if not templates:
+            return slides_data
+
+        template_cache: Dict[str, Dict[str, Any]] = {}
+        rotation_index = 0
+
+        for slide in slides_data["details"]:
+            # Skip group slides, summary slides, and image slides
+            slide_type = (slide.get("slide_type", "")).lower()
+            if slide_type in {"image", "namesummary"}:
+                continue
+
+            # Skip if this is a group slide (group name == slide description)
+            is_group_slide = (
+                slide.get("group_name", "").strip().lower()
+                == slide.get("slide_description", "").strip().lower()
             )
+            if is_group_slide or not slide.get("name"):
+                continue
+
+            template_name = templates[rotation_index % len(templates)]
+
+            # Get template metadata with caching
+            if template_name not in template_cache:
+                template_cache[template_name] = self._get_template_metadata(
+                    template_name
+                )
+
+            metadata = template_cache[template_name]
+            slide["slide_bg_file_name"] = ""
+            slide["template_id"] = metadata["template_id"]
+            rotation_index += 1
 
         return slides_data
 
-    def _get_template_id(self, template_name: str) -> int:
-        """Get template ID from template name by querying the database."""
-        try:
-            conn = get_db_connection()
-            if not conn:
-                logger.warning(
-                    "Could not connect to database for template lookup, using default template"
-                )
-                return 5  # Default template
+    def _get_template_metadata(self, template_name: str) -> Dict[str, Any]:
+        """Get template metadata from the database with robust error handling."""
+        metadata = {"template_id": 5, "background": template_name}
 
+        conn = None
+        cursor = None
+        try:
+            conn = create_connection()
             cursor = conn.cursor()
 
-            # Query the nw_Templates table for the template ID
             sql = (
                 "SELECT TOP 1 templateid "
                 "FROM [BI_GUIDELINES].dbo.nw_Templates "
@@ -268,173 +641,258 @@ class PresentationService:
             )
 
             cursor.execute(sql, (template_name,))
-
             row = cursor.fetchone()
-            cursor.close()
-            conn.close()
 
-            if row:
-                return row[0]
+            if row and row[0]:
+                metadata["template_id"] = int(row[0])
             else:
                 logger.warning(
                     "Template '%s' not found in database, using default template",
                     template_name,
                 )
-                return 5  # Default template
 
-        except Exception as e:  # pylint: disable=broad-except
-            logger.error(
-                "Error getting template ID for '%s': %s", template_name, str(e)
+        except DatabaseConnectionError as exc:
+            logger.warning(
+                "Could not connect to database for template lookup (%s), using default template",
+                exc,
             )
-            return 5  # Default template on error
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.error(
+                "Error getting template metadata for '%s': %s", template_name, str(exc)
+            )
+        finally:
+            if cursor:
+                cursor.close()
+            if conn:
+                conn.close()
+
+        return metadata
+
+    def _generate_feedback_document(
+        self, presentation_id: int, request: CreatePresentationRequest, excel_data: ProcessedExcelData
+    ) -> str:
+        """Generate a feedback template document when the Word service is available."""
+        if not self.word_service:
+            logger.debug("Skipping feedback document generation because Word service is not configured.")
+            return ""
+        try:
+            return self.word_service.generate_feedback_template(
+                presentation_id=presentation_id,
+                project_type=request.project_type,
+                presentation_type=request.presentation_type,
+                excel_data=excel_data,
+                display_name=request.display_name,
+                user_name=request.user_name,
+            )
+        except Exception as e:
+            logger.error("Error generating feedback document: %s", str(e))
+            return ""
+
+    def _send_notification_emails(self, presentation_id: int, request: CreatePresentationRequest):
+        """Send notification emails when the Email service is available."""
+        if not self.email_service:
+            logger.debug("Skipping notification emails because Email service is not configured.")
+            return
+        try:
+            self.email_service.send_presentation_emails(
+                presentation_id=presentation_id,
+                presentation_type=request.presentation_type,
+                project_type=request.project_type,
+                display_name=request.display_name,
+                user_name=request.user_name,
+                participant_vote=bool(request.participant_vote),
+                is_wide_ppt=bool(request.is_wide_ppt),
+            )
+        except Exception as e:
+            logger.error("Error sending notification emails: %s", str(e))
+            # Don't raise - emails are not critical for the main flow
 
     def _create_presentation_in_db(
-        self, slides_data: Dict[str, Any], _request: CreatePresentationRequest
+        self, slides_data: Dict[str, Any], request: CreatePresentationRequest
     ) -> Dict[str, Any]:
         """Create presentation in database using BI Guidelines functionality directly."""
+        # Validate supported project types (placeholder for future stricter rules)
+        if request.project_type.lower() not in {"nw", "dw"}:
+            logger.warning(
+                "Project type '%s' may not be fully supported", request.project_type
+            )
+
+        conn = None
+        cursor = None
         try:
-            # Prepare the data for the BI Guidelines functionality
-            presentation_payload = PresentationData(
-                project=slides_data["project"],
-                display_name=slides_data["display_name"],
-                powerpoint_file=slides_data["powerpoint_file"],
-                excel_file=slides_data["excel_file"],
-                background_type=slides_data["background_type"],
-                background_name=slides_data["background_name"],
-                page_number=slides_data["page_number"],
-                presentation_type=slides_data["presentation_type"],
-                user_name=slides_data["user_name"],
-                bsr_display_name=slides_data["bsr_display_name"],
-                mobile_link_bsr=slides_data.get("mobile_link_bsr"),
-                participant_vote=slides_data["participant_vote"],
-                is_wide_ppt=slides_data["is_wide_ppt"],
-                is_aws_email=slides_data["is_aws_email"],
-                details=[
-                    DetailItem(
-                        slide_number=slide["slide_number"],
-                        slide_type=slide["slide_type"],
-                        slide_bg_file_name=slide.get("slide_bg_file_name", ""),
-                        slide_description=slide["slide_description"],
-                        group_name=slide.get("group_name"),
-                        category=slide.get("category"),
-                        name=slide.get("name"),
-                        rationale=slide.get("rationale"),
-                        notation=slide.get("notation"),
-                        kana=slide.get("kana"),
-                        logo_filename=slide.get("logo_filename"),
-                        template_id=slide.get("template_id", 0),
-                        name_sub_group=slide.get("name_sub_group"),
-                    )
-                    for slide in slides_data.get("details", [])
-                ],
-            )
-
-            # Use BI Guidelines functionality directly instead of HTTP call
-            logger.info(
-                "Creating presentation in database using BI Guidelines functionality"
-            )
-
-            conn = get_db_connection()
-            if not conn:
-                raise HTTPException(
-                    status_code=500, detail="Could not connect to database."
-                )
-
-            cursor = conn.cursor()
-
-            # Start transaction
-            cursor.execute("SET NOCOUNT ON;")
-
-            # 1. Insert into the master table
-            master_sql = """
-                EXEC [dbo].[nw_InsertPresentationMaster_sep2025]
-                    @Project=?, @DisplayName=?, @MainPptFileName=?, @NameCandidateFileName=?,
-                    @NameCandidateBGType=?, @NameCandidateBGName=?, @NameCandidateStartingSlide=?,
-                    @PresentationType=?, @UploadedBy=?, @BSRDisplayName=?,
-                    @isParticipantsVote=?, @isWideScreenPPT=?, @isAWSLinkReq=?;
-            """
-            master_params = (
-                presentation_payload.project,
-                presentation_payload.display_name,
-                presentation_payload.powerpoint_file,
-                presentation_payload.excel_file,
-                presentation_payload.background_type,
-                presentation_payload.background_name,
-                presentation_payload.page_number,
-                presentation_payload.presentation_type,
-                presentation_payload.user_name,
-                presentation_payload.bsr_display_name,
-                presentation_payload.participant_vote,
-                presentation_payload.is_wide_ppt,
-                presentation_payload.is_aws_email,
-            )
-
-            logger.info("Executing master stored procedure...")
-            cursor.execute(master_sql, master_params)
-
-            # Get the presentation_id
-            presentation_id = None
-            while True:
-                try:
-                    row = cursor.fetchone()
-                    if row:
-                        presentation_id = row[0]
-                        logger.info("PresentationId created: %s", presentation_id)
-                        break
-                except Exception as e:  # pylint: disable=broad-except
-                    logger.error("Error fetching presentation ID: %s", e)
-                if not cursor.nextset():
-                    break
-
-            if not presentation_id:
+            try:
+                conn = create_connection()
+            except DatabaseConnectionError as exc:
+                logger.error("Could not connect to database: %s", exc)
                 raise HTTPException(
                     status_code=500,
-                    detail="Could not get PresentationId from the master record.",
-                )
+                    detail="Could not connect to database.",
+                ) from exc
 
-            # 2. Insert into the details table
-            detail_sql = """
-                EXEC [dbo].[nw_InsertPresentationDetail_copy]
-                    @PresentationId=?, @SlideNumber=?, @SlideType=?, @SlideBGFileName=?,
-                    @SlideDescription=?, @NameGroup=?, @NameCategory=?, @Name=?,
-                    @NameRationale=?, @NameNotation=?, @KanaNames=?, @NameLogo=?,
-                    @TemplateId=?, @NameSubGroup=?;
-            """
-            for item in presentation_payload.details:
-                detail_params = (
-                    presentation_id,
-                    item.slide_number,
-                    item.slide_type,
-                    item.slide_bg_file_name,
-                    item.slide_description,
-                    item.group_name,
-                    item.category,
-                    item.name,
-                    item.rationale,
-                    item.notation,
-                    item.kana,
-                    item.logo_filename,
-                    item.template_id,
-                    item.name_sub_group,
-                )
-                cursor.execute(detail_sql, detail_params)
+            cursor = conn.cursor()
+            cursor.execute("SET NOCOUNT ON;")
 
-            # Commit the transaction
+            # Delete existing presentation before inserting new records
+            self._delete_existing_presentation(cursor, slides_data)
+
+            # Insert master record
+            presentation_id = self._insert_master_record(cursor, slides_data)
+
+            # Insert detail records
+            self._insert_detail_records(cursor, presentation_id, slides_data)
+
             conn.commit()
-            logger.info("Presentation created successfully in database")
-
-            cursor.close()
-            conn.close()
+            logger.info("Presentation created successfully in database: %s", presentation_id)
 
             return {
                 "message": "Presentation created successfully.",
                 "presentation_id": presentation_id,
             }
 
-        except Exception as e:
-            error_msg = f"Error creating presentation in database: {str(e)}"
+        except Exception as exc:
+            if conn:
+                conn.rollback()
+            error_msg = f"Error creating presentation in database: {exc}"
             logger.error(error_msg)
-            raise HTTPException(status_code=500, detail=error_msg) from e
+            raise HTTPException(status_code=500, detail=error_msg) from exc
+        finally:
+            if cursor:
+                cursor.close()
+            if conn:
+                conn.close()
+
+    def _delete_existing_presentation(self, cursor, slides_data: Dict[str, Any]) -> None:
+        """Delete existing presentation if it exists."""
+        try:
+            logger.info(
+                "Deleting existing presentation if exists: %s / %s",
+                slides_data["project"],
+                slides_data["display_name"],
+            )
+            cursor.execute(
+                "EXEC [dbo].[nw_DeletePresentation] ?, ?",
+                (slides_data["project"], slides_data["display_name"]),
+            )
+        except Exception as exc:
+            logger.warning("Error deleting existing presentation: %s", exc)
+            # Continue - this is not critical
+
+    def _insert_master_record(self, cursor, slides_data: Dict[str, Any]) -> int:
+        """Insert the master presentation record with improved handling."""
+        master_sql = """
+            EXEC [dbo].[nw_InsertPresentationMaster_sep2025]
+                @Project=?, @DisplayName=?, @MainPptFileName=?, @NameCandidateFileName=?,
+                @NameCandidateBGType=?, @NameCandidateBGName=?, @NameCandidateStartingSlide=?,
+                @PresentationType=?, @UploadedBy=?, @BSRDisplayName=?,
+                @isParticipantsVote=?, @isWideScreenPPT=?, @isAWSLinkReq=?;
+        """
+        master_params = (
+            slides_data["project"],
+            slides_data["display_name"],
+            slides_data["powerpoint_file"],
+            slides_data["excel_file"],
+            slides_data["background_type"],
+            slides_data["background_name"],
+            slides_data["page_number"],
+            slides_data["presentation_type"],
+            slides_data["user_name"],
+            slides_data["bsr_display_name"],
+            slides_data["participant_vote"],
+            slides_data["is_wide_ppt"],
+            slides_data["is_aws_email"],
+        )
+
+        logger.info("Executing master stored procedure...")
+        cursor.execute(master_sql, master_params)
+
+        presentation_id = None
+        while True:
+            try:
+                row = cursor.fetchone()
+                if row:
+                    presentation_id = int(row[0])
+                    logger.info("PresentationId created: %s", presentation_id)
+                    break
+            except Exception as exc:  # pylint: disable=broad-except
+                message = str(exc)
+                if "No results" in message and "Previous SQL" in message:
+                    logger.debug(
+                        "Stored procedure returned no result set for presentation ID; applying fallback lookup."
+                    )
+                else:
+                    logger.error("Error fetching presentation ID: %s", message)
+            if not cursor.nextset():
+                break
+
+        if not presentation_id:
+            presentation_id = self._lookup_presentation_id(cursor, slides_data)
+
+        if not presentation_id:
+            raise HTTPException(
+                status_code=500,
+                detail="Could not get PresentationId from the master record.",
+            )
+
+        return presentation_id
+
+    def _lookup_presentation_id(
+        self, cursor, slides_data: Dict[str, Any]
+    ) -> Optional[int]:
+        """Fallback lookup for presentation ID when stored procedure returns no result set."""
+        try:
+            lookup_sql = (
+                "SELECT TOP 1 PresentationId "
+                "FROM [BI_GUIDELINES].[dbo].[nw_Master] "
+                "WHERE Project = ? AND DisplayName = ? "
+                "ORDER BY PresentationId DESC"
+            )
+            cursor.execute(lookup_sql, (slides_data["project"], slides_data["display_name"]))
+            row = cursor.fetchone()
+            if row and row[0]:
+                presentation_id = int(row[0])
+                logger.info(
+                    "PresentationId resolved via fallback lookup: %s", presentation_id
+                )
+                return presentation_id
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.warning(
+                "Fallback presentation ID lookup failed for %s/%s: %s",
+                slides_data.get("project"),
+                slides_data.get("display_name"),
+                exc,
+            )
+        return None
+
+    def _insert_detail_records(
+        self, cursor, presentation_id: int, slides_data: Dict[str, Any]
+    ) -> None:
+        """Insert detail records for each slide while handling null values."""
+        detail_sql = """
+            EXEC [dbo].[nw_InsertPresentationDetail_copy]
+                @PresentationId=?, @SlideNumber=?, @SlideType=?, @SlideBGFileName=?,
+                @SlideDescription=?, @NameGroup=?, @NameCategory=?, @Name=?,
+                @NameRationale=?, @NameNotation=?, @KanaNames=?, @NameLogo=?,
+                @TemplateId=?, @NameSubGroup=?;
+        """
+        
+        for slide in slides_data["details"]:
+            detail_params = (
+                presentation_id,
+                slide["slide_number"],
+                slide["slide_type"],
+                slide.get("slide_bg_file_name") or "",
+                slide.get("slide_description") or "",
+                slide.get("group_name") or "",
+                slide.get("category") or "",
+                slide.get("name") or "",
+                slide.get("rationale") or "",
+                slide.get("notation") or "",
+                slide.get("kana") or "",
+                slide.get("logo_filename") or "",
+                slide.get("template_id", 0),
+                slide.get("name_sub_group") or "",
+            )
+            cursor.execute(detail_sql, detail_params)
 
 
 # Global presentation service instance

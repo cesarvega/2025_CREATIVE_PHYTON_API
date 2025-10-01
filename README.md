@@ -320,8 +320,8 @@ Converts a PPTX file to images and extracts titles.
   "conversion_id": "PROJECT_EXAMPLE",
   "project_type": "nw",
   "total_images": 15,
-  "images": ["http://bipresents.com/nw2/nw_slides/PROJECT_EXAMPLE/slide_1.png"],
-  "thumbnails": ["http://bipresents.com/nw2/nw_slides/PROJECT_EXAMPLE/Thumbnails/slide_1.png"],
+  "images": ["/nw_slides/PROJECT_EXAMPLE/slide_1.png"],
+  "thumbnails": ["/nw_slides/PROJECT_EXAMPLE/Thumbnails/slide_1.png"],
   "titles": ["Slide Title 1", "Slide Title 2"],
   "pptx_file": "presentation.pptx"
 }

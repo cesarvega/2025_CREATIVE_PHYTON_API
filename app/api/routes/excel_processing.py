@@ -82,9 +82,9 @@ async def process_excel_file(
         # Generate processing ID for tracking
         processing_id = str(uuid.uuid4())
 
-        response = ExcelProcessingResponse(
+        response = ExcelProcessingResponse.from_processed(
+            processed=processed_data,
             message=f"Successfully processed {file.filename}",
-            data=processed_data,
             processing_id=processing_id,
         )
 

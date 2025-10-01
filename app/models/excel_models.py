@@ -1,113 +1,157 @@
-"""
-Excel processing models for data transformation.
-"""
+"""Models representing Excel parsing results for the FastAPI parity implementation."""
 
-from typing import List, Optional
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Dict, List
 
 from pydantic import BaseModel, Field
 
-from app.models.response_models import PPTXConversionResponse
+
+@dataclass
+class ProcessedExcelData:
+    """Container that mirrors the arrays produced by the original VB.NET clsExcel class."""
+
+    lst_types: List[str] = field(default_factory=list)
+    lst_categories: List[str] = field(default_factory=list)
+    lst_names: List[str] = field(default_factory=list)
+    lst_rationales: List[str] = field(default_factory=list)
+    lst_notations: List[str] = field(default_factory=list)
+    lst_kana: List[str] = field(default_factory=list)
+    lst_logos: List[str] = field(default_factory=list)
+    lst_name_sub_groups: List[str] = field(default_factory=list)
+
+    # Derived metadata
+    total_rows_processed: int = 0
+    candidate_count: int = 0
+    group_count: int = 0
+    has_groups: bool = False
+    is_phonetics: bool = False
+
+    # Optional helpers used during PPT/Word generation
+    group_row_indexes: List[int] = field(default_factory=list)
+    candidate_row_indexes: List[int] = field(default_factory=list)
+    rotation_reset_indexes: List[int] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.total_rows_processed = len(self.lst_types)
+        self.candidate_row_indexes = [
+            idx
+            for idx, marker in enumerate(self.lst_types)
+            if marker is None
+            or marker == ""
+            or not marker.strip()
+            or marker.strip().upper() not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        ]
+        self.group_row_indexes = [
+            idx
+            for idx, marker in enumerate(self.lst_types)
+            if marker and marker.strip().upper() in "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        ]
+        self.candidate_count = len(self.candidate_row_indexes)
+        self.group_count = len(self.group_row_indexes)
+        self.has_groups = self.group_count > 0
+
+        # Rotation should reset after each group marker and at the beginning.
+        rotation_points: List[int] = [idx for idx in self.group_row_indexes]
+        if 0 not in rotation_points:
+            rotation_points.insert(0, 0)
+        self.rotation_reset_indexes = sorted(set(rotation_points))
+
+    @property
+    def lst_max_item_number(self) -> int:
+        """Match VB convention where the arrays are 0-based and expose the max index."""
+        return max(len(self.lst_types) - 1, 0)
+
+    def row_dict(self, index: int) -> Dict[str, Any]:
+        """Return the row content as a dictionary for convenience."""
+        return {
+            "type": self._safe_get(self.lst_types, index),
+            "category": self._safe_get(self.lst_categories, index),
+            "name": self._safe_get(self.lst_names, index),
+            "rationale": self._safe_get(self.lst_rationales, index),
+            "notation": self._safe_get(self.lst_notations, index),
+            "kana": self._safe_get(self.lst_kana, index),
+            "logo": self._safe_get(self.lst_logos, index),
+            "name_sub_group": self._safe_get(self.lst_name_sub_groups, index),
+        }
+
+    def as_dict(self) -> Dict[str, Any]:
+        """Serialize to a JSON-friendly dict for API responses."""
+        return {
+            "lst_types": self.lst_types,
+            "lst_categories": self.lst_categories,
+            "lst_names": self.lst_names,
+            "lst_rationales": self.lst_rationales,
+            "lst_notations": self.lst_notations,
+            "lst_kana": self.lst_kana,
+            "lst_logos": self.lst_logos,
+            "lst_name_sub_groups": self.lst_name_sub_groups,
+            "total_rows_processed": self.total_rows_processed,
+            "candidate_count": self.candidate_count,
+            "group_count": self.group_count,
+            "has_groups": self.has_groups,
+            "is_phonetics": self.is_phonetics,
+            "group_row_indexes": self.group_row_indexes,
+            "candidate_row_indexes": self.candidate_row_indexes,
+            "rotation_reset_indexes": self.rotation_reset_indexes,
+        }
+
+    @staticmethod
+    def _safe_get(values: List[str], index: int) -> str:
+        try:
+            return values[index]
+        except IndexError:
+            return ""
 
 
-class ExcelRowData(BaseModel):
-    """Represents a single row of data from the Excel file."""
-
-    # Column A: Type (A-Z for groups, numbers for individual items)
-    Type: Optional[str] = None
-
-    # Column B: Category
-    Category: Optional[str] = None
-
-    # Column C: Name + Notation combined (needs getTestName processing)
-    NameWithNotation: Optional[str] = None
-
-    # Column D: Rationale
-    Rationale: Optional[str] = None
-
-    # Column E: Kana (Japanese reading)
-    Kana: Optional[str] = None
-
-    # Column F: Logo filename
-    Logo: Optional[str] = None
-
-    # Column G/H: NameSubGroup (depending on configuration)
-    NameSubGroup: Optional[str] = None
 
 
-class ProcessedExcelData(BaseModel):
-    """Data structure containing processed Excel arrays."""
+class ProcessedExcelDataModel(BaseModel):
+    """Pydantic representation of processed Excel data for API responses."""
 
-    # Array data structure for Excel processing
+    lst_types: List[str] = Field(default_factory=list)
     lst_categories: List[str] = Field(default_factory=list)
     lst_names: List[str] = Field(default_factory=list)
     lst_rationales: List[str] = Field(default_factory=list)
     lst_notations: List[str] = Field(default_factory=list)
-    lst_types: List[str] = Field(default_factory=list)
     lst_kana: List[str] = Field(default_factory=list)
     lst_logos: List[str] = Field(default_factory=list)
     lst_name_sub_groups: List[str] = Field(default_factory=list)
-
-    # Metadata
-    lst_max_item_number: int = 0
     total_rows_processed: int = 0
+    candidate_count: int = 0
+    group_count: int = 0
+    has_groups: bool = False
+    is_phonetics: bool = False
+    group_row_indexes: List[int] = Field(default_factory=list)
+    candidate_row_indexes: List[int] = Field(default_factory=list)
+    rotation_reset_indexes: List[int] = Field(default_factory=list)
 
-
-class ExcelProcessingRequest(BaseModel):
-    """Request parameters for Excel processing."""
-
-    presentation_id: Optional[str] = ""
-    display_name: Optional[str] = ""
-    start_index: Optional[int] = 0
-    is_phonetics: Optional[bool] = False
-    has_groups: Optional[bool] = False
+    @classmethod
+    def from_processed(cls, data: "ProcessedExcelData") -> "ProcessedExcelDataModel":
+        return cls(**data.as_dict())
 
 
 class ExcelProcessingResponse(BaseModel):
-    """Response model for Excel processing - returns processed data arrays."""
+    """Response schema for Excel processing endpoint."""
 
     message: str
-    data: ProcessedExcelData
-    processing_id: Optional[str] = None
+    data: ProcessedExcelDataModel
+    processing_id: str
+
+    @classmethod
+    def from_processed(
+        cls, *, processed: "ProcessedExcelData", message: str, processing_id: str
+    ) -> "ExcelProcessingResponse":
+        return cls(
+            message=message,
+            data=ProcessedExcelDataModel.from_processed(processed),
+            processing_id=processing_id,
+        )
 
 
-class CreatePresentationRequest(BaseModel):
-    """Request model for creating a complete presentation."""
-
-    # Input files (processed internally by the service)
-    excel_file: bytes  # Excel file content
-    pptx_file: bytes  # PPTX file content
-
-    # Processing parameters
-    excel_filename: str = "data.xlsx"
-    pptx_filename: str = "presentation.pptx"
-    is_phonetics: bool = False
-    has_groups: bool = False
-
-    # Presentation data
-    project: str
-    display_name: str
-    presentation_type: str = "Nonproprietary"
-    user_name: str
-    bsr_display_name: Optional[str] = None
-    mobile_link_bsr: Optional[str] = None
-    participant_vote: int = 1
-    is_wide_ppt: int = 0
-    is_aws_email: int = 0
-
-    # Additional configuration
-    background_type: str = "Image"
-    background_name: str = ""
-    page_number: int = 1
-    project_type: str = "bipresents"  # "bipresents" or "nw"
-    template_rotation: Optional[List[str]] = None  # List of templates for rotation
-
-
-class CreatePresentationResponse(BaseModel):
-    """Response model for presentation creation."""
-
-    message: str
-    presentation_id: Optional[int] = None
-    total_slides: int = 0
-    excel_data: ProcessedExcelData
-    pptx_data: PPTXConversionResponse
-    processing_time_seconds: float
+__all__ = [
+    "ProcessedExcelData",
+    "ProcessedExcelDataModel",
+    "ExcelProcessingResponse",
+]

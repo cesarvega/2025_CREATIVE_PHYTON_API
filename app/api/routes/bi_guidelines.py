@@ -10,65 +10,87 @@ import pyodbc
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 
-from app.config.settings import settings
-from app.models.nw_master_request import PresentationData
+from app.config.db import DatabaseConnectionError, create_connection
+from app.models.bi_guidelines_models import NWMasterRequest
+from app.models.presentation_models import PresentationData
 
 router = APIRouter(prefix="/bi_guidelines", tags=["BI Guidelines"])
 logger = logging.getLogger(__name__)
-
-
-def get_db_connection():
-    """Return a connection to the BI_GUIDELINES database."""
-    connection_string = settings.sql_connection_string
-    try:
-        conn = pyodbc.connect(connection_string)  # pylint: disable=c-extension-no-member
-        logger.info("Database connection established successfully.")
-        return conn
-    except pyodbc.Error as e:  # pylint: disable=c-extension-no-member
-        logger.error("Database connection error: %s", e)
-        return None
 
 
 class PresentationNotFoundError(Exception):
     """Custom exception for when a presentation is not found."""
 
 
-@router.post("/presentations/", status_code=201)
-async def create_presentation(data: PresentationData):
-    """
-    Creates a new master presentation record and its associated detail records.
-
-    This endpoint handles the creation of presentation records:
-    1. Starts a transaction.
-    2. Calls the `nw_InsertPresentationMaster_sep2025` stored procedure
-       to create the master record.
-    3. Gets the returned `PresentationId`.
-    4. Iterates over the details and calls `nw_InsertPresentationDetail_copy`
-       for each one.
-    5. If everything is successful, it commits the transaction.
-       If anything fails, it rolls back.
-    """
+@router.get("/nw-master")
+async def get_nw_master():
+    """Return the top 1000 rows from the nw_Master table."""
     conn = None
     try:
-        conn = get_db_connection()
-        if not conn:
+        try:
+            conn = create_connection()
+        except DatabaseConnectionError as exc:
+            logger.error("Could not connect to database: %s", exc)
+            return JSONResponse(
+                status_code=500,
+                content={"error": "Could not connect to database."},
+            )
+
+        cursor = conn.cursor()
+        query = """
+        SELECT TOP (1000) [PresentationId], [Project], [DisplayName], [MainPptFileName],
+            [NameCandidateFileName], [NameCandidateBGType], [NameCandidateBGName],
+            [NameCandidateStartingSlide], [UploadedBy], [UploadedDate], [PresentationStatus],
+            [PresentationOpenDate], [NotesExplore], [NotesAvoid], [LastUpdateDate],
+            [PresentationType], [BSRDisplayName], [isParticipantsVote],
+            [show_EngKat_in_groups], [isWideScreenPPT], [isAWSLinkReq], [isWide]
+        FROM [BI_GUIDELINES].[dbo].[nw_Master]
+        """
+        cursor.execute(query)
+        columns = [column[0] for column in cursor.description]
+        rows = cursor.fetchall()
+        result = [dict(zip(columns, row)) for row in rows]
+        cursor.close()
+        return result
+
+    except pyodbc.Error as exc:  # pylint: disable=c-extension-no-member
+        logger.error("Database query failed: %s", exc)
+        return JSONResponse(status_code=500, content={"error": str(exc)})
+    finally:
+        if conn:
+            conn.close()
+
+
+@router.post("/nw-master/validate")
+async def validate_nw_master(data: NWMasterRequest):
+    """Validate nw_master data using the Pydantic model."""
+
+    return {"validated_data": data.dict()}
+
+
+@router.post("/presentations/", status_code=201)
+async def create_presentation(data: PresentationData):
+    """Create a new presentation master record and associated detail records."""
+    conn = None
+    try:
+        try:
+            conn = create_connection()
+        except DatabaseConnectionError as exc:
+            logger.error("Could not connect to database: %s", exc)
             raise HTTPException(
                 status_code=500,
                 detail="Could not connect to database."
-            )
+            ) from exc
 
         cursor = conn.cursor()
 
         cursor.execute("SELECT DB_NAME(), @@SERVERNAME;")
         db_row = cursor.fetchone()
-        print(f"Connected to DB: {db_row[0]} on Server: {db_row[1]}")
+        if db_row:
+            print(f"Connected to DB: {db_row[0]} on Server: {db_row[1]}")
 
-        # Start transaction
-        cursor.execute(
-            "SET NOCOUNT ON;"
-        )  # Prevents empty result sets from 'X rows affected'
+        cursor.execute("SET NOCOUNT ON;")
 
-        # 1. Insert into the master table
         master_sql = """
             EXEC [dbo].[nw_InsertPresentationMaster_sep2025]
                 @Project=?, @DisplayName=?, @MainPptFileName=?, @NameCandidateFileName=?,
@@ -95,7 +117,6 @@ async def create_presentation(data: PresentationData):
         print("Executing master stored procedure...")
         cursor.execute(master_sql, master_params)
 
-        # Force moving through possible result sets until the final SELECT is found
         presentation_id = None
         while True:
             try:
@@ -114,7 +135,6 @@ async def create_presentation(data: PresentationData):
                 "Could not get PresentationId from the master record."
             )
 
-        # 2. Insert into the details table
         detail_sql = """
             EXEC [dbo].[nw_InsertPresentationDetail_copy]
                 @PresentationId=?, @SlideNumber=?, @SlideType=?, @SlideBGFileName=?,
@@ -141,7 +161,6 @@ async def create_presentation(data: PresentationData):
             )
             cursor.execute(detail_sql, detail_params)
 
-        # Commit the transaction
         conn.commit()
         print("Changes committed to database.")
 
@@ -150,17 +169,17 @@ async def create_presentation(data: PresentationData):
             "presentation_id": presentation_id,
         }
 
-    except pyodbc.Error as e:  # pylint: disable=c-extension-no-member
-        logger.exception("Transaction failed: %s", e)
+    except pyodbc.Error as exc:  # pylint: disable=c-extension-no-member
+        logger.exception("Transaction failed: %s", exc)
         if conn:
             conn.rollback()
-        raise HTTPException(status_code=500, detail=f"Transaction error: {e}") from e
+        raise HTTPException(status_code=500, detail=f"Transaction error: {exc}") from exc
 
-    except PresentationNotFoundError as e:
-        logger.error("Presentation creation failed: %s", e)
+    except PresentationNotFoundError as exc:
+        logger.error("Presentation creation failed: %s", exc)
         if conn:
             conn.rollback()
-        raise HTTPException(status_code=500, detail=str(e)) from e
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     finally:
         if conn:
@@ -169,15 +188,18 @@ async def create_presentation(data: PresentationData):
 
 @router.get("/presentations/{presentation_id}")
 async def get_presentation(presentation_id: int):
-    """
-    Retrieves a presentation by its ID, including master and detail records.
-    """
-    conn = get_db_connection()
-    if not conn:
-        return JSONResponse(
-            status_code=500, content={"error": "Could not connect to database."}
-        )
+    """Retrieve a presentation by its ID, including master and detail records."""
+    conn = None
     try:
+        try:
+            conn = create_connection()
+        except DatabaseConnectionError as exc:
+            logger.error("Could not connect to database: %s", exc)
+            return JSONResponse(
+                status_code=500,
+                content={"error": "Could not connect to database."},
+            )
+
         cursor = conn.cursor()
 
         # Get master record
@@ -216,14 +238,15 @@ async def get_presentation(presentation_id: int):
         detail_rows = cursor.fetchall()
         detail_data = [dict(zip(detail_columns, row)) for row in detail_rows]
 
-        cursor.close()
-        conn.close()
-
         return {"master": master_data, "details": detail_data}
 
-    except pyodbc.Error as e:  # pylint: disable=c-extension-no-member
-        logger.error("Database query failed: %s", e)
-        return JSONResponse(status_code=500, content={"error": str(e)})
+    except pyodbc.Error as exc:  # pylint: disable=c-extension-no-member
+        logger.error("Database query failed: %s", exc)
+        return JSONResponse(status_code=500, content={"error": str(exc)})
+
+    finally:
+        if conn:
+            conn.close()
 
 
 # --- Data Models (Pydantic) ---

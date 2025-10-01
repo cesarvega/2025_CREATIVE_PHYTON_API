@@ -3,7 +3,6 @@ PowerPoint to images conversion service.
 """
 
 import os
-import re
 import shutil
 import zipfile
 from pathlib import Path
@@ -16,6 +15,12 @@ from win32com import client
 from app.config.settings import settings
 from app.utils.files_utils import FileUtils
 from app.utils.logging_utils import get_logger
+from app.utils.path_utils import (
+    build_relative_slide_path,
+    get_project_base_dir,
+    get_relative_slide_root,
+    sanitize_folder_name,
+)
 
 logger = get_logger(__name__)
 
@@ -25,46 +30,6 @@ class PPTXService:
 
     def __init__(self):
         self.image_format = settings.pptx_image_format
-
-    def sanitize_folder_name(self, folder_name: str) -> str:
-        """
-        Sanitize folder name to be safe for filesystem usage.
-
-        Args:
-            folder_name: Original folder name
-
-        Returns:
-            Sanitized folder name safe for filesystem
-        """
-        # Remove invalid characters for Windows/Linux filesystems
-        sanitized = re.sub(r'[<>:"/\\|?*]', "", folder_name)
-
-        # Replace spaces and special characters with underscores
-        sanitized = re.sub(r"[\s\-\.]+", "_", sanitized)
-
-        # Remove leading/trailing underscores and dots
-        sanitized = sanitized.strip("_.")
-
-        # Ensure it's not empty and not too long
-        if not sanitized:
-            sanitized = "unnamed_project"
-
-        # Limit length (Windows has 255 char limit, but we'll be conservative)
-        sanitized = sanitized[:50]
-
-        return sanitized.upper()
-
-    def get_project_base_dir(self, project_type: str) -> Path:
-        """
-        Get the base directory for a specific project type.
-
-        Args:
-            project_type: Type of project ('bipresents' or 'nw')
-
-        Returns:
-            Base directory path for the project type
-        """
-        return settings.get_base_dir_for_project_type(project_type)
 
     def convert_pptx_to_images(
         self, file_content: bytes, filename: str, display_name: str, project_type: str
@@ -82,7 +47,7 @@ class PPTXService:
             Dictionary with conversion results
         """
         # Get the base directory for the project type
-        base_dir = self.get_project_base_dir(project_type)
+        base_dir = get_project_base_dir(project_type)
 
         # Use display_name as the conversion ID (folder name)
         conversion_id = display_name
@@ -127,12 +92,7 @@ class PPTXService:
             titles = []
 
             # Generate public URLs for NW and BSR projects
-            if project_type == "bipresents":
-                url_base = "https://www.bipresents.com/bsr_slides"
-            elif project_type == "nw":
-                url_base = "http://bipresents.com/nw2/nw_slides"
-            else:
-                url_base = None
+            url_root = get_relative_slide_root(project_type)
 
             for result in slide_results:
                 image_path = result["image_path"]
@@ -140,11 +100,17 @@ class PPTXService:
                 title = result["title"]
                 image_filename = Path(image_path).name
                 thumbnail_filename = Path(thumbnail_path).name
-                # Build the image and thumbnail URLs based on project type
-                if url_base:
-                    image_url = f"{url_base}/{conversion_id}/{image_filename}"
-                    thumbnail_url = (
-                        f"{url_base}/{conversion_id}/Thumbnails/{thumbnail_filename}"
+                if url_root:
+                    image_url = build_relative_slide_path(
+                        project_type,
+                        conversion_id,
+                        image_filename,
+                    )
+                    thumbnail_url = build_relative_slide_path(
+                        project_type,
+                        conversion_id,
+                        thumbnail_filename,
+                        subdir="Thumbnails",
                     )
                 else:
                     image_url = f"files/download/{project_type}/{conversion_id}/{image_filename}"
@@ -217,7 +183,7 @@ class PPTXService:
             # Process each slide
             for i in range(1, presentation.Slides.Count + 1):
                 # Generate filename with zero-padding
-                img_filename = f"{i:03d}.png"  # 001.png, 002.png, etc.
+                img_filename = f"{i:03d}.jpg"  # 001.jpg, 002.jpg, etc.
 
                 # Full-size image path
                 img_path = os.path.join(project_folder_abs, img_filename)
@@ -299,21 +265,21 @@ class PPTXService:
 
     def get_conversion_folder(self, conversion_id: str, project_type: str) -> Path:
         """Get the project folder for a conversion."""
-        base_dir = self.get_project_base_dir(project_type)
+        base_dir = get_project_base_dir(project_type)
         return base_dir / conversion_id
 
     def get_image_path(
         self, conversion_id: str, image_name: str, project_type: str
     ) -> Path:
         """Get the path to a specific image."""
-        base_dir = self.get_project_base_dir(project_type)
+        base_dir = get_project_base_dir(project_type)
         return base_dir / conversion_id / image_name
 
     def get_thumbnail_path(
         self, conversion_id: str, image_name: str, project_type: str
     ) -> Path:
         """Get the path to a specific thumbnail."""
-        base_dir = self.get_project_base_dir(project_type)
+        base_dir = get_project_base_dir(project_type)
         return base_dir / conversion_id / "Thumbnails" / image_name
 
     def conversion_exists(self, conversion_id: str, project_type: str) -> bool:
@@ -379,7 +345,7 @@ class PPTXService:
                 settings.PROJECT_TYPE_BIPRESENTS,
                 settings.PROJECT_TYPE_NW,
             ]:
-                base_dir = self.get_project_base_dir(project_type)
+                base_dir = get_project_base_dir(project_type)
 
                 if not base_dir.exists():
                     continue
@@ -418,7 +384,7 @@ class PPTXService:
 
         for ptype in project_types:
             try:
-                base_dir = self.get_project_base_dir(ptype)
+                base_dir = get_project_base_dir(ptype)
                 if not base_dir.exists():
                     continue
 
@@ -429,7 +395,7 @@ class PPTXService:
                             [
                                 f
                                 for f in project_folder.iterdir()
-                                if f.is_file() and f.suffix.lower() == ".png"
+                                if f.is_file() and f.suffix.lower() == ".jpg"
                             ]
                         )
 

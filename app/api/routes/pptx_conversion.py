@@ -9,6 +9,7 @@ from app.models.response_models import PPTXConversionResponse
 from app.services.pptx_service import pptx_service
 from app.utils.files_utils import FileUtils
 from app.utils.logging_utils import get_logger
+from app.utils.path_utils import sanitize_folder_name
 
 logger = get_logger(__name__)
 
@@ -59,7 +60,7 @@ async def convert_pptx_to_images(
             )
 
         # Clean display_name to be safe for folder names
-        clean_display_name = pptx_service.sanitize_folder_name(display_name.strip())
+        clean_display_name = sanitize_folder_name(display_name.strip())
 
         if not clean_display_name:
             raise HTTPException(status_code=400, detail="Invalid display name")

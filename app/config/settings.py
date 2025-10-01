@@ -120,7 +120,7 @@ class Settings(BaseSettings):
     default_font_size: int = 11
 
     # PowerPoint conversion settings
-    pptx_image_format: str = "PNG"
+    pptx_image_format: str = "JPG"
     pptx_image_quality: int = 90
 
     # File cleanup settings
