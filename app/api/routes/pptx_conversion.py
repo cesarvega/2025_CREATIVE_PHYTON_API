@@ -2,9 +2,13 @@
 API routes for PowerPoint to images conversion.
 """
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, UploadFile
 
-from app.config.settings import settings
+from app.api.dependencies import (
+    validate_display_name,
+    validate_project_type,
+    validate_pptx_file_with_size,
+)
 from app.models.response_models import PPTXConversionResponse
 from app.services.pptx_service import pptx_service
 from app.utils.files_utils import FileUtils
@@ -22,9 +26,9 @@ router = APIRouter(prefix="/pptx", tags=["PPTX Conversion"])
     response_model=PPTXConversionResponse,
 )
 async def convert_pptx_to_images(
-    pptx_file: UploadFile = File(..., description="PPTX file to convert"),
-    display_name: str = Form(..., description="Display name for the project folder"),
-    project_type: str = Form(..., description="Project type: 'bipresents' or 'nw'"),
+    pptx_data: tuple[UploadFile, bytes] = Depends(validate_pptx_file_with_size),
+    display_name: str = Depends(validate_display_name),
+    project_type: str = Depends(validate_project_type),
 ):
     """
     Receives a PPTX file, display_name, and project_type, converts each slide to an image,
@@ -37,36 +41,13 @@ async def convert_pptx_to_images(
     Returns the paths to the generated images and thumbnails, and the titles of each slide.
     """
     try:
-        if not pptx_file.filename:
-            raise HTTPException(status_code=400, detail="No filename provided")
-
-        # Verify that the file is a PPTX
-        if not pptx_file.filename.lower().endswith(".pptx"):
-            raise HTTPException(status_code=400, detail="File must be a PPTX")
-
-        # Validate display_name
-        if not display_name or not display_name.strip():
-            raise HTTPException(status_code=400, detail="Display name is required")
-
-        # Validate project_type
-        valid_project_types = [
-            settings.PROJECT_TYPE_BIPRESENTS,
-            settings.PROJECT_TYPE_NW,
-        ]
-        if not project_type or project_type not in valid_project_types:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Project type must be one of: {', '.join(valid_project_types)}",
-            )
-
+        pptx_file, file_content = pptx_data
+        
         # Clean display_name to be safe for folder names
-        clean_display_name = sanitize_folder_name(display_name.strip())
+        clean_display_name = sanitize_folder_name(display_name)
 
         if not clean_display_name:
             raise HTTPException(status_code=400, detail="Invalid display name")
-
-        # Read file content
-        file_content = await pptx_file.read()
 
         logger.info(
             "Processing PPTX file: %s (%s) with display name: %s, project type: %s",

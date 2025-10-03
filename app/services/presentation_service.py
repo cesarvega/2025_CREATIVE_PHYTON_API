@@ -18,14 +18,15 @@ from app.models.presentation_models import (
     CreatePresentationRequest,
     CreatePresentationResponse,
     DetailItem,
+    PresentationBuildOptions,
     PresentationData,
 )
 from app.models.response_models import PPTXConversionResponse
-from app.services.excel_service import GROUP_MARKERS, excel_processing_service
+from app.services.excel_service import GROUP_MARKERS, process_excel_file
 from app.services.pptx_service import pptx_service
 from app.services.pptx_builder_service import pptx_builder_service
-from app.services.word_service import word_service
-from app.services.email_service import email_service
+from app.services.word_service import generate_feedback_document
+from app.services.email_service import send_presentation_emails
 from app.utils.logging_utils import get_logger
 
 
@@ -33,13 +34,11 @@ logger = get_logger(__name__)
 
 
 class PresentationService:
-    """Service for orchestrating complete presentation creation."""
-
-    def __init__(self):
-        self.excel_service = excel_processing_service
-        self.pptx_service = pptx_service
-        self.word_service = word_service
-        self.email_service = email_service
+    """Service for orchestrating complete presentation creation.
+    
+    This service coordinates between multiple services (Excel, PPTX, Word, Email)
+    to create complete presentations with all associated artifacts.
+    """
 
     def create_presentation(
         self, request: CreatePresentationRequest
@@ -119,13 +118,58 @@ class PresentationService:
             logger.error("Error creating presentation: %s", str(e))
             raise
 
+    def build_presentation_files(
+        self,
+        *,
+        build_request: CreatePresentationRequest,
+        options: PresentationBuildOptions,
+    ):
+        """Generate PowerPoint deliverables directly from Excel data."""
+
+        logger.info(
+            "Assembling PPT files for project=%s display=%s slide_range=%s-%s",
+            build_request.project,
+            build_request.display_name,
+            options.slide_start,
+            options.slide_end,
+        )
+
+        excel_data = self._process_excel_file(build_request)
+
+        stub_conversion = PPTXConversionResponse(
+            message="Generated for PPT assembly",
+            conversion_id=build_request.display_name,
+            project_type=build_request.project_type,
+            total_images=0,
+            images=[],
+            thumbnails=[],
+            titles=[],
+            pptx_file=options.base_template,
+        )
+
+        slides_dict = self._generate_slides_from_excel(
+            excel_data=excel_data,
+            pptx_data=stub_conversion,
+            request=build_request,
+            excel_artifacts={},
+        )
+
+        details = slides_dict.get("details", [])
+
+        return pptx_builder_service.compose_presentation(
+            request=build_request,
+            options=options,
+            details=details,
+            excel_data=excel_data,
+        )
+
     def _process_excel_file(
         self, request: CreatePresentationRequest
     ) -> ProcessedExcelData:
         """Process Excel file using the existing Excel service."""
         try:
             # Process the Excel file
-            result = self.excel_service.process_excel_file(
+            result = process_excel_file(
                 file_content=request.excel_file,
                 is_phonetics=request.is_phonetics,
                 has_groups=request.has_groups,
@@ -186,7 +230,7 @@ class PresentationService:
         """Convert PPTX file using the existing PPTX service."""
         try:
             # Convert PPTX to images
-            result_dict = self.pptx_service.convert_pptx_to_images(
+            result_dict = pptx_service.convert_pptx_to_images(
                 file_content=request.pptx_file,
                 filename=request.pptx_filename,
                 display_name=request.display_name,
@@ -672,11 +716,8 @@ class PresentationService:
         self, presentation_id: int, request: CreatePresentationRequest, excel_data: ProcessedExcelData
     ) -> str:
         """Generate a feedback template document when the Word service is available."""
-        if not self.word_service:
-            logger.debug("Skipping feedback document generation because Word service is not configured.")
-            return ""
         try:
-            return self.word_service.generate_feedback_template(
+            return generate_feedback_document(
                 presentation_id=presentation_id,
                 project_type=request.project_type,
                 presentation_type=request.presentation_type,
@@ -690,11 +731,8 @@ class PresentationService:
 
     def _send_notification_emails(self, presentation_id: int, request: CreatePresentationRequest):
         """Send notification emails when the Email service is available."""
-        if not self.email_service:
-            logger.debug("Skipping notification emails because Email service is not configured.")
-            return
         try:
-            self.email_service.send_presentation_emails(
+            send_presentation_emails(
                 presentation_id=presentation_id,
                 presentation_type=request.presentation_type,
                 project_type=request.project_type,
@@ -706,7 +744,6 @@ class PresentationService:
         except Exception as e:
             logger.error("Error sending notification emails: %s", str(e))
             # Don't raise - emails are not critical for the main flow
-
     def _create_presentation_in_db(
         self, slides_data: Dict[str, Any], request: CreatePresentationRequest
     ) -> Dict[str, Any]:

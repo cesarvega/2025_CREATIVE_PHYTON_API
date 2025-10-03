@@ -158,6 +158,9 @@ C:/inetpub/wwwroot/
 - `POST /api/presentation/create` - **Complete presentation orchestration**
   - Processes Excel file, converts PPTX, generates slides, and saves to database
   - Unified endpoint for the entire presentation creation workflow
+- `POST /api/presentations/createTemplate` - **Template-driven deck assembly**
+  - Consumes Excel data and metadata to build printable/macro PPTX files using stored templates
+  - Supports returning base64 payloads or download URLs for generated artifacts
 
 ### 📊 Excel Processing
 - `POST /api/excel-processing/process-excel` - Process Excel files for slide generation

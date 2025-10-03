@@ -5,8 +5,9 @@ Routes for Excel file processing and slide generation.
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, Form, HTTPException, UploadFile
 
+from app.api.dependencies import validate_excel_file_with_size
 from app.models.excel_models import ExcelProcessingResponse
 from app.services.excel_service import excel_processing_service
 from app.utils.logging_utils import get_logger
@@ -17,7 +18,7 @@ logger = get_logger(__name__)
 
 @router.post("/process-excel", response_model=ExcelProcessingResponse)
 async def process_excel_file(
-    file: UploadFile = File(..., description="Excel file to process (.xlsx or .xls)"),
+    file_data: tuple[UploadFile, bytes] = Depends(validate_excel_file_with_size),
     is_phonetics: Optional[bool] = Form(default=False, description="Use phonetics processing"),
     has_groups: Optional[bool] = Form(default=False, description="Process with groups"),
 ) -> ExcelProcessingResponse:
@@ -29,7 +30,7 @@ async def process_excel_file(
     that can be used for slide generation in subsequent processes.
 
     Args:
-        file: Excel file upload
+        file_data: Tuple of (file, file_content) validated by dependency (max 10MB)
         is_phonetics: Whether to use phonetics processing
         has_groups: Whether to process with groups
 
@@ -39,35 +40,9 @@ async def process_excel_file(
     Raises:
         HTTPException: If file processing fails or file is invalid
     """
-    # Validate file type
-    if not file.filename:
-        raise HTTPException(status_code=400, detail="No file provided")
-
-    if not file.filename.lower().endswith((".xlsx", ".xls")):
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid file type. Please upload an Excel file (.xlsx or .xls)",
-        )
-
-    # Validate file size (limit to 10MB)
-    max_file_size = 10 * 1024 * 1024  # 10MB
+    file, file_content = file_data
 
     try:
-        # Read file content
-        file_content = await file.read()
-
-        if len(file_content) == 0:
-            raise HTTPException(status_code=400, detail="Empty file provided")
-
-        if len(file_content) > max_file_size:
-            raise HTTPException(
-                status_code=413,
-                detail=(
-                    f"File too large. Maximum size allowed is "
-                    f"{max_file_size / (1024 * 1024):.1f}MB"
-                ),
-            )
-
         logger.info(
             "Processing Excel file: %s (%d bytes)", file.filename, len(file_content)
         )
@@ -101,7 +76,7 @@ async def process_excel_file(
         raise
     except Exception as e:
         logger.error(
-            "Unexpected error processing Excel file %s: %s", file.filename, str(e)
+            "Unexpected error processing Excel file %s: %s", file.filename, str(e), exc_info=True
         )
         raise HTTPException(
             status_code=500, detail=f"Internal error processing Excel file: {str(e)}"

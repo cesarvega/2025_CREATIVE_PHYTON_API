@@ -76,26 +76,35 @@ class Settings(BaseSettings):
     cors_methods: str = "*"  # Comma-separated list or "*" for all
     cors_headers: str = "*"  # Comma-separated list or "*" for all
 
+    @staticmethod
+    def _parse_csv_or_wildcard(value: str) -> list[str]:
+        """
+        Parse a comma-separated string or wildcard into a list.
+        
+        Args:
+            value: A string that's either "*" or comma-separated values
+            
+        Returns:
+            A list containing either ["*"] or parsed trimmed values
+        """
+        if value == "*":
+            return ["*"]
+        return [item.strip() for item in value.split(",")]
+
     @property
-    def cors_origins_list(self) -> list:
+    def cors_origins_list(self) -> list[str]:
         """Get CORS origins as a list"""
-        if self.cors_origins == "*":
-            return ["*"]
-        return [origin.strip() for origin in self.cors_origins.split(",")]
+        return self._parse_csv_or_wildcard(self.cors_origins)
 
     @property
-    def cors_methods_list(self) -> list:
+    def cors_methods_list(self) -> list[str]:
         """Get CORS methods as a list"""
-        if self.cors_methods == "*":
-            return ["*"]
-        return [method.strip() for method in self.cors_methods.split(",")]
+        return self._parse_csv_or_wildcard(self.cors_methods)
 
     @property
-    def cors_headers_list(self) -> list:
+    def cors_headers_list(self) -> list[str]:
         """Get CORS headers as a list"""
-        if self.cors_headers == "*":
-            return ["*"]
-        return [header.strip() for header in self.cors_headers.split(",")]
+        return self._parse_csv_or_wildcard(self.cors_headers)
 
     # Logging configuration
     log_level: str = "INFO"
@@ -130,6 +139,11 @@ class Settings(BaseSettings):
     # Projects types
     PROJECT_TYPE_BIPRESENTS: str = "bipresents"
     PROJECT_TYPE_NW: str = "nw"
+
+    # Email notification settings
+    email_creative: str = "creative@brandinstitute.com"
+    email_nonproprietary: str = "Chicago-Nonproprietary@brandinstitute.com"
+    email_enabled: bool = True  # Toggle email notifications
 
     def get_base_dir_for_project_type(self, project_type: str) -> Path:
         """Get the base directory for a specific project type."""
