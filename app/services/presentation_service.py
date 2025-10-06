@@ -9,7 +9,6 @@ from urllib.parse import urlparse
 
 from fastapi import HTTPException
 
-from app.config import get_project_root
 from app.config.db import DatabaseConnectionError, create_connection
 from app.models.excel_models import (
     ProcessedExcelData,
@@ -59,23 +58,19 @@ class PresentationService:
             logger.info("Processing Excel file: %s", request.excel_filename)
             excel_data = self._process_excel_file(request)
 
-            # 2. Persist Excel artifacts for downstream usage
-            excel_artifacts = self._persist_excel_artifacts(request)
-
-            # 3. Convert PPTX file
+            # 2. Convert PPTX file
             logger.info("Converting PPTX file: %s", request.pptx_filename)
             pptx_data = self._convert_pptx_file(request)
 
-            # 4. Generate slides from Excel arrays
+            # 3. Generate slides from Excel arrays
             logger.info("Generating slides from Excel data")
             slides_data = self._generate_slides_from_excel(
                 excel_data=excel_data,
                 pptx_data=pptx_data,
                 request=request,
-                excel_artifacts=excel_artifacts,
             )
 
-            # 5. Apply templates if specified
+            # 4. Apply templates if specified
             if request.template_rotation:
                 slides_data = self._apply_template_rotation(
                     slides_data, request.template_rotation
@@ -87,6 +82,41 @@ class PresentationService:
                 slides_data.get("background_name"),
                 bool(request.template_rotation),
             )
+
+            # 5. Generate physical PowerPoint file (if enabled)
+            generated_files = None
+            if request.generate_physical_pptx:
+                logger.info("Generating physical PowerPoint file")
+                try:
+                    ppt_files = self._generate_physical_powerpoint(
+                        slides_data=slides_data,
+                        excel_data=excel_data,
+                        request=request,
+                        pptx_data=pptx_data,
+                    )
+                    generated_files = ppt_files
+                    
+                    # Update slides_data with generated file path for DB storage
+                    if ppt_files.get("printable_path"):
+                        slides_data["powerpoint_file"] = ppt_files["printable_path"]
+                    
+                    logger.info(
+                        "Physical PowerPoint generated: %s (total slides: %s)",
+                        ppt_files.get("printable_path", "N/A"),
+                        ppt_files.get("total_slides", "0"),
+                    )
+                except Exception as ppt_error:
+                    logger.error("Failed to generate physical PowerPoint: %s", str(ppt_error))
+                    # Continue execution - physical file generation is optional
+                    generated_files = {
+                        "error": str(ppt_error),
+                        "printable_path": "",
+                        "macro_path": "",
+                        "total_slides": "0",
+                        "warnings": "Failed to generate",
+                    }
+            else:
+                logger.info("Physical PowerPoint generation skipped (generate_physical_pptx=False)")
 
             # 6. Create presentation in DB
             logger.info("Creating presentation in database")
@@ -106,12 +136,12 @@ class PresentationService:
 
             return CreatePresentationResponse(
                 message="Presentation created successfully",
-                # presentation_id='1212',
                 presentation_id=presentation_result.get("presentation_id"),
                 total_slides=len(slides_data["details"]),
                 excel_data=excel_data,
                 pptx_data=pptx_data,
                 processing_time_seconds=processing_time,
+                generated_files=generated_files,
             )
 
         except Exception as e:
@@ -151,7 +181,6 @@ class PresentationService:
             excel_data=excel_data,
             pptx_data=stub_conversion,
             request=build_request,
-            excel_artifacts={},
         )
 
         details = slides_dict.get("details", [])
@@ -185,45 +214,6 @@ class PresentationService:
             logger.error("Error processing Excel file: %s", str(e))
             raise
 
-    def _persist_excel_artifacts(self, request: CreatePresentationRequest) -> Dict[str, str]:
-        """Persist the Excel file in an organized directory structure (placeholder)."""
-        if not callable(get_project_root):
-            logger.debug(
-                "Skipping Excel artifact persistence because get_project_root is not available."
-            )
-            return {}
-
-        try:
-            project_root = get_project_root(request.project_type)
-            project_dir = project_root / request.display_name
-            src_dir = project_dir / "Src"
-            downloads_dir = project_dir / "Downloads"
-
-            # Create directory structure
-            for folder in (project_dir, src_dir, downloads_dir):
-                folder.mkdir(parents=True, exist_ok=True)
-
-            # Save source file
-            source_path = src_dir / request.excel_filename
-            source_path.write_bytes(request.excel_file)
-
-            # Save download copy
-            download_path = downloads_dir / request.excel_filename
-            download_path.write_bytes(request.excel_file)
-
-            logger.info("Excel artifacts saved: %s, %s", source_path, download_path)
-
-            return {
-                "src": str(source_path),
-                "download": str(download_path),
-                "project_dir": str(project_dir),
-            }
-
-        except Exception as e:
-            logger.error("Error persisting Excel artifacts: %s", str(e))
-            # Return empty dict to not break the flow
-            return {}
-
     def _convert_pptx_file(
         self, request: CreatePresentationRequest
     ) -> PPTXConversionResponse:
@@ -249,13 +239,96 @@ class PresentationService:
             logger.error("Error converting PPTX file: %s", str(e))
             raise
 
+    def _generate_physical_powerpoint(
+        self,
+        *,
+        slides_data: Dict[str, Any],
+        excel_data: ProcessedExcelData,
+        request: CreatePresentationRequest,
+        pptx_data: PPTXConversionResponse,
+    ) -> Dict[str, str]:
+        """
+        Generate physical PowerPoint file combining original PPTX slides with template-generated slides.
+        
+        This method orchestrates the creation of a complete PowerPoint presentation by:
+        1. Taking slides from the original uploaded PPTX (converted to images)
+        2. Generating slides from Excel data using templates
+        3. Combining them in the correct order based on page_number setting
+        
+        Args:
+            slides_data: Dictionary containing slide details and metadata
+            excel_data: Processed Excel data with candidate information
+            request: Original presentation creation request
+            pptx_data: Converted PPTX data with image paths
+            
+        Returns:
+            Dictionary with paths to generated files:
+            - printable_path: Path to .pptx file
+            - macro_path: Path to .pptm file (if generated)
+        """
+        try:
+            # Build presentation build options from request
+            build_options = PresentationBuildOptions(
+                template_pack=request.template_pack or "BackgroundDefaultTemplate",
+                base_template=request.base_template or "template_default_2019.pptx",
+                multi_template=request.multi_template or "template_default_withgroups2019.pptx",
+                group_template=request.group_template or "template_default_withgroup_2019.pptx",
+                separator_template=request.separator_template or "template_default_seperator_2019.pptx",
+                summary_template=request.summary_template or "template_default_summary2019.pptx",
+                slide_start=1,
+                slide_end=None,
+                include_print_ready_version=True,
+                include_macro_version=request.include_macro_version,
+                return_urls=False,  # Not needed for internal generation
+            )
+            
+            logger.info(
+                "Generating physical PowerPoint: %d original images, %d template slides, insert at position %d",
+                len(pptx_data.images) if pptx_data.images else 0,
+                len(slides_data.get("details", [])),
+                request.page_number,
+            )
+            
+            # Generate PowerPoint using pptx_builder_service
+            artifacts = pptx_builder_service.compose_presentation_with_original_slides(
+                request=request,
+                options=build_options,
+                details=slides_data["details"],
+                excel_data=excel_data,
+                original_pptx_images=pptx_data.images or [],
+                page_number_insert=request.page_number,
+            )
+            
+            # Convert PresentationBuildArtifacts to Dict[str, str] for response model
+            result = {
+                "printable_path": str(artifacts.printable_path) if artifacts.printable_path else "",
+                "macro_path": str(artifacts.macro_path) if artifacts.macro_path else "",
+                "total_slides": str(artifacts.total_slides),
+                "warnings": ", ".join(artifacts.warnings) if artifacts.warnings else "None",
+            }
+            
+            logger.info(
+                "Physical PowerPoint generated successfully: %d total slides, %d warnings",
+                artifacts.total_slides,
+                len(artifacts.warnings),
+            )
+            
+            if artifacts.warnings:
+                for warning in artifacts.warnings:
+                    logger.warning("PowerPoint generation warning: %s", warning)
+            
+            return result
+            
+        except Exception as e:
+            logger.error("Error generating physical PowerPoint: %s", str(e))
+            raise
+
     def _generate_slides_from_excel(
         self,
         *,
         excel_data: ProcessedExcelData,
         pptx_data: PPTXConversionResponse,
         request: CreatePresentationRequest,
-        excel_artifacts: Dict[str, str],
     ) -> PresentationData:
         details: List[DetailItem] = []
         last_group_name = ""
@@ -420,11 +493,7 @@ class PresentationService:
             background_name = "Default"
 
         powerpoint_file = pptx_data.pptx_file or ""
-        if not powerpoint_file and excel_artifacts.get("project_dir"):
-            fallback = Path(excel_artifacts["project_dir"]) / "PPT" / f"{request.display_name}.pptx"
-            powerpoint_file = str(fallback)
-
-        excel_file = excel_artifacts.get("download") or excel_artifacts.get("src", "")
+        excel_file = ""  # Will be populated if needed in the future
 
         return PresentationData(
             project=request.project,

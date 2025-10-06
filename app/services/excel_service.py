@@ -15,13 +15,14 @@ logger = get_logger(__name__)
 
 
 HEADER_ROW_INDEX = 1
-TYPE_COLUMN = 1
-CATEGORY_COLUMN = 2
-NAME_COLUMN = 3
-RATIONALE_COLUMN = 4
-KANA_COLUMN = 5
-LOGO_COLUMN = 6
-NAME_SUBGROUP_COLUMN = 7
+TYPE_COLUMN = 1                   # Column A: Group marker (A, B, C, etc.)
+CATEGORY_COLUMN = 2               # Column B: Category
+NAME_COLUMN = 3                   # Column C: Name
+RATIONALE_COLUMN = 4              # Column D: Rationale
+KANA_COLUMN = 5                   # Column E: Kana/Pronunciation
+LOGO_COLUMN = 6                   # Column F: Logo
+NAME_SUBGROUP_COLUMN = 7          # Column G: Group1 (primary subgroup column)
+                                  # Column H: Group2 (fallback if G is empty, index 7)
 
 GROUP_MARKERS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 GROUP_DELIMITER = "##"
@@ -96,10 +97,12 @@ def process_excel_file(
             raw_rationale = _clean(str(row[RATIONALE_COLUMN - 1].value) if len(row) >= RATIONALE_COLUMN else "")
             raw_kana = _normalize_kana(str(row[KANA_COLUMN - 1].value) if len(row) >= KANA_COLUMN else "", is_phonetics)
             raw_logo = _clean(str(row[LOGO_COLUMN - 1].value) if len(row) >= LOGO_COLUMN else "")
+            
+            # Extract subgroup: Check column G (Group1) first
             raw_name_sub_group = _clean(
                 str(row[NAME_SUBGROUP_COLUMN - 1].value) if len(row) >= NAME_SUBGROUP_COLUMN else ""
             )
-            
+            # If column G is empty, fallback to column H (Group2)
             if not raw_name_sub_group and len(row) >= NAME_SUBGROUP_COLUMN + 1:
                 raw_name_sub_group = _clean(str(row[NAME_SUBGROUP_COLUMN].value))
 
@@ -127,12 +130,12 @@ def process_excel_file(
         for i, row in enumerate(all_rows):
             if i in processed_indices:
                 continue
-                
+            
+            # Extract subgroup: Check column G (Group1) first
             raw_name_sub_group = _clean(
                 str(row[NAME_SUBGROUP_COLUMN - 1].value) if len(row) >= NAME_SUBGROUP_COLUMN else ""
             )
-            
-            # Check column H if G is empty
+            # If column G is empty, fallback to column H (Group2)
             if not raw_name_sub_group and len(row) >= NAME_SUBGROUP_COLUMN + 1:
                 raw_name_sub_group = _clean(str(row[NAME_SUBGROUP_COLUMN].value))
             
@@ -177,9 +180,11 @@ def process_excel_file(
                         continue
                     
                     other_row = all_rows[j]
+                    # Extract subgroup from other row: Check column G (Group1) first
                     other_sub_group = _clean(
                         str(other_row[NAME_SUBGROUP_COLUMN - 1].value) if len(other_row) >= NAME_SUBGROUP_COLUMN else ""
                     )
+                    # If column G is empty, fallback to column H (Group2)
                     if not other_sub_group and len(other_row) >= NAME_SUBGROUP_COLUMN + 1:
                         other_sub_group = _clean(str(other_row[NAME_SUBGROUP_COLUMN].value))
                     

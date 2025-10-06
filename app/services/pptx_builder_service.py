@@ -310,6 +310,217 @@ class PPTXBuilderService:
 
         return artifacts
 
+    def compose_presentation_with_original_slides(
+        self,
+        *,
+        request: CreatePresentationRequest,
+        options: PresentationBuildOptions,
+        details: List[Dict[str, Any]],
+        excel_data: ProcessedExcelData,
+        original_pptx_images: List[str],
+        page_number_insert: int,
+    ) -> PresentationBuildArtifacts:
+        """
+        Compose complete PowerPoint combining original PPTX slides with template-generated slides.
+        
+        This method creates a comprehensive presentation by:
+        1. Inserting original PPTX slides (before page_number_insert)
+        2. Adding template-generated slides from Excel data
+        3. Appending remaining original PPTX slides (after generated slides)
+        
+        Args:
+            request: Presentation creation request with configuration
+            options: Build options for template selection and output settings
+            details: List of slide detail items generated from Excel
+            excel_data: Processed Excel data (reserved for future use)
+            original_pptx_images: List of JPG image paths from converted PPTX
+            page_number_insert: Position where template slides should be inserted (1-based)
+            
+        Returns:
+            PresentationBuildArtifacts with paths to generated files and metadata
+        """
+        _ = excel_data  # Reserved for future enhancements
+        
+        template_paths = self._resolve_template_paths(options)
+        output_base, _ = resolve_project_output(
+            request.display_name,
+            request.project_type,
+            fallback_subdir=FALLBACK_PRESENTATIONS_DIR,
+        )
+        presentation_root = output_base / PRESENTATIONS_SUBDIR
+        presentation_root.mkdir(parents=True, exist_ok=True)
+
+        timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        base_name = f"{request.display_name}_{timestamp}"
+        printable_path = presentation_root / f"{base_name}.pptx"
+        macro_path = presentation_root / f"{base_name}.pptm"
+
+        summary_tracker: Dict[str, List[str]] = {}
+        warnings: List[str] = []
+        total_slides_created = 0
+
+        pythoncom.CoInitialize()
+        app = None
+        output_presentation = None
+        template_handles: Dict[str, Any] = {}
+
+        try:
+            # Initialize PowerPoint Application
+            try:
+                app = client.Dispatch("PowerPoint.Application")
+                app.Visible = 1
+            except Exception as dispatch_error:  # pylint: disable=broad-except
+                logger.error("Unable to start PowerPoint automation: %s", dispatch_error)
+                raise RuntimeError(
+                    "PowerPoint automation is unavailable. Ensure Microsoft PowerPoint is installed."
+                ) from dispatch_error
+
+            # Open template presentations
+            template_handles = self._open_template_presentations(app, template_paths)
+            base_template = template_handles["base"]
+
+            # Create new presentation with base template settings
+            output_presentation = app.Presentations.Add()
+            output_presentation.PageSetup.SlideWidth = base_template.PageSetup.SlideWidth
+            output_presentation.PageSetup.SlideHeight = base_template.PageSetup.SlideHeight
+            output_presentation.ApplyTemplate(str(template_paths["base"].resolve()))
+
+            logger.info(
+                "Starting presentation composition: %d original images, insert at position %d, %d template slides",
+                len(original_pptx_images),
+                page_number_insert,
+                len(details),
+            )
+
+            # SECTION A: Insert original PPTX slides BEFORE page_number_insert
+            prefix_slides = original_pptx_images[:page_number_insert - 1] if page_number_insert > 1 else []
+            for img_path in prefix_slides:
+                slide = self._insert_image_slide(output_presentation, img_path, base_template, warnings)
+                if slide:
+                    total_slides_created += 1
+            
+            logger.info("Inserted %d prefix slides from original PPTX", len(prefix_slides))
+
+            # SECTION B: Insert template-generated slides from Excel data
+            for detail in details:
+                template_key = self._select_template_kind(detail)
+                if template_key == "skip":
+                    continue
+
+                source_presentation = template_handles.get(template_key)
+                if source_presentation is None:
+                    source_presentation = app.Presentations.Open(
+                        str(template_paths[template_key].resolve()),
+                        WithWindow=False,
+                    )
+                    template_handles[template_key] = source_presentation
+
+                new_slide = self._copy_slide_from_template(
+                    source_presentation,
+                    output_presentation,
+                    template_paths[template_key],
+                )
+                total_slides_created += 1
+
+                # Populate slide with data based on template type
+                if template_key == "separator":
+                    self._populate_separator_slide(new_slide, detail, warnings)
+                elif template_key == "summary":
+                    self._populate_summary_slide(new_slide, summary_tracker, warnings)
+                elif template_key == "group":
+                    self._populate_group_slide(new_slide, detail, warnings)
+                elif template_key == "multi":
+                    self._populate_multi_slide(new_slide, detail, summary_tracker, warnings)
+                else:
+                    self._populate_base_slide(new_slide, detail, summary_tracker, warnings)
+
+            logger.info("Inserted %d template-generated slides", len(details))
+
+            # SECTION C: Insert original PPTX slides AFTER generated slides
+            suffix_slides = original_pptx_images[page_number_insert - 1:] if page_number_insert <= len(original_pptx_images) else []
+            for img_path in suffix_slides:
+                slide = self._insert_image_slide(output_presentation, img_path, base_template, warnings)
+                if slide:
+                    total_slides_created += 1
+            
+            logger.info("Inserted %d suffix slides from original PPTX", len(suffix_slides))
+
+            # Save output files
+            printable_path_out: Optional[Path] = None
+            macro_path_out: Optional[Path] = None
+
+            if total_slides_created == 0:
+                warnings.append("No slides were generated in the presentation.")
+            else:
+                if options.include_print_ready_version:
+                    output_presentation.SaveAs(str(printable_path.resolve()), PP_SAVE_AS_PPTX)
+                    printable_path_out = printable_path
+                    logger.info("Saved printable presentation: %s", printable_path)
+
+                if options.include_macro_version:
+                    if options.include_print_ready_version:
+                        output_presentation.SaveCopyAs(str(macro_path.resolve()), PP_SAVE_AS_PPTM)
+                    else:
+                        output_presentation.SaveAs(str(macro_path.resolve()), PP_SAVE_AS_PPTM)
+                    macro_path_out = macro_path
+                    logger.info("Saved macro presentation: %s", macro_path)
+
+                if not options.include_print_ready_version and not options.include_macro_version:
+                    output_presentation.SaveAs(str(printable_path.resolve()), PP_SAVE_AS_PPTX)
+                    printable_path_out = printable_path
+
+            # Generate download URLs if requested
+            download_urls: Dict[str, str] = {}
+            if options.return_urls:
+                if printable_path_out:
+                    download_urls["printable"] = self._relative_download_path(printable_path_out)
+                if macro_path_out:
+                    download_urls["macro"] = self._relative_download_path(macro_path_out)
+
+            artifacts = PresentationBuildArtifacts(
+                printable_path=printable_path_out,
+                macro_path=macro_path_out,
+                total_slides=total_slides_created,
+                slide_start=1,
+                slide_end=total_slides_created,
+                download_urls=download_urls,
+                summary={key: list(values) for key, values in summary_tracker.items()},
+                warnings=warnings,
+            )
+
+            logger.info(
+                "Presentation composition complete: %d total slides, %d warnings",
+                total_slides_created,
+                len(warnings),
+            )
+
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.error("Error composing presentation with original slides: %s", exc)
+            raise
+        finally:
+            # Cleanup COM objects
+            if output_presentation is not None:
+                try:
+                    output_presentation.Close()
+                except Exception:  # pragma: no cover
+                    pass
+
+            for handle in template_handles.values():
+                try:
+                    handle.Close()
+                except Exception:  # pragma: no cover
+                    pass
+
+            if app is not None:
+                try:
+                    app.Quit()
+                except Exception:  # pragma: no cover
+                    pass
+
+            pythoncom.CoUninitialize()
+
+        return artifacts
+
     def _relative_download_path(self, artifact_path: Path) -> str:
         """Return a relative URL-like path when possible."""
 
@@ -883,6 +1094,71 @@ class PPTXBuilderService:
         font = run.font
         font.size = font_size
         font.bold = bold
+
+    def _insert_image_slide(
+        self,
+        presentation,
+        image_path: str,
+        base_template,
+        warnings: Optional[List[str]] = None,
+    ):
+        """
+        Insert a slide with an image from the original PPTX conversion.
+        
+        This method creates a new slide and inserts a JPG image that was generated
+        from the original PowerPoint file, filling the entire slide area.
+        
+        Args:
+            presentation: PowerPoint presentation COM object
+            image_path: Path to the JPG image file
+            base_template: Base template presentation for layout reference
+            warnings: Optional list to collect warning messages
+            
+        Returns:
+            The newly created slide object
+        """
+        if warnings is None:
+            warnings = []
+        
+        try:
+            # Resolve image path
+            img_path = Path(image_path)
+            if not img_path.exists():
+                warning_msg = f"Image file not found: {image_path}"
+                logger.warning(warning_msg)
+                warnings.append(warning_msg)
+                return None
+            
+            # Add blank slide using base template layout
+            slide_index = presentation.Slides.Count + 1
+            slide = presentation.Slides.Add(
+                slide_index,
+                base_template.Slides(1).Layout
+            )
+            
+            # Get slide dimensions
+            slide_width = presentation.PageSetup.SlideWidth
+            slide_height = presentation.PageSetup.SlideHeight
+            
+            # Insert image to fill entire slide
+            slide.Shapes.AddPicture(
+                FileName=str(img_path.resolve()),
+                LinkToFile=False,  # Embed image in presentation
+                SaveWithDocument=True,
+                Left=0,
+                Top=0,
+                Width=slide_width,
+                Height=slide_height
+            )
+            
+            logger.debug("Inserted image slide from: %s", image_path)
+            return slide
+            
+        except Exception as exc:  # pylint: disable=broad-except
+            error_msg = f"Failed to insert image slide from {image_path}: {exc}"
+            logger.error(error_msg)
+            warnings.append(error_msg)
+            return None
 
 
 pptx_builder_service = PPTXBuilderService(

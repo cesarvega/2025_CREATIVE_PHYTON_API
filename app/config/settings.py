@@ -60,10 +60,8 @@ class Settings(BaseSettings):
         else:
             return Path("NW_Files")
 
-    # Application paths (static, not environment dependent)
+    # Application paths
     app_dir: Path = Path(__file__).parent.parent.parent.resolve()
-    static_dir: Path = app_dir / "static"
-    default_images_dir: Path = static_dir / "default_images"
 
     # SQL Server connection string for BI_GUIDELINES
     # This value is loaded from the SQL_CONNECTION_STRING environment variable in .env file
@@ -172,7 +170,6 @@ class Settings(BaseSettings):
         directories = [
             self.base_dir_bipresents,
             self.base_dir_nw,
-            self.default_images_dir,
             self.nw_files_dir,
         ]
 
@@ -196,4 +193,3 @@ BASE_DIR_BIPRESENTS = settings.base_dir_bipresents
 BASE_DIR_NW = settings.base_dir_nw
 NW_FILES_DIR = settings.nw_files_dir
 APP_DIR = settings.app_dir
-DEFAULT_IMAGES_DIR = settings.default_images_dir

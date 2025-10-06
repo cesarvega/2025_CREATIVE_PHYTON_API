@@ -111,6 +111,40 @@ class CreatePresentationMetadata(BaseModel):
         default=None,
         description="Optional list of PPTX filenames that should be rotated when building slides.",
     )
+    
+    # Physical PowerPoint generation options (optional, will use defaults if not provided)
+    template_pack: Optional[str] = Field(
+        default=None,
+        description="Template pack folder to use for generating physical PowerPoint slides.",
+    )
+    base_template: Optional[str] = Field(
+        default=None,
+        description="Base template file for individual candidate slides.",
+    )
+    multi_template: Optional[str] = Field(
+        default=None,
+        description="Template file for slides containing multiple grouped candidates.",
+    )
+    group_template: Optional[str] = Field(
+        default=None,
+        description="Template file for group header slides.",
+    )
+    separator_template: Optional[str] = Field(
+        default=None,
+        description="Template file for separator slides between sections.",
+    )
+    summary_template: Optional[str] = Field(
+        default=None,
+        description="Template file for summary slides.",
+    )
+    include_macro_version: bool = Field(
+        default=False,
+        description="Generate a macro-enabled (.pptm) version of the PowerPoint file.",
+    )
+    generate_physical_pptx: bool = Field(
+        default=True,
+        description="Generate physical PowerPoint file combining original and template slides.",
+    )
 
     def to_service_request(
         self,
@@ -144,6 +178,15 @@ class CreatePresentationMetadata(BaseModel):
             page_number=self.page_number,
             project_type=self.project_type,
             template_rotation=self.template_rotation,
+            # Physical PowerPoint generation options
+            template_pack=self.template_pack,
+            base_template=self.base_template,
+            multi_template=self.multi_template,
+            group_template=self.group_template,
+            separator_template=self.separator_template,
+            summary_template=self.summary_template,
+            include_macro_version=self.include_macro_version,
+            generate_physical_pptx=self.generate_physical_pptx,
         )
 
 
@@ -232,6 +275,40 @@ class CreatePresentationRequest(BaseModel):
         default=None,
         description="Optional ordered list of template filenames to rotate per generated slide.",
     )
+    
+    # Physical PowerPoint generation options
+    template_pack: Optional[str] = Field(
+        default="BackgroundDefaultTemplate",
+        description="Template pack folder to use for generating physical PowerPoint slides.",
+    )
+    base_template: Optional[str] = Field(
+        default="template_default_2019.pptx",
+        description="Base template file for individual candidate slides.",
+    )
+    multi_template: Optional[str] = Field(
+        default="template_default_withgroups2019.pptx",
+        description="Template file for slides containing multiple grouped candidates.",
+    )
+    group_template: Optional[str] = Field(
+        default="template_default_withgroup_2019.pptx",
+        description="Template file for group header slides (A, B, C, etc.).",
+    )
+    separator_template: Optional[str] = Field(
+        default="template_default_seperator_2019.pptx",
+        description="Template file for separator slides between sections.",
+    )
+    summary_template: Optional[str] = Field(
+        default="template_default_summary2019.pptx",
+        description="Template file for summary slides at the end of presentation.",
+    )
+    include_macro_version: bool = Field(
+        default=False,
+        description="Generate a macro-enabled (.pptm) version of the PowerPoint file.",
+    )
+    generate_physical_pptx: bool = Field(
+        default=True,
+        description="Generate physical PowerPoint file combining original slides and template-generated slides.",
+    )
 
 
 class CreatePresentationResponse(BaseModel):
@@ -272,6 +349,10 @@ class CreatePresentationResponse(BaseModel):
     )
     processing_time_seconds: float = Field(
         ..., description="Total processing time spent inside the orchestration pipeline."
+    )
+    generated_files: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="Paths to physically generated PowerPoint files (printable .pptx and macro .pptm).",
     )
 
 

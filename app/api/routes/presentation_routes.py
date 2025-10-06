@@ -34,13 +34,27 @@ logger = get_logger(__name__)
 @router.post(
     "/create",
     response_model=CreatePresentationResponse,
-    summary="Create a complete presentation from Excel + PPTX inputs",
+    summary="Create a complete presentation from Excel + PPTX inputs with physical file generation",
     description=(
         "Upload the Excel candidate workbook, a base PPTX template, and a metadata JSON payload "
-        "to generate a fully populated presentation. The endpoint processes Excel data, applies template "
-        "rotation, persists database records, and returns diagnostic information about the generated assets."
+        "to generate a fully populated presentation. This endpoint:\n\n"
+        "1. **Processes Excel data** - Extracts names, categories, groups, and rationales\n"
+        "2. **Converts PPTX to images** - Generates JPG images from each slide of the original PPTX\n"
+        "3. **Generates slide metadata** - Creates detailed slide information for database storage\n"
+        "4. **Applies template rotation** (optional) - Rotates through specified templates for variety\n"
+        "5. **Generates physical PowerPoint file** - Combines original PPTX slides with template-generated slides:\n"
+        "   - Original PPTX slides (before `page_number`)\n"
+        "   - Template-generated slides from Excel data (groups, individuals, multi-name slides)\n"
+        "   - Original PPTX slides (after generated slides)\n"
+        "6. **Persists to database** - Saves presentation metadata and slide details to nw_Master and nw_Details\n"
+        "7. **Returns complete response** - Includes presentation ID, generated file paths, and processing stats\n\n"
+        "The generated PowerPoint file is a complete, ready-to-present deck that seamlessly integrates "
+        "your original slides with dynamically generated content from the Excel data."
     ),
-    response_description="Creation status, generated slide counts, and source artifact metadata.",
+    response_description=(
+        "Creation status with presentation ID, total slide count, processing time, "
+        "and paths to generated PowerPoint files (.pptx and optional .pptm)."
+    ),
     responses={
         400: {
             "description": "Invalid or missing files provided in the multipart request.",
@@ -90,9 +104,21 @@ async def create_presentation(
     etc.) together with two file uploads: the Excel candidate sheet (`excel_file`) and
     the PowerPoint template (`pptx_file`).
 
+    **Optional Physical PowerPoint Generation:**
+    If `generate_physical_pptx=true` in metadata, the service will also generate a
+    complete physical PowerPoint file combining:
+    - Original slides from the uploaded PPTX (before generated content)
+    - Dynamically generated slides from Excel data using templates
+    - Original slides from the uploaded PPTX (after generated content)
+    
+    This requires additional template configuration fields:
+    - `template_pack`: Template directory name (e.g., "BackgroundTemplates")
+    - `base_template`, `multi_template`, `group_template`, `separator_template`, `summary_template`
+    - `include_macro_version`: Generate .pptm file (default: false)
+
     The service then executes the full pipeline:
     Excel processing → PPTX conversion → slide generation → template application →
-    database persistence.
+    database persistence → [optional] physical PowerPoint generation.
     """
     try:
         # Validate Excel file
