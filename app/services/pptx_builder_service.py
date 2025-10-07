@@ -1,4 +1,5 @@
 import re
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -317,30 +318,29 @@ class PPTXBuilderService:
         options: PresentationBuildOptions,
         details: List[Dict[str, Any]],
         excel_data: ProcessedExcelData,
-        original_pptx_images: List[str],
+        original_pptx_path: str,
         page_number_insert: int,
     ) -> PresentationBuildArtifacts:
         """
-        Compose complete PowerPoint combining original PPTX slides with template-generated slides.
+        Compose complete PowerPoint by combining original PPTX slides with template-generated slides.
         
-        This method creates a comprehensive presentation by:
-        1. Inserting original PPTX slides (before page_number_insert)
-        2. Adding template-generated slides from Excel data
-        3. Appending remaining original PPTX slides (after generated slides)
+        Process:
+        1. Insert original slides from user's PPTX (before page_number_insert)
+        2. Insert slides generated from Excel data
+        3. Insert remaining original slides (after page_number_insert)
         
         Args:
-            request: Presentation creation request with configuration
-            options: Build options for template selection and output settings
-            details: List of slide detail items generated from Excel
-            excel_data: Processed Excel data (reserved for future use)
-            original_pptx_images: List of JPG image paths from converted PPTX
-            page_number_insert: Position where template slides should be inserted (1-based)
+            request: Presentation creation request
+            options: Build options for presentation
+            details: Slide details from Excel processing
+            excel_data: Processed Excel data
+            original_pptx_path: Path to original PPTX file sent by user
+            page_number_insert: Position where Excel-generated slides should be inserted
             
         Returns:
-            PresentationBuildArtifacts with paths to generated files and metadata
+            PresentationBuildArtifacts with paths and metadata
         """
         _ = excel_data  # Reserved for future enhancements
-        
         template_paths = self._resolve_template_paths(options)
         output_base, _ = resolve_project_output(
             request.display_name,
@@ -362,14 +362,15 @@ class PPTXBuilderService:
         pythoncom.CoInitialize()
         app = None
         output_presentation = None
+        original_pptx = None
         template_handles: Dict[str, Any] = {}
 
         try:
-            # Initialize PowerPoint Application
+            # Initialize PowerPoint
             try:
                 app = client.Dispatch("PowerPoint.Application")
                 app.Visible = 1
-            except Exception as dispatch_error:  # pylint: disable=broad-except
+            except Exception as dispatch_error:
                 logger.error("Unable to start PowerPoint automation: %s", dispatch_error)
                 raise RuntimeError(
                     "PowerPoint automation is unavailable. Ensure Microsoft PowerPoint is installed."
@@ -379,29 +380,41 @@ class PPTXBuilderService:
             template_handles = self._open_template_presentations(app, template_paths)
             base_template = template_handles["base"]
 
-            # Create new presentation with base template settings
+            # Create new presentation with base template configuration
             output_presentation = app.Presentations.Add()
             output_presentation.PageSetup.SlideWidth = base_template.PageSetup.SlideWidth
             output_presentation.PageSetup.SlideHeight = base_template.PageSetup.SlideHeight
             output_presentation.ApplyTemplate(str(template_paths["base"].resolve()))
 
+            # Open original PPTX sent by user
+            original_pptx = app.Presentations.Open(str(original_pptx_path), WithWindow=False)
+            total_original_slides = original_pptx.Slides.Count
+
             logger.info(
-                "Starting presentation composition: %d original images, insert at position %d, %d template slides",
-                len(original_pptx_images),
+                "Composing presentation: %d original slides, insert at position %d, %d generated slides",
+                total_original_slides,
                 page_number_insert,
                 len(details),
             )
 
-            # SECTION A: Insert original PPTX slides BEFORE page_number_insert
-            prefix_slides = original_pptx_images[:page_number_insert - 1] if page_number_insert > 1 else []
-            for img_path in prefix_slides:
-                slide = self._insert_image_slide(output_presentation, img_path, base_template, warnings)
-                if slide:
-                    total_slides_created += 1
-            
-            logger.info("Inserted %d prefix slides from original PPTX", len(prefix_slides))
+            # SECTION A: Insert original slides before page_number_insert
+            if page_number_insert > 1:
+                slides_to_copy = min(page_number_insert - 1, total_original_slides)
+                for i in range(1, slides_to_copy + 1):
+                    try:
+                        slide = original_pptx.Slides(i)
+                        slide.Copy()
+                        output_presentation.Slides.Paste(output_presentation.Slides.Count + 1)
+                        total_slides_created += 1
+                        logger.debug("Copied original slide %d", i)
+                    except Exception as copy_error:
+                        logger.warning("Failed to copy original slide %d: %s", i, copy_error)
+                        warnings.append(f"Failed to copy original slide {i}")
+
+            logger.info("Inserted %d prefix slides from original PPTX", total_slides_created)
 
             # SECTION B: Insert template-generated slides from Excel data
+            generated_count = 0
             for detail in details:
                 template_key = self._select_template_kind(detail)
                 if template_key == "skip":
@@ -415,35 +428,49 @@ class PPTXBuilderService:
                     )
                     template_handles[template_key] = source_presentation
 
-                new_slide = self._copy_slide_from_template(
-                    source_presentation,
-                    output_presentation,
-                    template_paths[template_key],
-                )
-                total_slides_created += 1
-
-                # Populate slide with data based on template type
-                if template_key == "separator":
-                    self._populate_separator_slide(new_slide, detail, warnings)
-                elif template_key == "summary":
-                    self._populate_summary_slide(new_slide, summary_tracker, warnings)
-                elif template_key == "group":
-                    self._populate_group_slide(new_slide, detail, warnings)
-                elif template_key == "multi":
-                    self._populate_multi_slide(new_slide, detail, summary_tracker, warnings)
-                else:
-                    self._populate_base_slide(new_slide, detail, summary_tracker, warnings)
-
-            logger.info("Inserted %d template-generated slides", len(details))
-
-            # SECTION C: Insert original PPTX slides AFTER generated slides
-            suffix_slides = original_pptx_images[page_number_insert - 1:] if page_number_insert <= len(original_pptx_images) else []
-            for img_path in suffix_slides:
-                slide = self._insert_image_slide(output_presentation, img_path, base_template, warnings)
-                if slide:
+                try:
+                    new_slide = self._copy_slide_from_template(
+                        source_presentation,
+                        output_presentation,
+                        template_paths[template_key],
+                    )
                     total_slides_created += 1
-            
-            logger.info("Inserted %d suffix slides from original PPTX", len(suffix_slides))
+                    generated_count += 1
+
+                    # Populate slide with data based on template type
+                    if template_key == "separator":
+                        self._populate_separator_slide(new_slide, detail, warnings)
+                    elif template_key == "summary":
+                        self._populate_summary_slide(new_slide, summary_tracker, warnings)
+                    elif template_key == "group":
+                        self._populate_group_slide(new_slide, detail, warnings)
+                    elif template_key == "multi":
+                        self._populate_multi_slide(new_slide, detail, summary_tracker, warnings)
+                    else:
+                        self._populate_base_slide(new_slide, detail, summary_tracker, warnings)
+                        
+                except Exception as slide_error:
+                    logger.error("Failed to create template slide: %s", slide_error)
+                    warnings.append(f"Failed to create template slide: {str(slide_error)}")
+
+            logger.info("Inserted %d template-generated slides", generated_count)
+
+            # SECTION C: Insert remaining original slides after generated slides
+            if page_number_insert <= total_original_slides:
+                suffix_count = 0
+                for i in range(page_number_insert, total_original_slides + 1):
+                    try:
+                        slide = original_pptx.Slides(i)
+                        slide.Copy()
+                        output_presentation.Slides.Paste(output_presentation.Slides.Count + 1)
+                        total_slides_created += 1
+                        suffix_count += 1
+                        logger.debug("Copied original slide %d", i)
+                    except Exception as copy_error:
+                        logger.warning("Failed to copy original slide %d: %s", i, copy_error)
+                        warnings.append(f"Failed to copy original slide {i}")
+                
+                logger.info("Inserted %d suffix slides from original PPTX", suffix_count)
 
             # Save output files
             printable_path_out: Optional[Path] = None
@@ -494,32 +521,39 @@ class PPTXBuilderService:
                 len(warnings),
             )
 
-        except Exception as exc:  # pylint: disable=broad-except
+            return artifacts
+
+        except Exception as exc:
             logger.error("Error composing presentation with original slides: %s", exc)
             raise
+            
         finally:
             # Cleanup COM objects
+            if original_pptx is not None:
+                try:
+                    original_pptx.Close()
+                except Exception:
+                    pass
+
             if output_presentation is not None:
                 try:
                     output_presentation.Close()
-                except Exception:  # pragma: no cover
+                except Exception:
                     pass
 
             for handle in template_handles.values():
                 try:
                     handle.Close()
-                except Exception:  # pragma: no cover
+                except Exception:
                     pass
 
             if app is not None:
                 try:
                     app.Quit()
-                except Exception:  # pragma: no cover
+                except Exception:
                     pass
 
             pythoncom.CoUninitialize()
-
-        return artifacts
 
     def _relative_download_path(self, artifact_path: Path) -> str:
         """Return a relative URL-like path when possible."""
@@ -669,6 +703,697 @@ class PPTXBuilderService:
                 matches.append(shape)
         return matches
 
+
+    def _find_checkbox_for_text(self, slide, text_shape) -> Any:
+        """Finds the checkbox (shape) that is near the given text shape."""
+        try:
+            text_left = getattr(text_shape, "Left", 0)
+            text_top = getattr(text_shape, "Top", 0)
+
+            # Find shapes that are to the left of the text and at a similar height
+            horizontal_tolerance = 800000  # ~0.83 inches
+            vertical_tolerance = 200000    # ~0.21 inches
+
+            count = getattr(slide.Shapes, "Count", 0)
+            closest_checkbox = None
+            min_distance = float('inf')
+
+            for idx in range(1, count + 1):
+                shape = slide.Shapes(idx)
+                shape_left = getattr(shape, "Left", 0)
+                shape_top = getattr(shape, "Top", 0)
+
+                # The checkbox must be to the left of the text
+                if shape_left < text_left and abs(shape_left - text_left) <= horizontal_tolerance:
+                    # And at a similar height
+                    if abs(shape_top - text_top) <= vertical_tolerance:
+                        # Ensure it is not a text frame (checkboxes do not have text)
+                        try:
+                            has_text_frame = bool(getattr(shape, "HasTextFrame", 0))
+                            if has_text_frame:
+                                continue
+                        except Exception:
+                            pass
+
+                        # Compute distance
+                        distance = abs(shape_left - text_left) + abs(shape_top - text_top)
+                        if distance < min_distance:
+                            min_distance = distance
+                            closest_checkbox = shape
+
+            return closest_checkbox
+        except Exception as exc:
+            logger.debug("Error finding checkbox for text shape: %s", exc)
+            return None
+
+    def _group_name_placeholder_columns(self, shapes: Sequence[Any]) -> List[Dict[str, Any]]:
+        """Group placeholder text shapes into columns based on their horizontal position."""
+        tolerance = 120000  # ~0.13 inches
+        columns: List[Dict[str, Any]] = []
+        for shape in sorted(shapes, key=lambda s: (getattr(s, "Left", 0), getattr(s, "Top", 0))):
+            left = getattr(shape, "Left", None)
+            top = getattr(shape, "Top", None)
+            if left is None or top is None:
+                continue
+            for column in columns:
+                if abs(column["left"] - left) <= tolerance:
+                    column["shapes"].append(shape)
+                    break
+            else:
+                columns.append({"left": left, "shapes": [shape]})
+        for column in columns:
+            column["shapes"].sort(key=lambda s: getattr(s, "Top", 0))
+        columns.sort(key=lambda c: c["left"])
+        return columns
+
+    def _create_checkbox_shape(self, slide, left: int, top: int, size: int = 152400) -> Any:
+        """Creates a new checkbox (square) at the specified position."""
+        try:
+            # msoShapeRectangle = 1
+            checkbox = slide.Shapes.AddShape(1, left, top, size, size)
+
+            # Configure the checkbox as a border-only square with no fill
+            checkbox.Fill.Visible = 0  # No fill
+            checkbox.Line.Visible = 1  # With border
+            checkbox.Line.ForeColor.RGB = 0  # Black
+            checkbox.Line.Weight = 1.5  # Border thickness
+
+            return checkbox
+        except Exception as e:
+            logger.warning("Error creating checkbox: %s", e)
+            return None
+
+    def _find_group_for_text_shape(self, slide, text_shape) -> Any:
+        """Finds the group that contains a text shape."""
+        try:
+            text_shape_id = getattr(text_shape, "Id", None)
+            if not text_shape_id:
+                return None
+
+            count = getattr(slide.Shapes, "Count", 0)
+            for idx in range(1, count + 1):
+                try:
+                    shape = slide.Shapes(idx)
+                    # Type 6 = msoGroup
+                    if getattr(shape, "Type", None) == 6:
+                        group_items = getattr(shape, "GroupItems", None)
+                        if group_items:
+                            for i in range(1, group_items.Count + 1):
+                                item = group_items.Item(i)
+                                if getattr(item, "Id", None) == text_shape_id:
+                                    return shape
+                except:
+                    continue
+
+            return None
+        except Exception as e:
+            logger.debug("Error finding group: %s", e)
+            return None
+
+    def _calculate_layout_requirements(self, names_count: int, max_per_column: int = 18) -> Tuple[int, int]:
+        """Calculates how many columns and rows are needed."""
+        columns_needed = math.ceil(names_count / max_per_column)
+        names_per_column = math.ceil(names_count / columns_needed)
+        return columns_needed, names_per_column
+
+    def _duplicate_group_for_new_column(self, slide, ref_group, new_left: int) -> Any:
+        """Duplicates a complete group (checkbox + text) for a new column."""
+        try:
+            group_range = ref_group.Duplicate()
+            new_group = group_range.Item(1)
+            new_group.Left = int(new_left)
+            new_group.Top = ref_group.Top
+
+            # Clear text in the duplicated group
+            group_items = getattr(new_group, "GroupItems", None)
+            if group_items:
+                for i in range(1, group_items.Count + 1):
+                    item = group_items.Item(i)
+                    try:
+                        has_text = bool(getattr(item, "HasTextFrame", 0))
+                        if has_text:
+                            self._set_shape_text(item, "")
+                    except Exception:
+                        pass
+
+            new_group.Visible = False
+            return new_group
+        except Exception as e:
+            logger.error("Error duplicating group: %s", e)
+            return None
+
+    def _duplicate_group_for_new_row(self, slide, ref_group, vertical_spacing: int) -> Any:
+        """Duplicates a group to create a new row in the same column."""
+        try:
+            group_range = ref_group.Duplicate()
+            new_group = group_range.Item(1)
+            new_group.Top = int(ref_group.Top + vertical_spacing)
+            new_group.Left = ref_group.Left
+
+            # Clear text
+            group_items = getattr(new_group, "GroupItems", None)
+            if group_items:
+                for i in range(1, group_items.Count + 1):
+                    item = group_items.Item(i)
+                    try:
+                        has_text = bool(getattr(item, "HasTextFrame", 0))
+                        if has_text:
+                            self._set_shape_text(item, "")
+                    except Exception:
+                        pass
+
+            new_group.Visible = False
+            return new_group
+        except Exception as e:
+            logger.error("Error duplicating row group: %s", e)
+            return None
+
+    def _calculate_column_spacing(self, columns: List[Dict[str, Any]]) -> int:
+        """Calculates the spacing between existing columns."""
+        if len(columns) > 1:
+            spacing = columns[1]["left"] - columns[0]["left"]
+            logger.debug("Column spacing calculated: %d EMUs", spacing)
+            return spacing
+        # Default spacing: ~2.4 inches
+        default_spacing = 2300000
+        logger.debug("Using default column spacing: %d EMUs", default_spacing)
+        return default_spacing
+
+    def _create_additional_columns(
+        self,
+        slide,
+        columns: List[Dict[str, Any]],
+        additional_needed: int,
+        slide_width: int,
+    ) -> int:
+        """Creates additional columns by duplicating the first column."""
+        if not columns or not columns[0].get("groups"):
+            logger.warning("No reference column available for duplication")
+            return 0
+
+        ref_column = columns[0]
+        col_spacing = self._calculate_column_spacing(columns)
+        ref_group = ref_column["groups"][0]
+        group_width = getattr(ref_group, "Width", 914400)
+
+        created = 0
+        for _ in range(additional_needed):
+            last_column = columns[-1]
+            new_column_left = last_column["left"] + col_spacing
+
+            # Check if it fits horizontally
+            if new_column_left + group_width > slide_width * 0.95:
+                # Try with reduced spacing
+                reduced_spacing = int(col_spacing * 0.75)
+                new_column_left = last_column["left"] + reduced_spacing
+
+                if new_column_left + group_width > slide_width * 0.95:
+                    logger.warning("No more horizontal space for additional columns")
+                    break
+
+            new_column = {"left": new_column_left, "groups": []}
+
+            # Duplicate all groups from the reference column
+            for ref_group in ref_column["groups"]:
+                new_group = self._duplicate_group_for_new_column(slide, ref_group, new_column_left)
+                if new_group:
+                    new_column["groups"].append(new_group)
+
+            if new_column["groups"]:
+                columns.append(new_column)
+                created += 1
+                logger.info("Created additional column at position %d", new_column_left)
+
+        return created
+
+    def _extend_column_rows(
+        self,
+        slide,
+        column: Dict[str, Any],
+        target_rows: int,
+        slide_height: int,
+    ) -> int:
+        """Extends a column with additional rows if needed."""
+        groups_list = column["groups"]
+        current_rows = len(groups_list)
+
+        if current_rows >= target_rows or not groups_list:
+            return 0
+
+        # Calculate vertical spacing
+        if len(groups_list) > 1:
+            vertical_spacing = groups_list[-1].Top - groups_list[-2].Top
+        else:
+            vertical_spacing = 500000  # ~0.52 inches by default
+
+        template_group = groups_list[-1]
+        created = 0
+
+        for _ in range(target_rows - current_rows):
+            new_top = int(template_group.Top + vertical_spacing)
+
+            # Check vertical limit
+            if new_top > slide_height * 0.85:
+                logger.debug("Vertical space limit reached in column")
+                break
+
+            new_group = self._duplicate_group_for_new_row(slide, template_group, vertical_spacing)
+            if new_group:
+                groups_list.append(new_group)
+                template_group = new_group
+                created += 1
+
+        column["groups"] = groups_list
+        return created
+
+    def _assign_name_to_group(self, group, name: str, font_size: int = 12) -> bool:
+        """Assigns a name to the text shape within a group."""
+        try:
+            group_items = getattr(group, "GroupItems", None)
+            if not group_items:
+                return False
+
+            for i in range(1, group_items.Count + 1):
+                item = group_items.Item(i)
+                try:
+                    has_text = bool(getattr(item, "HasTextFrame", 0))
+                    if has_text:
+                        self._set_shape_text(item, name)
+                        # Adjust font size based on name length
+                        if len(name) > 20:
+                            item.TextFrame.TextRange.Font.Size = font_size - 2
+                        elif len(name) > 15:
+                            item.TextFrame.TextRange.Font.Size = font_size - 1
+                        else:
+                            item.TextFrame.TextRange.Font.Size = font_size
+                        return True
+                except Exception as e:
+                    logger.debug("Error setting text in group item: %s", e)
+                    continue
+
+            return False
+        except Exception as e:
+            logger.error("Error assigning name to group: %s", e)
+            return False
+
+    def _group_shapes_into_columns(self, shapes: List[Any]) -> List[Dict[str, Any]]:
+        """Groups shapes into columns by horizontal position."""
+        tolerance = 150000  # ~0.16 inches
+        columns = []
+
+        for shape in sorted(shapes, key=lambda s: (getattr(s, "Left", 0), getattr(s, "Top", 0))):
+            left = getattr(shape, "Left", 0)
+
+            found = False
+            for column in columns:
+                if abs(column["left"] - left) <= tolerance:
+                    column["groups"].append(shape)
+                    found = True
+                    break
+
+            if not found:
+                columns.append({"left": left, "groups": [shape]})
+
+        # Sort groups within each column by Top
+        for column in columns:
+            column["groups"].sort(key=lambda s: getattr(s, "Top", 0))
+
+        # Sort columns by Left
+        columns.sort(key=lambda c: c["left"])
+
+        return columns
+
+    def _layout_multi_candidate_names(
+        self,
+        *,
+        slide,
+        placeholder_shapes: List[Any],
+        names: List[str],
+        context: str,
+        warnings: List[str],
+    ) -> bool:
+        """
+        Distributes names in a multi-column layout, creating additional columns and rows as needed.
+        """
+        if not placeholder_shapes:
+            logger.warning("No placeholder shapes provided for layout in %s", context)
+            return False
+        if not names:
+            logger.debug("No names to layout in %s", context)
+            return True
+
+        try:
+            # Find groups that contain the placeholders
+            groups = []
+            groups_seen = set()
+
+            for text_shape in placeholder_shapes:
+                group = self._find_group_for_text_shape(slide, text_shape)
+                if group:
+                    group_id = getattr(group, "Id", id(group))
+                    if group_id not in groups_seen:
+                        groups.append(group)
+                        groups_seen.add(group_id)
+
+            # If there are no groups, work with individual shapes
+            if not groups:
+                logger.info("No groups found, working with individual shapes")
+                columns = self._group_name_placeholder_columns(placeholder_shapes)
+                return self._layout_without_groups(slide, columns, names, context)
+
+            # Clear text from existing groups
+            for group in groups:
+                try:
+                    group_items = getattr(group, "GroupItems", None)
+                    if group_items:
+                        for i in range(1, group_items.Count + 1):
+                            item = group_items.Item(i)
+                            if getattr(item, "HasTextFrame", 0):
+                                self._set_shape_text(item, "")
+                    group.Visible = False
+                except Exception as e:
+                    logger.warning("Error clearing group: %s", e)
+
+            # Organize into columns
+            columns = self._group_shapes_into_columns(groups)
+            if not columns:
+                logger.warning("Could not group into columns")
+                return False
+
+            # Get slide dimensions
+            try:
+                slide_width = slide.Parent.PageSetup.SlideWidth
+                slide_height = slide.Parent.PageSetup.SlideHeight
+            except Exception:
+                slide_width = 9144000
+                slide_height = 6858000
+
+            # Calculate layout requirements
+            max_per_column = max(len(col["groups"]) for col in columns) if columns else 18
+            columns_needed, names_per_column = self._calculate_layout_requirements(len(names), max_per_column)
+
+            logger.info("Layout requirements: %d columns needed, %d names per column", columns_needed, names_per_column)
+
+            # Create additional columns if necessary
+            current_columns = len(columns)
+            if columns_needed > current_columns:
+                additional_needed = columns_needed - current_columns
+                created = self._create_additional_columns(slide, columns, additional_needed, slide_width)
+                logger.info("Created %d additional columns", created)
+
+            # Extend rows in each column if needed
+            for col_idx, column in enumerate(columns):
+                if len(column["groups"]) < names_per_column:
+                    self._extend_column_rows(slide, column, names_per_column, slide_height)
+
+            # Distribute names across the groups
+            successful_placements = 0
+            name_idx = 0
+
+            for col_idx, column in enumerate(columns):
+                for row_idx, group in enumerate(column["groups"]):
+                    if name_idx >= len(names):
+                        group.Visible = False
+                    else:
+                        if self._assign_name_to_group(group, names[name_idx]):
+                            group.Visible = True
+                            successful_placements += 1
+                            logger.debug("Assigned '%s' to col %d, row %d", names[name_idx][:20], col_idx, row_idx)
+                        name_idx += 1
+
+            logger.info("Layout complete: %d/%d names placed", successful_placements, len(names))
+
+            if successful_placements < len(names):
+                logger.warning("Only placed %d of %d names", successful_placements, len(names))
+
+            return successful_placements >= len(names) * 0.8
+
+        except Exception as exc:
+            logger.error("Error in multi-candidate layout: %s", exc, exc_info=True)
+            return False
+
+    def _group_shapes_into_columns(self, shapes: List[Any]) -> List[Dict[str, Any]]:
+        """Groups shapes/groups into columns based on their horizontal position."""
+        tolerance = 120000
+        columns = []
+
+        for shape in sorted(shapes, key=lambda s: (getattr(s, "Left", 0), getattr(s, "Top", 0))):
+            left = getattr(shape, "Left", 0)
+
+            # Find existing column
+            found = False
+            for column in columns:
+                if abs(column["left"] - left) <= tolerance:
+                    column["groups"].append(shape)
+                    found = True
+                    break
+
+            if not found:
+                columns.append({"left": left, "groups": [shape]})
+
+        # Sort shapes within each column by Top
+        for column in columns:
+            column["groups"].sort(key=lambda s: getattr(s, "Top", 0))
+
+        # Sort columns by Left
+        columns.sort(key=lambda c: c["left"])
+
+        return columns
+
+    def _find_checkbox_near_text(self, slide, text_shape) -> Any:
+        """Finds the checkbox (oval/rectangle) near the text shape."""
+        try:
+            text_left = getattr(text_shape, "Left", 0)
+            text_top = getattr(text_shape, "Top", 0)
+
+            # Find shapes near the text (to the left)
+            horizontal_tolerance = 400000  # ~0.4 inches
+            vertical_tolerance = 150000    # ~0.15 inches
+
+            count = getattr(slide.Shapes, "Count", 0)
+            for idx in range(1, count + 1):
+                shape = slide.Shapes(idx)
+
+                # Ignore the same shape
+                if getattr(shape, "Id", None) == getattr(text_shape, "Id", None):
+                    continue
+
+                shape_type = getattr(shape, "Type", None)
+                # Type 1 = msoAutoShape (ovals, rectangles)
+                if shape_type == 1:
+                    shape_left = getattr(shape, "Left", 0)
+                    shape_top = getattr(shape, "Top", 0)
+
+                    # The checkbox must be to the left of the text
+                    if shape_left < text_left:
+                        h_dist = abs(text_left - shape_left)
+                        v_dist = abs(text_top - shape_top)
+
+                        if h_dist <= horizontal_tolerance and v_dist <= vertical_tolerance:
+                            return shape
+
+            return None
+        except Exception as e:
+            logger.debug("Error finding checkbox: %s", e)
+            return None
+
+    def _layout_without_groups(self, slide, columns, names, context) -> bool:
+        """Layout with individual shapes - duplicates text and checkboxes separately."""
+        try:
+            logger.info("Layout with individual shapes: %d names, %d base columns",
+                       len(names), len(columns))
+
+            # Get slide dimensions
+            try:
+                slide_width = slide.Parent.PageSetup.SlideWidth
+                slide_height = slide.Parent.PageSetup.SlideHeight
+            except:
+                slide_width = 9144000
+                slide_height = 6858000
+
+            # PRE-MAP all checkboxes to their texts to avoid repeated lookups
+            checkbox_map = {}  # {text_shape_id: checkbox_shape}
+            logger.info("Pre-mapping checkboxes...")
+
+            for column in columns:
+                for text_shape in column["shapes"]:
+                    text_id = getattr(text_shape, "Id", None)
+                    if text_id:
+                        checkbox = self._find_checkbox_near_text(slide, text_shape)
+                        if checkbox:
+                            checkbox_map[text_id] = checkbox
+                            logger.debug("Checkbox mapped for text Id=%s", text_id)
+
+            logger.info("Checkboxes mapped: %d", len(checkbox_map))
+
+            # Calculate current capacity
+            num_base_columns = len(columns)
+            max_rows = max(len(col["shapes"]) for col in columns)
+            total_capacity = num_base_columns * max_rows
+
+            logger.info("Current capacity: %d (%d cols x %d rows)", total_capacity, num_base_columns, max_rows)
+
+            # Create additional columns if necessary
+            if len(names) > total_capacity:
+                cols_needed = math.ceil((len(names) - total_capacity) / max_rows)
+                logger.info("Creating %d additional columns", cols_needed)
+
+                if num_base_columns > 1:
+                    col_spacing = columns[1]["left"] - columns[0]["left"]
+                else:
+                    col_spacing = 2300000
+
+                for new_col_idx in range(cols_needed):
+                    last_column = columns[-1]
+                    new_column_left = last_column["left"] + col_spacing
+
+                    # Validate if it fits
+                    ref_shape = columns[0]["shapes"][0]
+                    shape_width = getattr(ref_shape, "Width", 914400)
+
+                    if new_column_left + shape_width > slide_width * 0.9:
+                        logger.warning("No more space for additional columns")
+                        break
+
+                    new_column = {"left": new_column_left, "shapes": []}
+
+                    # Duplicate text shapes from the first column
+                    for ref_text in columns[0]["shapes"]:
+                        try:
+                            # Duplicate text
+                            text_range = ref_text.Duplicate()
+                            new_text = text_range.Item(1)
+                            new_text.Left = int(new_column_left)
+                            new_text.Top = ref_text.Top
+                            self._set_shape_text(new_text, "")
+                            new_text.Visible = False
+
+                            # Duplicate associated checkbox using the map
+                            ref_text_id = getattr(ref_text, "Id", None)
+                            ref_checkbox = checkbox_map.get(ref_text_id)
+
+                            if ref_checkbox:
+                                try:
+                                    cb_range = ref_checkbox.Duplicate()
+                                    new_cb = cb_range.Item(1)
+                                    cb_offset = ref_checkbox.Left - ref_text.Left
+                                    new_cb.Left = int(new_column_left + cb_offset)
+                                    new_cb.Top = ref_text.Top
+                                    new_cb.Visible = False
+
+                                    # Map the new checkbox to the new text
+                                    new_text_id = getattr(new_text, "Id", None)
+                                    if new_text_id:
+                                        checkbox_map[new_text_id] = new_cb
+                                        logger.debug("New checkbox mapped: text Id=%s", new_text_id)
+                                except Exception as e:
+                                    logger.warning("Error duplicating checkbox: %s", e)
+
+                            new_column["shapes"].append(new_text)
+                        except Exception as e:
+                            logger.warning("Error duplicating shape: %s", e)
+
+                    if new_column["shapes"]:
+                        columns.append(new_column)
+                        logger.info("Column %d created with %d shapes", len(columns), len(new_column["shapes"]))
+
+            # Create additional rows if necessary
+            num_columns = len(columns)
+            names_per_column = math.ceil(len(names) / num_columns)
+
+            for col_idx, column in enumerate(columns):
+                while len(column["shapes"]) < names_per_column:
+                    if not column["shapes"]:
+                        break
+
+                    template_text = column["shapes"][-1]
+                    try:
+                        # Duplicate text
+                        text_range = template_text.Duplicate()
+                        new_text = text_range.Item(1)
+
+                        if len(column["shapes"]) > 1:
+                            v_spacing = column["shapes"][-1].Top - column["shapes"][-2].Top
+                        else:
+                            v_spacing = 500000
+
+                        new_top = int(template_text.Top + v_spacing)
+
+                        if new_top > slide_height * 0.85:
+                            break
+
+                        new_text.Top = new_top
+                        new_text.Left = template_text.Left
+                        self._set_shape_text(new_text, "")
+                        new_text.Visible = False
+
+                        # Duplicate checkbox using the map
+                        template_text_id = getattr(template_text, "Id", None)
+                        template_cb = checkbox_map.get(template_text_id)
+
+                        if template_cb:
+                            try:
+                                cb_range = template_cb.Duplicate()
+                                new_cb = cb_range.Item(1)
+                                new_cb.Top = new_top
+                                new_cb.Left = template_cb.Left
+                                new_cb.Visible = False
+
+                                # Map the new checkbox
+                                new_text_id = getattr(new_text, "Id", None)
+                                if new_text_id:
+                                    checkbox_map[new_text_id] = new_cb
+                            except Exception as e:
+                                logger.warning("Error duplicating vertical checkbox: %s", e)
+
+                        column["shapes"].append(new_text)
+                    except Exception as e:
+                        logger.warning("Error duplicating row: %s", e)
+                        break
+
+            # Assign names using the checkbox map
+            successful_placements = 0
+            name_idx = 0
+
+            for col_idx, column in enumerate(columns):
+                for row_idx, text_shape in enumerate(column["shapes"]):
+                    text_id = getattr(text_shape, "Id", None)
+                    checkbox = checkbox_map.get(text_id) if text_id else None
+
+                    if name_idx >= len(names):
+                        # No more names, hide
+                        text_shape.Visible = False
+                        if checkbox:
+                            checkbox.Visible = False
+                    else:
+                        # Assign name
+                        try:
+                            self._set_shape_text(text_shape, names[name_idx])
+                            text_shape.TextFrame.TextRange.Font.Size = 12
+                            text_shape.Visible = True
+
+                            if checkbox:
+                                checkbox.Visible = True
+
+                            logger.debug("Assigned '%s' to col %d, row %d (text Id=%s)",
+                                       names[name_idx][:20], col_idx, row_idx, text_id)
+
+                            successful_placements += 1
+                            name_idx += 1
+                        except Exception as e:
+                            logger.warning("Error assigning name to col %d, row %d: %s",
+                                         col_idx, row_idx, e)
+                            name_idx += 1
+
+            logger.info("Layout complete: %d/%d names placed in %d columns",
+                       successful_placements, len(names), num_columns)
+
+            return successful_placements >= len(names) * 0.5
+
+        except Exception as exc:
+            logger.error("Error in layout: %s", exc, exc_info=True)
+            return False
+    
     def _replace_placeholder_text(
         self,
         slide,
@@ -732,17 +1457,70 @@ class PPTXBuilderService:
         )
 
     def _populate_group_slide(self, slide, detail: Dict[str, Any], warnings: List[str]) -> None:
+        """Populate group slide with adaptive layout for multiple names."""
         group_name = detail.get("group_name") or detail.get("name") or "Group"
         category = detail.get("category") or ""
         context = self._detail_context(detail, "group slide")
-        self._replace_placeholder_text(
-            slide,
-            "[New Names]",
-            group_name,
-            warnings=warnings,
-            required=bool(group_name),
-            context=context,
-        )
+        
+        # Tokenize names in case they contain delimiters
+        names = tokenize_delimited_block(group_name) or [group_name]
+        cleaned_names = [name.strip() for name in names if name and name.strip()]
+        
+        logger.debug("Group slide: %d names found in '%s'", len(cleaned_names), group_name[:50])
+        
+        # First try to find and use adaptive layout for multiple names
+        placeholder_shapes = self._collect_placeholder_shapes(slide, "[New Names]")
+        
+        if cleaned_names and placeholder_shapes:
+            if len(cleaned_names) > 1:
+                logger.info("Attempting adaptive layout for %d names in group slide", len(cleaned_names))
+                # Use adaptive layout for multiple names
+                layout_ok = self._layout_multi_candidate_names(
+                    slide=slide,
+                    placeholder_shapes=placeholder_shapes,
+                    names=cleaned_names,
+                    context=context,
+                    warnings=warnings,
+                )
+                
+                if not layout_ok:
+                    logger.warning("Adaptive layout failed, using fallback for group slide")
+                    # Fallback: distribute names across available placeholders
+                    for idx, value in enumerate(cleaned_names):
+                        if idx < len(placeholder_shapes):
+                            self._set_shape_text(placeholder_shapes[idx], value)
+                        else:
+                            warnings.append(
+                                f"Group slide '{category}' has more names ({len(cleaned_names)}) than "
+                                f"placeholders ({len(placeholder_shapes)}); extra name '{value}' was omitted."
+                            )
+                            break
+                    # Clear remaining placeholders
+                    for idx in range(len(cleaned_names), len(placeholder_shapes)):
+                        self._set_shape_text(placeholder_shapes[idx], "")
+            else:
+                # Single name - use simple replacement
+                self._replace_placeholder_text(
+                    slide,
+                    "[New Names]",
+                    cleaned_names[0] if cleaned_names else group_name,
+                    warnings=warnings,
+                    required=bool(cleaned_names),
+                    context=context,
+                )
+        else:
+            # No placeholder shapes found - use text replacement
+            combined_names = ", ".join(cleaned_names) if len(cleaned_names) > 1 else (cleaned_names[0] if cleaned_names else group_name)
+            self._replace_placeholder_text(
+                slide,
+                "[New Names]",
+                combined_names,
+                warnings=warnings,
+                required=bool(group_name),
+                context=context,
+            )
+        
+        # Populate category
         self._replace_placeholder_text(
             slide,
             "Category",
@@ -759,43 +1537,66 @@ class PPTXBuilderService:
         summary_tracker: Dict[str, List[str]],
         warnings: List[str],
     ) -> None:
+        """Populate multi-candidate slide with adaptive layout."""
         category = detail.get("category") or detail.get("group_name") or "General"
         names = tokenize_delimited_block(detail.get("name")) or [detail.get("name", "")]
         summary_tracker.setdefault(category, []).extend([name for name in names if name])
 
         context = self._detail_context(detail, "multi slide")
-        name_shapes = self._collect_placeholder_shapes(slide, "Name Candidate")
-        if not name_shapes and any(name.strip() for name in names):
-            warnings.append(
-                f"No 'Name Candidate' placeholders found in {context}; candidate names will not render."
-            )
-        for idx, value in enumerate(names):
-            if idx < len(name_shapes):
-                self._set_shape_text(name_shapes[idx], value)
-            else:
+        placeholder_shapes = self._collect_placeholder_shapes(slide, "Name Candidate")
+        
+        cleaned_names = [name.strip() for name in names if name and name.strip()]
+        
+        logger.debug("Multi slide: %d names found", len(cleaned_names))
+        
+        if not placeholder_shapes:
+            if cleaned_names:
                 warnings.append(
-                    f"Slide '{category}' has more names than placeholders; extra name '{value}' was omitted."
+                    f"No 'Name Candidate' placeholders found in {context}; "
+                    f"candidate names will not render."
                 )
-                break
+            return
+        
+        if not cleaned_names:
+            # Clear all placeholders if no names
+            for shape in placeholder_shapes:
+                self._set_shape_text(shape, "")
+            return
 
-        for idx in range(len(names), len(name_shapes)):
-            self._set_shape_text(name_shapes[idx], "")
+        logger.info("Attempting adaptive layout for %d names in multi slide", len(cleaned_names))
+        
+        # Always try adaptive layout first
+        layout_ok = self._layout_multi_candidate_names(
+            slide=slide,
+            placeholder_shapes=placeholder_shapes,
+            names=cleaned_names,
+            context=context,
+            warnings=warnings,
+        )
 
+        if not layout_ok:
+            logger.warning("Adaptive layout failed, using fallback for multi slide")
+            # Fallback: simple distribution across existing placeholders
+            for idx, value in enumerate(cleaned_names):
+                if idx < len(placeholder_shapes):
+                    self._set_shape_text(placeholder_shapes[idx], value)
+                else:
+                    warnings.append(
+                        f"Slide '{category}' has more names ({len(cleaned_names)}) than "
+                        f"placeholders ({len(placeholder_shapes)}); extra name '{value}' was omitted."
+                    )
+                    break
+            # Clear remaining placeholders
+            for idx in range(len(cleaned_names), len(placeholder_shapes)):
+                self._set_shape_text(placeholder_shapes[idx], "")
+
+        # Populate category
         self._replace_placeholder_text(
             slide,
             "Category",
             category,
             warnings=warnings,
             required=bool(category),
-            context=context,
-        )
-        rationale = normalize_delimited_block(detail.get("rationale"))
-        self._replace_placeholder_text(
-            slide,
-            "[Comments]",
-            rationale,
-            warnings=warnings,
-            required=False,
             context=context,
         )
 
@@ -839,16 +1640,7 @@ class PPTXBuilderService:
             context=context,
         )
 
-        notation_or_comments = detail.get("notation") or detail.get("name_sub_group") or ""
-        additional_comments = normalize_delimited_block(notation_or_comments)
-        self._replace_placeholder_text(
-            slide,
-            "[Comments]",
-            additional_comments,
-            warnings=warnings,
-            required=False,
-            context=context,
-        )
+        # Leave the comments placeholder untouched so the template formatting remains.
 
         kana = detail.get("kana") or ""
         self._replace_placeholder_text(
@@ -860,15 +1652,7 @@ class PPTXBuilderService:
             context=context,
         )
 
-        for placeholder in ("Neutral", "Negative", "Positive"):
-            self._replace_placeholder_text(
-                slide,
-                placeholder,
-                "",
-                warnings=warnings,
-                required=False,
-                context=context,
-            )
+        # Preserve vote placeholders (Positive/Neutral/Negative) without overwriting template text.
 
     def _populate_summary_slide(
         self,
@@ -904,7 +1688,7 @@ class PPTXBuilderService:
         group_name = detail.get("group_name") or ""
 
         if slide_type == "image":
-            if detail.get("category") or detail.get("slide_description"):
+            if detail.get("category"):
                 return "separator"
             return "skip"
 

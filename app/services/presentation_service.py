@@ -27,6 +27,7 @@ from app.services.pptx_builder_service import pptx_builder_service
 from app.services.word_service import generate_feedback_document
 from app.services.email_service import send_presentation_emails
 from app.utils.logging_utils import get_logger
+from app.utils.path_utils import resolve_project_output
 
 
 logger = get_logger(__name__)
@@ -288,14 +289,24 @@ class PresentationService:
                 len(slides_data.get("details", [])),
                 request.page_number,
             )
-            
-            # Generate PowerPoint using pptx_builder_service
+            # Save the original PPTX file to disk so COM can open it
+            output_base, _ = resolve_project_output(
+                request.display_name,
+                request.project_type,
+                fallback_subdir="generated_presentations",
+            )
+            project_folder = output_base
+            pptx_original_path = project_folder / request.pptx_filename
+            if not pptx_original_path.exists():
+                with open(pptx_original_path, "wb") as f:
+                    f.write(request.pptx_file)
+
             artifacts = pptx_builder_service.compose_presentation_with_original_slides(
                 request=request,
                 options=build_options,
                 details=slides_data["details"],
                 excel_data=excel_data,
-                original_pptx_images=pptx_data.images or [],
+                original_pptx_path=str(pptx_original_path.resolve()),
                 page_number_insert=request.page_number,
             )
             
