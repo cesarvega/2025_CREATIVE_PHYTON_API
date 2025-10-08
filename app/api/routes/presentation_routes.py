@@ -358,3 +358,293 @@ async def download_generated_file(token: str) -> FileResponse:
         filename=file_path.name,
         media_type=guess_media_type(file_path),
     )
+
+
+@router.post(
+    "/test-slide-generation",
+    summary="Test slide generation with multi-candidate layout",
+    description=(
+        "Test endpoint to verify slide generation logic in isolation. "
+        "Allows testing the multi-candidate name layout without going through the full pipeline."
+    ),
+)
+async def test_slide_generation(
+    template_name: str = "template_default_withgroups2019.pptx",
+    names: str = "John Doe##Jane Smith##Bob Johnson##Alice Williams##Charlie Brown##David Miller##Emma Davis##Frank Wilson##Grace Martinez##Henry Anderson##Ivy Thomas##Jack Taylor##Kelly Moore##Liam Jackson##Mia White##Noah Harris##Olivia Martin##Peter Thompson##Quinn Garcia##Rachel Robinson##Steve Clark##Tina Rodriguez##Uma Lewis##Victor Lee##Wendy Walker##Xavier Hall##Yara Allen##Zack Young",
+) -> dict:
+    """Test slide generation with specified template and names.
+
+    Args:
+        template_name: Name of the template file to use (must exist in templates directory)
+        names: Delimited string of names to layout (use ## as delimiter)
+
+    Returns:
+        Result of the slide generation test including success status and file path
+    """
+    try:
+        from app.services.pptx_builder_service import PPTXBuilderService, tokenize_delimited_block
+        from app.utils.path_utils import resolve_project_output
+        import pythoncom
+
+        # Initialize COM for this thread
+        pythoncom.CoInitialize()
+
+        try:
+            # Parse names
+            names_list = tokenize_delimited_block(names)
+            if not names_list:
+                raise HTTPException(status_code=400, detail="No names provided")
+
+            logger.info("Testing slide generation with %d names", len(names_list))
+
+            # Initialize builder service
+            templates_dir = Path(settings.templates_dir) if hasattr(settings, 'templates_dir') else Path("templates")
+            subdir = "BackgroundDefaultTemplate"
+            templates_dir = templates_dir / subdir
+            template_path = templates_dir / template_name
+            
+            print(template_path)
+
+            if not template_path.exists():
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Template not found: {template_name}. Available templates are in {templates_dir}"
+                )
+
+            builder = PPTXBuilderService(
+                templates_dir=templates_dir,
+                base_template_path=template_path,
+            )
+
+            # Create output directory
+            output_dir, _ = resolve_project_output("test_slide_generation", None)
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            # Generate a test presentation with just one slide
+            from pptx import Presentation
+            import win32com.client
+
+            # Load template
+            prs = Presentation(str(template_path))
+
+            # Use first slide or add one
+            if prs.slides:
+                slide = prs.slides[0]
+            else:
+                slide = prs.slides.add_slide(prs.slide_layouts[5])
+
+            # Save the presentation first
+            test_output_path = output_dir / f"test_slide_{int(time.time())}.pptx"
+            prs.save(str(test_output_path))
+
+            # Now open with COM automation to test the layout logic
+            powerpoint = win32com.client.Dispatch("PowerPoint.Application")
+            powerpoint.Visible = 1
+
+            presentation = powerpoint.Presentations.Open(str(test_output_path.absolute()))
+            com_slide = presentation.Slides(1)
+
+            # Collect placeholder shapes (use Name Candidate for template_default_withgroups2019.pptx)
+            placeholder_shapes = builder._collect_placeholder_shapes(com_slide, "Name Candidate")
+
+            # Debug: List all text shapes in the slide
+            logger.info("=== DIAGNOSTIC: Analyzing slide shapes ===")
+            all_text_shapes = list(builder._iter_text_shapes(com_slide))
+            logger.info("Total text shapes found: %d", len(all_text_shapes))
+
+            for idx, shape in enumerate(all_text_shapes[:20]):  # Limit to first 20
+                try:
+                    text = shape.TextFrame.TextRange.Text
+                    logger.info("  Shape %d: '%s'", idx + 1, text[:50] if text else "(empty)")
+                except Exception as e:
+                    logger.info("  Shape %d: (no text - %s)", idx + 1, str(e))
+
+            if not placeholder_shapes:
+                logger.warning("No 'Name Candidate' placeholder shapes found in template")
+                warnings_list = ["No 'Name Candidate' placeholder shapes found in template. Check logs for all text shapes found."]
+            else:
+                logger.info("Found %d 'Name Candidate' placeholder shapes", len(placeholder_shapes))
+                warnings_list = []
+
+                # Log the placeholder shapes found
+                for idx, pshape in enumerate(placeholder_shapes):
+                    try:
+                        ptext = pshape.TextFrame.TextRange.Text
+                        logger.info("  Placeholder %d: '%s'", idx + 1, ptext[:30])
+                    except:
+                        pass
+
+            # Test the simplified placeholder assignment
+            builder._assign_names_to_placeholders(
+                placeholder_shapes=placeholder_shapes or [],
+                names=names_list,
+                context="test slide",
+            )
+            success = True
+
+            # Save and close properly
+            try:
+                presentation.Save()
+            except Exception as e:
+                logger.warning("Could not save presentation: %s", e)
+
+            try:
+                presentation.Close()
+            except Exception as e:
+                logger.warning("Could not close presentation: %s", e)
+
+            try:
+                powerpoint.Quit()
+            except Exception as e:
+                logger.warning("Could not quit PowerPoint: %s", e)
+
+            logger.info("Test slide generation completed: success=%s", success)
+
+            return {
+                "success": success,
+                "names_count": len(names_list),
+                "names": names_list[:10],  # First 10 names for brevity
+                "placeholder_count": len(placeholder_shapes) if placeholder_shapes else 0,
+                "output_path": str(test_output_path),
+                "warnings": warnings_list,
+                "message": "Slide generation test completed. Check the output file to verify the layout."
+            }
+
+        finally:
+            # Uninitialize COM
+            pythoncom.CoUninitialize()
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error in test slide generation: %s", str(e), exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to test slide generation: {str(e)}"
+        ) from e
+
+
+@router.post(
+    "/test-table-layout",
+    summary="Test table layout with simple list of names",
+    description="Simple endpoint to test dynamic table layout with just a list of names",
+)
+async def test_table_layout(names: list[str]) -> dict:
+    """Test table layout with a simple list of names.
+
+    Args:
+        names: List of candidate names
+
+    Returns:
+        Result of the table generation including success status and file path
+    """
+    try:
+        from app.services.pptx_builder_service import PPTXBuilderService
+        from app.utils.path_utils import resolve_project_output
+        import pythoncom
+
+        # Initialize COM for this thread
+        pythoncom.CoInitialize()
+
+        try:
+            if not names:
+                raise HTTPException(status_code=400, detail="No names provided")
+
+            logger.info("Testing table layout with %d names", len(names))
+
+            # Initialize builder service
+            templates_dir = Path(settings.templates_dir) if hasattr(settings, 'templates_dir') else Path("templates")
+            subdir = "BackgroundDefaultTemplate"
+            templates_dir = templates_dir / subdir
+            template_name = "template_default_withgroups2019.pptx"
+            template_path = templates_dir / template_name
+
+            if not template_path.exists():
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Template not found: {template_name}"
+                )
+
+            builder = PPTXBuilderService(
+                templates_dir=templates_dir,
+                base_template_path=template_path,
+            )
+
+            # Create output directory
+            output_dir, _ = resolve_project_output("test_table_layout", None)
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            # Generate test presentation
+            from pptx import Presentation
+            import win32com.client
+
+            # Load template
+            prs = Presentation(str(template_path))
+
+            # Use first slide or add one
+            if prs.slides:
+                slide = prs.slides[0]
+            else:
+                slide = prs.slides.add_slide(prs.slide_layouts[5])
+
+            # Save the presentation first
+            test_output_path = output_dir / f"table_test_{int(time.time())}.pptx"
+            prs.save(str(test_output_path))
+
+            # Open with COM automation
+            powerpoint = win32com.client.Dispatch("PowerPoint.Application")
+            powerpoint.Visible = 1
+
+            presentation = powerpoint.Presentations.Open(str(test_output_path.absolute()))
+            com_slide = presentation.Slides(1)
+
+            # Collect placeholder shapes
+            placeholder_shapes = builder._collect_placeholder_shapes(com_slide, "Name Candidate")
+
+            logger.info("Found %d placeholder shapes", len(placeholder_shapes))
+
+            # Test the simplified placeholder assignment
+            cleaned_names = [n for n in names if n]
+            builder._assign_names_to_placeholders(
+                placeholder_shapes=placeholder_shapes or [],
+                names=cleaned_names,
+                context="test table",
+            )
+            success = True
+
+            # Save and close properly
+            try:
+                presentation.Save()
+            except Exception as e:
+                logger.warning("Could not save: %s", e)
+
+            try:
+                presentation.Close()
+            except Exception as e:
+                logger.warning("Could not close: %s", e)
+
+            try:
+                powerpoint.Quit()
+            except Exception as e:
+                logger.warning("Could not quit: %s", e)
+
+            logger.info("Table layout test completed: success=%s", success)
+
+            return {
+                "success": success,
+                "names_count": len(names),
+                "output_path": str(test_output_path),
+                "message": "Table layout test completed. Check the output file."
+            }
+
+        finally:
+            pythoncom.CoUninitialize()
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error in test table layout: %s", str(e), exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to test table layout: {str(e)}"
+        ) from e
