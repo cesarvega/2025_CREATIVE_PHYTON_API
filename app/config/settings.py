@@ -69,6 +69,12 @@ class Settings(BaseSettings):
         "DRIVER={SQL Server};SERVER=localhost;DATABASE=master;Trusted_Connection=yes;"
     )
 
+    # SQL Server connection string for DAYMASTER database
+    # This value is loaded from the DAYMASTER_CONNECTION_STRING environment variable in .env file
+    daymaster_connection_string: str = (
+        "DRIVER={SQL Server};SERVER=sql08;DATABASE=DAYMASTER;UID=sqlguide;PWD=sqlguidepwd;TrustServerCertificate=yes;Connection Timeout=30;"
+    )
+
     # CORS settings
     cors_origins: str = "*"  # Comma-separated list or "*" for all
     cors_methods: str = "*"  # Comma-separated list or "*" for all

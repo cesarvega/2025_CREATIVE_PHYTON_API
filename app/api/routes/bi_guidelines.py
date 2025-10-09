@@ -5,7 +5,8 @@ from the BI_GUIDELINES database.
 """
 
 import pyodbc
-from fastapi import APIRouter, HTTPException
+from typing import Optional
+from fastapi import APIRouter, HTTPException, Query
 
 from app.config.db import (
     DatabaseConnectionError,
@@ -15,6 +16,11 @@ from app.config.db import (
 )
 from app.models.bi_guidelines_models import NWMasterRequest
 from app.models.presentation_models import PresentationData
+from app.models.response_models import (
+    ActivePresentationsResponse,
+    DisplayNamesResponse,
+)
+from app.services.bi_guidelines_service import bi_guidelines_service
 from app.utils.logging_utils import get_logger
 
 router = APIRouter(prefix="/bi_guidelines", tags=["BI Guidelines"])
@@ -23,6 +29,130 @@ logger = get_logger(__name__)
 
 class PresentationNotFoundError(Exception):
     """Custom exception for when a presentation is not found."""
+
+
+@router.get(
+    "/active-presentations",
+    response_model=ActivePresentationsResponse,
+    summary="Get paginated and filterable list of active presentations",
+    description=(
+        "Retrieve active presentations from BI_GUIDELINES database with optional search filtering and pagination. "
+        "This endpoint is optimized for large datasets (5000+ presentations) and supports:\n\n"
+        "- **Search filtering**: Filter by project name or display name (partial match)\n"
+        "- **Pagination**: Control page number and results per page\n"
+        "- **Sorted results**: Presentations are sorted by last update date (newest first)\n\n"
+        "Ideal for autocomplete inputs, dropdowns with search, and infinite scroll implementations."
+    ),
+)
+async def get_active_presentations(
+    search: Optional[str] = Query(
+        None,
+        description="Optional search term to filter by project or display name (partial match)",
+        min_length=1,
+        max_length=100,
+    ),
+    page: int = Query(
+        1,
+        ge=1,
+        description="Page number (1-indexed)",
+    ),
+    limit: int = Query(
+        50,
+        ge=1,
+        le=500,
+        description="Number of results per page (max 500)",
+    ),
+) -> ActivePresentationsResponse:
+    """Get paginated active presentations from BI_GUIDELINES database.
+
+    This endpoint queries the nw_Master table for presentations with status 'OPEN'
+    and returns them sorted by last update date in descending order.
+
+    Example usage:
+    - Get first 50 presentations: `GET /api/bi_guidelines/active-presentations`
+    - Search for "SOLE": `GET /api/bi_guidelines/active-presentations?search=SOLE`
+    - Get page 2 with 100 results: `GET /api/bi_guidelines/active-presentations?page=2&limit=100`
+    """
+    try:
+        presentations, total = bi_guidelines_service.get_active_presentations(
+            search=search,
+            page=page,
+            limit=limit,
+        )
+        return ActivePresentationsResponse(
+            presentations=presentations,
+            page=page,
+            limit=limit,
+            total=total,
+        )
+    except Exception as e:
+        logger.error("Error retrieving active presentations: %s", str(e), exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to retrieve active presentations from database",
+        ) from e
+
+
+@router.get(
+    "/display-names",
+    response_model=DisplayNamesResponse,
+    summary="Get paginated and filterable list of BSR display names",
+    description=(
+        "Retrieve BSR display names from BI_GUIDELINES database with optional search filtering and pagination. "
+        "This endpoint is optimized for large datasets (4000+ names) and supports:\n\n"
+        "- **Search filtering**: Filter display names by partial match\n"
+        "- **Pagination**: Control page number and results per page\n"
+        "- **Sorted results**: Names are sorted alphabetically\n\n"
+        "Ideal for autocomplete inputs, dropdowns with search, and infinite scroll implementations."
+    ),
+)
+async def get_bsr_display_names(
+    search: Optional[str] = Query(
+        None,
+        description="Optional search term to filter display names (partial match)",
+        min_length=1,
+        max_length=100,
+    ),
+    page: int = Query(
+        1,
+        ge=1,
+        description="Page number (1-indexed)",
+    ),
+    limit: int = Query(
+        50,
+        ge=1,
+        le=500,
+        description="Number of results per page (max 500)",
+    ),
+) -> DisplayNamesResponse:
+    """Get paginated BSR display names from BI_GUIDELINES database.
+
+    This endpoint queries the nw_Master table for distinct BSRDisplayName values
+    and returns them sorted alphabetically.
+
+    Example usage:
+    - Get first 50 names: `GET /api/bi_guidelines/display-names`
+    - Search for "BRIN": `GET /api/bi_guidelines/display-names?search=BRIN`
+    - Get page 2 with 100 results: `GET /api/bi_guidelines/display-names?page=2&limit=100`
+    """
+    try:
+        display_names, total = bi_guidelines_service.get_bsr_display_names(
+            search=search,
+            page=page,
+            limit=limit,
+        )
+        return DisplayNamesResponse(
+            display_names=display_names,
+            page=page,
+            limit=limit,
+            total=total,
+        )
+    except Exception as e:
+        logger.error("Error retrieving BSR display names: %s", str(e), exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to retrieve BSR display names from database",
+        ) from e
 
 
 @router.get("/nw-master")

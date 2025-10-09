@@ -13,6 +13,7 @@ from app.api.routes import (
     excel_processing,
     pptx_conversion,
     presentation_routes,
+    day_master,
 )
 from app.config.settings import settings
 from app.utils.logging_utils import setup_logging
@@ -48,6 +49,7 @@ app.add_middleware(
 app.include_router(pptx_conversion.router, prefix="/api", tags=["PPTX Conversion"])
 app.include_router(excel_processing.router, prefix="/api", tags=["Excel Processing"])
 app.include_router(bi_guidelines.router, prefix="/api", tags=["BI Guidelines"])
+app.include_router(day_master.router, prefix="/api")
 app.include_router(
     presentation_routes.router, prefix="/api", tags=["Presentation Creation"]
 )

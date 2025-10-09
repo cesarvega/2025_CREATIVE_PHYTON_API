@@ -26,11 +26,17 @@ def get_connection_string() -> str:
     return settings.sql_connection_string
 
 
-def create_connection(timeout: Optional[int] = None) -> pyodbc.Connection:
+def get_daymaster_connection_string() -> str:
+    """Return the DayMaster database connection string from settings."""
+    return settings.daymaster_connection_string
+
+
+def create_connection(timeout: Optional[int] = None, use_daymaster: bool = False) -> pyodbc.Connection:
     """Create and return a new database connection.
 
     Args:
         timeout: Optional timeout (in seconds) for the connection attempt.
+        use_daymaster: If True, use DayMaster connection string instead of default.
 
     Raises:
         DatabaseConnectionError: If the connection cannot be established.
@@ -38,7 +44,7 @@ def create_connection(timeout: Optional[int] = None) -> pyodbc.Connection:
     Returns:
         An open ``pyodbc.Connection`` instance.
     """
-    connection_string = get_connection_string()
+    connection_string = get_daymaster_connection_string() if use_daymaster else get_connection_string()
     try:
         kwargs = {}
         if timeout is not None:
@@ -48,7 +54,8 @@ def create_connection(timeout: Optional[int] = None) -> pyodbc.Connection:
             connection_string,
             **kwargs,
         )
-        logger.debug("Database connection established.")
+        db_name = "DayMaster" if use_daymaster else "default"
+        logger.debug("Database connection established to %s.", db_name)
         return connection
     except pyodbc.Error as exc:  # pylint: disable=c-extension-no-member
         logger.error("Failed to establish database connection: %s", exc)
@@ -60,6 +67,7 @@ def get_connection_scope(
     *,
     autocommit: bool = False,
     timeout: Optional[int] = None,
+    use_daymaster: bool = False,
 ) -> Generator[pyodbc.Cursor, None, None]:
     """Provide a cursor within a managed connection scope.
 
@@ -70,6 +78,7 @@ def get_connection_scope(
         autocommit: Whether to commit automatically when exiting the context.
                    If False, will commit on success or rollback on error.
         timeout: Optional timeout (in seconds) for establishing the connection.
+        use_daymaster: If True, connect to DayMaster database instead of default.
 
     Yields:
         A ``pyodbc.Cursor`` ready for queries.
@@ -85,9 +94,9 @@ def get_connection_scope(
     """
     connection: Optional[pyodbc.Connection] = None
     cursor: Optional[pyodbc.Cursor] = None
-    
+
     try:
-        connection = create_connection(timeout=timeout)
+        connection = create_connection(timeout=timeout, use_daymaster=use_daymaster)
         connection.autocommit = autocommit
         cursor = connection.cursor()
         
