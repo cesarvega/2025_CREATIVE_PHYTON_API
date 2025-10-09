@@ -85,39 +85,39 @@ class PresentationService:
             )
 
             # 5. Generate physical PowerPoint file (if enabled)
-            generated_files = None
-            if request.generate_physical_pptx:
-                logger.info("Generating physical PowerPoint file")
-                try:
-                    ppt_files = self._generate_physical_powerpoint(
-                        slides_data=slides_data,
-                        excel_data=excel_data,
-                        request=request,
-                        pptx_data=pptx_data,
-                    )
-                    generated_files = ppt_files
+            # generated_files = None
+            # if request.generate_physical_pptx:
+            #     logger.info("Generating physical PowerPoint file")
+            #     try:
+            #         ppt_files = self._generate_physical_powerpoint(
+            #             slides_data=slides_data,
+            #             excel_data=excel_data,
+            #             request=request,
+            #             pptx_data=pptx_data,
+            #         )
+            #         generated_files = ppt_files
                     
-                    # Update slides_data with generated file path for DB storage
-                    if ppt_files.get("printable_path"):
-                        slides_data["powerpoint_file"] = ppt_files["printable_path"]
+            #         # Update slides_data with generated file path for DB storage
+            #         if ppt_files.get("printable_path"):
+            #             slides_data["powerpoint_file"] = ppt_files["printable_path"]
                     
-                    logger.info(
-                        "Physical PowerPoint generated: %s (total slides: %s)",
-                        ppt_files.get("printable_path", "N/A"),
-                        ppt_files.get("total_slides", "0"),
-                    )
-                except Exception as ppt_error:
-                    logger.error("Failed to generate physical PowerPoint: %s", str(ppt_error))
-                    # Continue execution - physical file generation is optional
-                    generated_files = {
-                        "error": str(ppt_error),
-                        "printable_path": "",
-                        "macro_path": "",
-                        "total_slides": "0",
-                        "warnings": "Failed to generate",
-                    }
-            else:
-                logger.info("Physical PowerPoint generation skipped (generate_physical_pptx=False)")
+            #         logger.info(
+            #             "Physical PowerPoint generated: %s (total slides: %s)",
+            #             ppt_files.get("printable_path", "N/A"),
+            #             ppt_files.get("total_slides", "0"),
+            #         )
+            #     except Exception as ppt_error:
+            #         logger.error("Failed to generate physical PowerPoint: %s", str(ppt_error))
+            #         # Continue execution - physical file generation is optional
+            #         generated_files = {
+            #             "error": str(ppt_error),
+            #             "printable_path": "",
+            #             "macro_path": "",
+            #             "total_slides": "0",
+            #             "warnings": "Failed to generate",
+            #         }
+            # else:
+            #     logger.info("Physical PowerPoint generation skipped (generate_physical_pptx=False)")
 
             # 6. Create presentation in DB
             logger.info("Creating presentation in database")
@@ -142,7 +142,6 @@ class PresentationService:
                 excel_data=excel_data,
                 pptx_data=pptx_data,
                 processing_time_seconds=processing_time,
-                generated_files=generated_files,
             )
 
         except Exception as e:

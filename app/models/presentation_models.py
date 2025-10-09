@@ -350,10 +350,6 @@ class CreatePresentationResponse(BaseModel):
     processing_time_seconds: float = Field(
         ..., description="Total processing time spent inside the orchestration pipeline."
     )
-    generated_files: Optional[Dict[str, str]] = Field(
-        default=None,
-        description="Paths to physically generated PowerPoint files (printable .pptx and macro .pptm).",
-    )
 
 
 class DetailItem(BaseModel):
