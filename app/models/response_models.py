@@ -59,3 +59,18 @@ class DisplayNamesResponse(BaseModel):
     page: int
     limit: int
     total: int
+
+
+class TemplateGroup(BaseModel):
+    """Model for a single template group."""
+
+    template_group_id: int
+    template_name: str
+    category: Optional[str] = None
+
+
+class TemplateGroupsResponse(BaseModel):
+    """Response model for template groups list."""
+
+    template_groups: List[TemplateGroup]
+    total: int

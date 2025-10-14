@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import List, Optional, Tuple
 
 from app.config.db import get_connection_scope
-from app.models.response_models import ActivePresentation
+from app.models.response_models import ActivePresentation, TemplateGroup
 from app.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -200,6 +200,102 @@ class BIGuidelinesService:
             )
 
             return display_names, total
+
+    def get_project_info(self, project_id: int) -> dict | None:
+        """Retrieve project information using the stored procedure.
+
+        Args:
+            project_id: The project ID to retrieve information for.
+
+        Returns:
+            Dictionary containing project details or None if not found.
+
+        Raises:
+            DatabaseConnectionError: If connection to database fails.
+            DatabaseTransactionError: If query execution fails.
+        """
+        logger.debug("BI_GUIDELINES - Fetching project info for project_id=%d", project_id)
+
+        with get_connection_scope(timeout=30) as cursor:
+            # Execute stored procedure
+            cursor.execute("{CALL [BI_GUIDELINES].[dbo].[nw_PresentationInfo_Nw2_apr2020](?)}", (project_id,))
+
+            # Get column names and row
+            columns = [column[0] for column in cursor.description]
+            row = cursor.fetchone()
+
+            if not row:
+                logger.warning("BI_GUIDELINES - Project %d not found", project_id)
+                return None
+
+            # Convert row to dictionary
+            project_details = dict(zip(columns, row))
+
+            logger.info("BI_GUIDELINES - Retrieved project info for project_id=%d", project_id)
+            return project_details
+
+    def get_template_groups(self) -> Tuple[List[TemplateGroup], int]:
+        """Retrieve template groups from BI_GUIDELINES database.
+
+        Executes the getNW_TemplateGroups stored procedure to get
+        available background templates grouped by category.
+
+        Returns:
+            Tuple containing (list of TemplateGroup objects, total count).
+
+        Raises:
+            DatabaseConnectionError: If connection to database fails.
+            DatabaseTransactionError: If query execution fails.
+        """
+        logger.debug("BI_GUIDELINES - Fetching template groups")
+
+        with get_connection_scope(timeout=30) as cursor:
+            # Execute stored procedure
+            cursor.execute("{CALL [BI_GUIDELINES].[dbo].[getNW_TemplateGroups]}")
+
+            # Get column names and rows
+            columns = [column[0] for column in cursor.description]
+            rows = cursor.fetchall()
+
+            # Log columns for debugging
+            logger.info("BI_GUIDELINES - Template groups columns: %s", columns)
+            if rows:
+                logger.info("BI_GUIDELINES - First row sample: %s", dict(zip(columns, rows[0])))
+
+            template_groups = []
+            for idx, row in enumerate(rows):
+                # Convert row to dictionary for easier access
+                row_dict = dict(zip(columns, row))
+
+                # The SP returns data in a column that might be named 'TempGroup' or similar
+                # Get the value from the first column
+                temp_group_value = row_dict.get("'TempGroup'") or row_dict.get('TempGroup') or list(row_dict.values())[0] if row_dict else None
+
+                # Parse the value if it contains delimited data (e.g., "Category~TemplateName")
+                if temp_group_value:
+                    parts = str(temp_group_value).split('~')
+                    category = parts[0] if len(parts) > 0 else None
+                    template_name = parts[1] if len(parts) > 1 else str(temp_group_value)
+                else:
+                    template_name = ''
+                    category = None
+
+                template_groups.append(
+                    TemplateGroup(
+                        template_group_id=idx + 1,  # Use index as ID since SP doesn't return one
+                        template_name=template_name,
+                        category=category,
+                    )
+                )
+
+            total = len(template_groups)
+
+            logger.info(
+                "BI_GUIDELINES - Retrieved %d template groups",
+                total,
+            )
+
+            return template_groups, total
 
 
 # Global service instance

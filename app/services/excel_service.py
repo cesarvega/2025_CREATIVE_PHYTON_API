@@ -68,6 +68,8 @@ def process_excel_file(
 ) -> ProcessedExcelData:
     """
     Parse the Excel workbook and return a structure equivalent to clsExcel.LoadExcelFile.
+
+    Optimized with efficient row filtering and minimal memory allocations.
     """
     workbook = load_workbook(filename=BytesIO(file_content), data_only=True)
     sheet = workbook.active
@@ -81,11 +83,11 @@ def process_excel_file(
     lst_logos = []
     lst_name_sub_groups = []
 
-    # Collect all rows first
+    # Collect all rows first - optimized with generator and early filtering
     all_rows = []
-    for row in sheet.iter_rows(min_row=HEADER_ROW_INDEX + 1):
-        values = [cell.value for cell in row]
-        if all(_clean(str(value)) == "" for value in values[:LOGO_COLUMN]):
+    for row in sheet.iter_rows(min_row=HEADER_ROW_INDEX + 1, max_col=NAME_SUBGROUP_COLUMN + 1):
+        # Quick check: skip empty rows early
+        if all(cell.value is None or str(cell.value).strip() == "" for cell in row[:LOGO_COLUMN]):
             continue
         all_rows.append(row)
 

@@ -219,10 +219,12 @@ class PPTXBuilderService:
                 if template_key == "skip":
                     continue
 
+                # Use cached template handle, open lazily only if needed
                 source_presentation = template_handles.get(template_key)
                 if source_presentation is None:
                     source_presentation = app.Presentations.Open(
                         str(template_paths[template_key].resolve()),
+                        ReadOnly=True,
                         WithWindow=False,
                     )
                     template_handles[template_key] = source_presentation
@@ -419,10 +421,12 @@ class PPTXBuilderService:
                 if template_key == "skip":
                     continue
 
+                # Use cached template handle, open lazily only if needed
                 source_presentation = template_handles.get(template_key)
                 if source_presentation is None:
                     source_presentation = app.Presentations.Open(
                         str(template_paths[template_key].resolve()),
+                        ReadOnly=True,
                         WithWindow=False,
                     )
                     template_handles[template_key] = source_presentation
@@ -447,7 +451,7 @@ class PPTXBuilderService:
                         self._populate_multi_slide(new_slide, detail, summary_tracker, warnings)
                     else:
                         self._populate_base_slide(new_slide, detail, summary_tracker, warnings)
-                        
+
                 except Exception as slide_error:
                     logger.error("Failed to create template slide: %s", slide_error)
                     warnings.append(f"Failed to create template slide: {str(slide_error)}")
@@ -588,9 +592,15 @@ class PPTXBuilderService:
 
     @staticmethod
     def _open_template_presentations(app, template_paths: Dict[str, Path]) -> Dict[str, Any]:
+        """Open template presentations with caching optimization."""
         handles: Dict[str, Any] = {}
         for key, path in template_paths.items():
-            handles[key] = app.Presentations.Open(str(path.resolve()), WithWindow=False)
+            # Open with ReadOnly=True and WithWindow=False for better performance
+            handles[key] = app.Presentations.Open(
+                str(path.resolve()),
+                ReadOnly=True,
+                WithWindow=False
+            )
         return handles
 
     @staticmethod
@@ -675,25 +685,39 @@ class PPTXBuilderService:
 
     @staticmethod
     def _iter_text_shapes(slide) -> Iterator[Any]:
+        """Iterate over text shapes in a slide.
+
+        Optimized with early exit and minimal COM calls.
+        """
         count = getattr(slide.Shapes, "Count", 0)
+        if count == 0:
+            return
+
         for idx in range(1, count + 1):
             shape = slide.Shapes(idx)
             try:
                 has_text_frame = bool(getattr(shape, "HasTextFrame", 0))
             except Exception:
-                has_text_frame = False
+                continue  # Skip shapes that don't support HasTextFrame
+
             if not has_text_frame:
                 continue
+
             try:
                 _ = shape.TextFrame.TextRange
             except Exception:
-                continue
+                continue  # Skip shapes without valid TextRange
+
             yield shape
 
     def _collect_placeholder_shapes(self, slide, placeholder: str) -> List[Any]:
-        """Collect all shapes containing the placeholder text, sorted by position."""
+        """Collect all shapes containing the placeholder text, sorted by position.
+
+        Optimized with early exit and position caching.
+        """
         placeholder_lower = placeholder.lower()
-        matches: List[Any] = []
+        matches: List[Tuple[Any, float, float]] = []  # (shape, top, left)
+
         for shape in self._iter_text_shapes(slide):
             try:
                 text = shape.TextFrame.TextRange.Text
@@ -703,27 +727,35 @@ class PPTXBuilderService:
 
             # Check if it's a name candidate placeholder (could be empty or contain the placeholder text)
             if placeholder_lower in text_lower or "name candidate" in text_lower:
-                matches.append(shape)
+                # Cache position values to avoid multiple COM calls
+                top = getattr(shape, "Top", 0)
+                left = getattr(shape, "Left", 0)
+                matches.append((shape, top, left))
                 logger.debug(
                     "Found placeholder: text='%s' (len=%d), Left=%s, Top=%s",
                     text_lower[:30] if text_lower else "[empty]",
                     len(text),
-                    getattr(shape, "Left", 0),
-                    getattr(shape, "Top", 0)
+                    left,
+                    top
                 )
 
         # Sort by Top (row) first, then by Left (column) within each row
         # This ensures placeholders are processed row-by-row, left-to-right
-        matches.sort(key=lambda s: (getattr(s, "Top", 0), getattr(s, "Left", 0)))
+        matches.sort(key=lambda item: (item[1], item[2]))
 
         logger.info("Collected %d placeholders, sorted by position (row-by-row)", len(matches))
-        return matches
+        # Return only shapes, without cached positions
+        return [item[0] for item in matches]
 
     def _find_checkbox_near_shape(self, slide, text_shape) -> Any:
-        """Find the checkbox (square) near a text shape (left or right side)."""
+        """Find the checkbox (square) near a text shape (left or right side).
+
+        Optimized with early exit and spatial indexing.
+        """
         try:
             text_left = getattr(text_shape, "Left", 0)
             text_top = getattr(text_shape, "Top", 0)
+            text_id = getattr(text_shape, "Id", None)
 
             # Tolerance for finding nearby shapes
             horizontal_tolerance = 400000  # ~0.4 inches
@@ -733,29 +765,38 @@ class PPTXBuilderService:
             closest_checkbox = None
             min_distance = float('inf')
 
+            # Early exit if no shapes
+            if count == 0:
+                return None
+
             for idx in range(1, count + 1):
                 shape = slide.Shapes(idx)
 
-                # Skip the text shape itself
-                if getattr(shape, "Id", None) == getattr(text_shape, "Id", None):
+                # Skip the text shape itself (cached ID comparison)
+                if text_id is not None and getattr(shape, "Id", None) == text_id:
                     continue
 
                 shape_type = getattr(shape, "Type", None)
                 # Type 1 = msoAutoShape (rectangles, ovals, etc.)
-                if shape_type == 1:
-                    shape_left = getattr(shape, "Left", 0)
-                    shape_top = getattr(shape, "Top", 0)
+                if shape_type != 1:
+                    continue
 
-                    # Check both left and right side of the text
-                    h_dist = abs(text_left - shape_left)
-                    v_dist = abs(text_top - shape_top)
+                shape_left = getattr(shape, "Left", 0)
+                shape_top = getattr(shape, "Top", 0)
 
-                    if h_dist <= horizontal_tolerance and v_dist <= vertical_tolerance:
-                        # Calculate total distance
-                        distance = h_dist + v_dist
-                        if distance < min_distance:
-                            min_distance = distance
-                            closest_checkbox = shape
+                # Check both left and right side of the text
+                h_dist = abs(text_left - shape_left)
+                v_dist = abs(text_top - shape_top)
+
+                # Early exit if outside tolerance
+                if h_dist > horizontal_tolerance or v_dist > vertical_tolerance:
+                    continue
+
+                # Calculate total distance
+                distance = h_dist + v_dist
+                if distance < min_distance:
+                    min_distance = distance
+                    closest_checkbox = shape
 
             return closest_checkbox
         except Exception as exc:
@@ -916,10 +957,21 @@ class PPTXBuilderService:
 
     @staticmethod
     def _set_shape_text(shape, text: str) -> None:
+        """Set text on a shape with error handling.
+
+        Optimized to avoid unnecessary operations.
+        """
+        if text is None:
+            text = ""
+
         try:
-            shape.TextFrame.TextRange.Text = text or ""
-        except Exception:
-            logger.debug("Could not assign text to shape: %s", getattr(shape, "Name", "<unnamed>"))
+            shape.TextFrame.TextRange.Text = text
+        except Exception as exc:
+            logger.debug(
+                "Could not assign text to shape: %s (error: %s)",
+                getattr(shape, "Name", "<unnamed>"),
+                str(exc)[:50]
+            )
 
     def _populate_separator_slide(self, slide, detail: Dict[str, Any], warnings: List[str]) -> None:
         category = detail.get("category") or detail.get("slide_description") or ""

@@ -33,6 +33,12 @@ from app.utils.path_utils import resolve_project_output
 logger = get_logger(__name__)
 
 
+# Template metadata cache to avoid repeated DB queries
+_template_metadata_cache: Dict[str, Dict[str, Any]] = {}
+_cache_timestamp: Optional[float] = None
+_CACHE_TTL_SECONDS = 300  # 5 minutes
+
+
 class PresentationService:
     """Service for orchestrating complete presentation creation.
     
@@ -191,6 +197,39 @@ class PresentationService:
             details=details,
             excel_data=excel_data,
         )
+
+    def presentation_exists(
+        self,
+        project_name: str,
+        display_name: str,
+        exclude_id: Optional[int] = None,
+    ) -> bool:
+        """
+        Check if a presentation with the given project and display name already exists.
+
+        Args:
+            project_name: The name of the project.
+            display_name: The display name of the presentation.
+            exclude_id: Optional presentation ID to exclude from the check.
+
+        Returns:
+            True if a matching presentation exists, False otherwise.
+        """
+        sql = "SELECT TOP 1 1 FROM [BI_GUIDELINES].[dbo].[nw_Master] WHERE Project = ? AND DisplayName = ?"
+        params = [project_name, display_name]
+
+        if exclude_id is not None:
+            sql += " AND PresentationId != ?"
+            params.append(exclude_id)
+
+        try:
+            with create_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(sql, tuple(params))
+                    return cursor.fetchone() is not None
+        except Exception as e:
+            logger.error("Error checking if presentation exists: %s", e, exc_info=True)
+            raise HTTPException(status_code=500, detail="Database error while checking for presentation.") from e
 
     def _process_excel_file(
         self, request: CreatePresentationRequest
@@ -748,7 +787,26 @@ class PresentationService:
         return slides_data
 
     def _get_template_metadata(self, template_name: str) -> Dict[str, Any]:
-        """Get template metadata from the database with robust error handling."""
+        """Get template metadata from the database with robust error handling and caching.
+
+        Optimized with in-memory cache (5 min TTL) to reduce DB queries.
+        """
+        global _template_metadata_cache, _cache_timestamp
+
+        # Check cache validity
+        current_time = time.time()
+        if _cache_timestamp is None or (current_time - _cache_timestamp) > _CACHE_TTL_SECONDS:
+            # Cache expired, clear it
+            _template_metadata_cache.clear()
+            _cache_timestamp = current_time
+            logger.debug("Template metadata cache expired and cleared")
+
+        # Check if template metadata is in cache
+        if template_name in _template_metadata_cache:
+            logger.debug("Template metadata cache hit for '%s'", template_name)
+            return _template_metadata_cache[template_name].copy()
+
+        # Cache miss - fetch from database
         metadata = {"template_id": 5, "background": template_name}
 
         conn = None
@@ -788,6 +846,10 @@ class PresentationService:
                 cursor.close()
             if conn:
                 conn.close()
+
+        # Store in cache
+        _template_metadata_cache[template_name] = metadata.copy()
+        logger.debug("Template metadata cached for '%s'", template_name)
 
         return metadata
 
