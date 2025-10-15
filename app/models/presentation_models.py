@@ -34,142 +34,105 @@ class BackgroundType(str, Enum):
 
 
 class CreatePresentationMetadata(BaseModel):
-    """Metadata payload supplied by clients alongside the uploaded files."""
+    """Metadata payload for presentation creation.
+
+    This model includes:
+    - Fields from the frontend TypeScript interface (required by API contract)
+    - Additional internal fields with defaults (used by backend services)
+    """
 
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
                 "project": "NW_PROJECT_2025",
                 "display_name": "Name Evaluation",
-                "presentation_type": "Nonproprietary",
+                "presentation_type": "Normal",
+                "project_type": "NW",
                 "user_name": "analyst",
-                "bsr_display_name": "Brand Study Results",
-                "mobile_link_bsr": "https://example.com/bsr",
+                "mobile_link_bsr": "",
+                "page_number": 1,
                 "participant_vote": 1,
                 "is_wide_ppt": 0,
                 "is_aws_email": 0,
-                "is_design_mode": False,
-                "background_type": "Image",
-                "background_name": "blue_gradient",
-                "page_number": 1,
-                "project_type": "nw",
-                "is_phonetics": True,
                 "has_groups": True,
-                "template_rotation": [
-                    "template_default_2019.pptx",
-                    "template_default_withgroups2019.pptx",
-                ],
+                "test_name_order": "Default",
+                "background_type": "Default",
+                "background_name": "",
             }
         }
     )
 
+    # ===== PRINCIPAL DATA FIELDS (FROM FRONTEND) =====
     project: str = Field(
-        ..., description="Internal project identifier used for folder paths and database records."
+        ...,
+        description="Project identifier"
     )
     display_name: str = Field(
-        ..., description="Human-friendly name for generated assets (folders, output files, database records)."
+        ...,
+        description="Presentation name"
     )
     presentation_type: str = Field(
-        "Nonproprietary",
-        description="Presentation classification stored in the database (for example 'Nonproprietary').",
+        "Normal",
+        description="Presentation type. Default: 'Normal'",
+    )
+    project_type: str = Field(
+        "NW",
+        description="Project kind: 'NW', 'BSR', 'NSR', or 'DW'. Default: 'NW'",
     )
     user_name: str = Field(
-        ..., description="Username recorded for auditing when the presentation is created."
+        ...,
+        description="User creating the presentation"
     )
-    bsr_display_name: Optional[str] = Field(
-        default=None,
-        description="Optional Brand Study Results label displayed in generated slides.",
+    mobile_link_bsr: str = Field(
+        "",
+        description="Mobile link for BSR. Default: ''",
     )
-    mobile_link_bsr: Optional[str] = Field(
-        default=None,
-        description="Optional URL that is embedded in the presentation for mobile BSR access.",
+    page_number: int = Field(
+        1,
+        ge=1,
+        description="Starting page number. Default: 1",
     )
+
+    # ===== CONFIGURATION FLAGS (FROM FRONTEND) =====
     participant_vote: int = Field(
         1,
-        description="Numeric flag persisted in the master record to indicate participant vote status (legacy compatibility).",
+        ge=0,
+        le=1,
+        description="Participant vote flag (0 or 1). Default: 1",
     )
     is_wide_ppt: int = Field(
         0,
         ge=0,
         le=1,
-        description="Whether widescreen (16:9) templates should be used (0 = standard, 1 = widescreen).",
+        description="Aspect ratio: 0=4:3, 1=16:9. Default: 0",
     )
     is_aws_email: int = Field(
         0,
         ge=0,
         le=1,
-        description="Flag that instructs downstream automation to send AWS email notifications (0/1).",
+        description="AWS email flag (0 or 1). Default: 0",
     )
-    is_design_mode: bool = Field(
-        False,
-        description="Enable design-mode processing to keep placeholders for manual adjustments.",
-    )
-    background_type: str = Field(
-        "Image",
-        description="Background selection mode, typically 'Image' or 'Color'.",
-    )
-    background_name: str = Field(
-        "",
-        description="Specific background asset name to apply when generating slides.",
-    )
-    page_number: int = Field(
-        1,
-        ge=1,
-        description="Starting page number offset written into generated slides.",
-    )
-    project_type: str = Field(
-        "NW",
-        description="Presentation family that determines directory routing (NW, BSR, NSR, DW).",
-    )
-    is_phonetics: bool = Field(
-        False,
-        description="Indicates that phonetic columns (kana/notation) should be processed from the Excel sheet.",
-    )
+
+    # ===== CONTROL FLAGS (FROM FRONTEND) =====
     has_groups: bool = Field(
         True,
-        description="Whether the Excel sheet contains subgroup rows that must be converted into group slides.",
+        description="Whether the Excel sheet contains groups. Default: true",
     )
+
+    # ===== OPTIONS FOR RANDOMIZATION (FROM FRONTEND) =====
     test_name_order: TestNameOrder = Field(
         TestNameOrder.DEFAULT,
-        description="Ordering strategy for test names: Default (keep original), Randomize (shuffle all), or Randomize_top_5 (shuffle only first 5).",
+        description="Ordering strategy: 'Default', 'Randomize', or 'Randomize_top_5'. Default: 'Default'",
     )
-    template_rotation: Optional[List[str]] = Field(
-        default=None,
-        description="Optional list of PPTX filenames that should be rotated when building slides.",
+
+    # ===== BACKGROUND OPTIONS (FROM FRONTEND) =====
+    background_type: str = Field(
+        "Default",
+        description="Background type: 'Default' or 'Rotate'. Default: 'Default'",
     )
-    
-    # Physical PowerPoint generation options (optional, will use defaults if not provided)
-    template_pack: Optional[str] = Field(
-        default=None,
-        description="Template pack folder to use for generating physical PowerPoint slides.",
-    )
-    base_template: Optional[str] = Field(
-        default=None,
-        description="Base template file for individual candidate slides.",
-    )
-    multi_template: Optional[str] = Field(
-        default=None,
-        description="Template file for slides containing multiple grouped candidates.",
-    )
-    group_template: Optional[str] = Field(
-        default=None,
-        description="Template file for group header slides.",
-    )
-    separator_template: Optional[str] = Field(
-        default=None,
-        description="Template file for separator slides between sections.",
-    )
-    summary_template: Optional[str] = Field(
-        default=None,
-        description="Template file for summary slides.",
-    )
-    include_macro_version: bool = Field(
-        default=False,
-        description="Generate a macro-enabled (.pptm) version of the PowerPoint file.",
-    )
-    generate_physical_pptx: bool = Field(
-        default=True,
-        description="Generate physical PowerPoint file combining original and template slides.",
+    background_name: Optional[str] = Field(
+        default="",
+        description="Background template names separated by '|' (e.g., 'BMW_1|BrandDNA'). Default: ''",
     )
 
     def to_service_request(
@@ -187,33 +150,20 @@ class CreatePresentationMetadata(BaseModel):
             pptx_file=pptx_content,
             excel_filename=excel_filename,
             pptx_filename=pptx_filename,
-            is_phonetics=self.is_phonetics,
             has_groups=self.has_groups,
             test_name_order=self.test_name_order,
             project=self.project,
             display_name=self.display_name,
             presentation_type=self.presentation_type,
             user_name=self.user_name,
-            bsr_display_name=self.bsr_display_name,
             mobile_link_bsr=self.mobile_link_bsr,
             participant_vote=self.participant_vote,
             is_wide_ppt=self.is_wide_ppt,
             is_aws_email=self.is_aws_email,
-            is_design_mode=self.is_design_mode,
             background_type=self.background_type,
-            background_name=self.background_name,
+            background_name=self.background_name or "",
             page_number=self.page_number,
             project_type=self.project_type,
-            template_rotation=self.template_rotation,
-            # Physical PowerPoint generation options
-            template_pack=self.template_pack,
-            base_template=self.base_template,
-            multi_template=self.multi_template,
-            group_template=self.group_template,
-            separator_template=self.separator_template,
-            summary_template=self.summary_template,
-            include_macro_version=self.include_macro_version,
-            generate_physical_pptx=self.generate_physical_pptx,
         )
 
 
@@ -235,9 +185,6 @@ class CreatePresentationRequest(BaseModel):
         "presentation.pptx",
         description="Original filename of the PPTX template (used for diagnostics and storage).",
     )
-    is_phonetics: bool = Field(
-        False, description="Process phonetic columns (kana/notation) from the Excel data."
-    )
     has_groups: bool = Field(
         False, description="Flag indicating whether the Excel file contains group/sub-group rows."
     )
@@ -257,10 +204,6 @@ class CreatePresentationRequest(BaseModel):
         description="Presentation classification stored in the database.",
     )
     user_name: str = Field(..., description="Username that initiated the creation process.")
-    bsr_display_name: Optional[str] = Field(
-        default=None,
-        description="Optional Brand Study Results label to include in slides.",
-    )
     mobile_link_bsr: Optional[str] = Field(
         default=None, description="Optional URL pointing to the BSR mobile experience."
     )
@@ -280,10 +223,6 @@ class CreatePresentationRequest(BaseModel):
         le=1,
         description="Flag enabling downstream AWS email distribution workflows (0/1).",
     )
-    is_design_mode: bool = Field(
-        False,
-        description="Run in design mode to keep placeholders for manual editing instead of final assets.",
-    )
 
     background_type: str = Field(
         "Image",
@@ -302,11 +241,7 @@ class CreatePresentationRequest(BaseModel):
         "bipresents",
         description="Directory and business unit routing (typically 'bipresents' or 'nw').",
     )
-    template_rotation: Optional[List[str]] = Field(
-        default=None,
-        description="Optional ordered list of template filenames to rotate per generated slide.",
-    )
-    
+
     # Physical PowerPoint generation options
     template_pack: Optional[str] = Field(
         default="BackgroundDefaultTemplate",
@@ -459,9 +394,6 @@ class PresentationData(BaseModel):
     user_name: str = Field(
         ..., description="User responsible for creating the presentation."
     )
-    bsr_display_name: str = Field(
-        ..., description="Brand Study Results label persisted for reporting."
-    )
     mobile_link_bsr: Optional[str] = Field(
         default=None, description="Optional BSR hyperlink for mobile experiences."
     )
@@ -473,13 +405,6 @@ class PresentationData(BaseModel):
     )
     is_aws_email: int = Field(
         ..., description="Flag indicating whether AWS email processes should run."
-    )
-    is_design_mode: bool = Field(
-        False,
-        description="Whether the presentation was generated with design-mode placeholders.",
-    )
-    is_printed: bool = Field(
-        False, description="Mark presentations generated for printing workflows"
     )
     details: List[DetailItem] = Field(
         ..., description="Collection of slide detail records persisted in nw_Details."

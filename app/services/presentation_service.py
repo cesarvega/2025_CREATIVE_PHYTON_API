@@ -77,17 +77,12 @@ class PresentationService:
                 request=request,
             )
 
-            # 4. Apply templates if specified
-            if request.template_rotation:
-                slides_data = self._apply_template_rotation(
-                    slides_data, request.template_rotation
-                )
+            # 4. Template rotation no longer used - backgrounds handled differently
 
             logger.info(
-                "Slides data generated: %d detail items, background=%s, rotation_applied=%s",
+                "Slides data generated: %d detail items, background=%s",
                 len(slides_data.get("details", [])),
                 slides_data.get("background_name"),
-                bool(request.template_rotation),
             )
 
             # 5. Generate physical PowerPoint file (if enabled)
@@ -236,18 +231,24 @@ class PresentationService:
     ) -> ProcessedExcelData:
         """Process Excel file using the existing Excel service."""
         try:
+            # Derive is_phonetics from presentation_type
+            # If presentation_type is "Phonetics", process phonetic columns
+            is_phonetics = request.presentation_type.lower() == "phonetics"
+
             # Process the Excel file
             result = process_excel_file(
                 file_content=request.excel_file,
-                is_phonetics=request.is_phonetics,
+                is_phonetics=is_phonetics,
                 has_groups=request.has_groups,
                 test_name_order=request.test_name_order,
             )
 
             logger.info(
-                "Excel processing completed: %d rows processed, test_name_order=%s",
+                "Excel processing completed: %d rows processed, test_name_order=%s, is_phonetics=%s (from presentation_type='%s')",
                 result.total_rows_processed,
                 request.test_name_order,
+                is_phonetics,
+                request.presentation_type,
             )
             return result
 
@@ -536,12 +537,8 @@ class PresentationService:
                 slide_number += 1
 
     # Background and template info
-        if request.template_rotation:
-            background_type = "Rotate"
-            background_name = "|".join(request.template_rotation)
-        else:
-            background_type = "Default"
-            background_name = "Default"
+        background_type = request.background_type or "Default"
+        background_name = request.background_name or "Default"
 
         powerpoint_file = pptx_data.pptx_file or ""
         excel_file = ""  # Will be populated if needed in the future
@@ -551,18 +548,15 @@ class PresentationService:
             display_name=request.display_name,
             powerpoint_file=powerpoint_file,
             excel_file=excel_file,
-            background_type=request.background_type or background_type,
-            background_name=request.background_name or background_name,
+            background_type=background_type,
+            background_name=background_name,
             page_number=request.page_number,
             presentation_type=request.presentation_type,
             user_name=request.user_name,
-            bsr_display_name=request.bsr_display_name or request.display_name,
             mobile_link_bsr=request.mobile_link_bsr,
             participant_vote=request.participant_vote,
             is_wide_ppt=request.is_wide_ppt,
             is_aws_email=request.is_aws_email,
-            is_design_mode=request.is_design_mode,
-            is_printed=request.presentation_type.lower() == "design",
             details=details,
         ).model_dump()
 
@@ -744,49 +738,6 @@ class PresentationService:
         if project_type.lower() == "nsr":
             return "NSR-Japan" if "Japan" in presentation_type else "NSR"
         return "NameEvaluation"
-
-    def _apply_template_rotation(
-        self, slides_data: Dict[str, Any], template_rotation: List[str]
-    ) -> Dict[str, Any]:
-        """Apply template rotation to slides with improved logic."""
-        if not template_rotation:
-            return slides_data
-
-        templates = [item.strip() for item in template_rotation if item and item.strip()]
-        if not templates:
-            return slides_data
-
-        template_cache: Dict[str, Dict[str, Any]] = {}
-        rotation_index = 0
-
-        for slide in slides_data["details"]:
-            # Skip group slides, summary slides, and image slides
-            slide_type = (slide.get("slide_type", "")).lower()
-            if slide_type in {"image", "namesummary"}:
-                continue
-
-            # Skip if this is a group slide (group name == slide description)
-            is_group_slide = (
-                slide.get("group_name", "").strip().lower()
-                == slide.get("slide_description", "").strip().lower()
-            )
-            if is_group_slide or not slide.get("name"):
-                continue
-
-            template_name = templates[rotation_index % len(templates)]
-
-            # Get template metadata with caching
-            if template_name not in template_cache:
-                template_cache[template_name] = self._get_template_metadata(
-                    template_name
-                )
-
-            metadata = template_cache[template_name]
-            slide["slide_bg_file_name"] = ""
-            slide["template_id"] = metadata["template_id"]
-            rotation_index += 1
-
-        return slides_data
 
     def _get_template_metadata(self, template_name: str) -> Dict[str, Any]:
         """Get template metadata from the database with robust error handling and caching.
@@ -976,7 +927,7 @@ class PresentationService:
             slides_data["page_number"],
             slides_data["presentation_type"],
             slides_data["user_name"],
-            slides_data["bsr_display_name"],
+            slides_data["mobile_link_bsr"],
             slides_data["participant_vote"],
             slides_data["is_wide_ppt"],
             slides_data["is_aws_email"],
