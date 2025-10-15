@@ -314,15 +314,20 @@ class BIGuidelinesService:
 
             return template_groups, total
 
-    def get_background_templates_by_names(self, template_names: List[str]) -> Dict[str, str]:
-        """Query nw_Templates table to get background image paths for given template names.
+    def get_background_templates_by_names(self, template_names: List[str]) -> Dict[str, Dict[str, any]]:
+        """Query nw_Templates table to get background info for given template names.
 
         Args:
             template_names: List of template names (e.g., ['BMW_1', 'BrandDNA', 'Kitchen2'])
 
         Returns:
-            Dictionary mapping template_name to template_file_name (image path)
-            Example: {'BMW_1': 'images/BackGrounds/Backgrounds2019/BMW_1.jpg'}
+            Dictionary mapping template_name to dict with template_id and template_file_name
+            Example: {
+                'BMW_1': {
+                    'template_id': 123,
+                    'template_file_name': 'images/BackGrounds/Backgrounds2019/BMW_1.jpg'
+                }
+            }
 
         Raises:
             DatabaseConnectionError: If connection to database fails.
@@ -340,7 +345,7 @@ class BIGuidelinesService:
         # Build parameterized query with IN clause
         placeholders = ','.join(['?'] * len(template_names))
         query = f"""
-            SELECT TemplateName, TemplateFileName
+            SELECT templateid, TemplateName, TemplateFileName
             FROM [BI_GUIDELINES].[dbo].[nw_Templates]
             WHERE TemplateName IN ({placeholders})
         """
@@ -352,7 +357,10 @@ class BIGuidelinesService:
             # Build dictionary mapping
             template_map = {}
             for row in rows:
-                template_map[row.TemplateName] = row.TemplateFileName
+                template_map[row.TemplateName] = {
+                    'template_id': row.templateid,
+                    'template_file_name': row.TemplateFileName
+                }
 
             logger.info(
                 "BI_GUIDELINES - Retrieved %d background templates out of %d requested",

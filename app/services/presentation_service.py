@@ -997,7 +997,44 @@ class PresentationService:
     def _insert_detail_records(
         self, cursor, presentation_id: int, slides_data: Dict[str, Any]
     ) -> None:
-        """Insert detail records for each slide while handling null values."""
+        """Insert detail records for each slide with background rotation for NameEvaluation slides.
+
+        This method applies background rotation ONLY for NameEvaluation type presentations.
+        Background paths are fetched from nw_Templates table and rotated through slides.
+        """
+        from app.services.template_selector import background_image_selector
+
+        # 1. Determine if we should apply background rotation
+        background_type = slides_data.get("background_type", "Default")
+        background_name = slides_data.get("background_name", "")
+
+        use_background_rotation = (
+            background_type.lower() == "rotate"
+            and background_name
+            and background_name.lower() != "default"
+        )
+
+        # 2. Fetch background paths from database if rotating
+        background_paths = {}
+        selected_bg_names = []
+
+        if use_background_rotation:
+            selected_bg_names = background_image_selector.parse_background_names(background_name)
+            names_to_fetch = set(selected_bg_names)
+            names_to_fetch.add("Default")
+
+            # Query nw_Templates table for template IDs and paths
+            from app.services.bi_guidelines_service import bi_guidelines_service
+            background_paths = bi_guidelines_service.get_background_templates_by_names(
+                list(names_to_fetch)
+            )
+
+            logger.info(
+                "Background rotation enabled: %d templates will be rotated across NameEvaluation slides",
+                len(selected_bg_names)
+            )
+
+        # 3. Insert slides with background rotation
         detail_sql = """
             EXEC [dbo].[nw_InsertPresentationDetail_copy]
                 @PresentationId=?, @SlideNumber=?, @SlideType=?, @SlideBGFileName=?,
@@ -1005,13 +1042,43 @@ class PresentationService:
                 @NameRationale=?, @NameNotation=?, @KanaNames=?, @NameLogo=?,
                 @TemplateId=?, @NameSubGroup=?;
         """
-        
+
+        bg_index = 0
         for slide in slides_data["details"]:
+            slide_type = slide.get("slide_type", "")
+
+            # Determine the background path and template ID for this slide
+            path_to_save = slide.get("slide_bg_file_name") or ""
+            template_id_to_save = slide.get("template_id", 0)
+
+            # Apply background rotation ONLY for NameEvaluation slides
+            if use_background_rotation and slide_type == "NameEvaluation":
+                # Rotate through selected backgrounds
+                template_name_for_slide = selected_bg_names[bg_index % len(selected_bg_names)]
+                template_info = background_paths.get(template_name_for_slide)
+
+                if template_info:
+                    path_to_save = template_info.get('template_file_name', "")
+                    template_id_to_save = template_info.get('template_id', 0)
+                else:
+                    # Fallback to Default if template not found
+                    default_info = background_paths.get("Default", {})
+                    path_to_save = default_info.get('template_file_name', "")
+                    template_id_to_save = default_info.get('template_id', 0)
+                    logger.warning(
+                        "Template '%s' not found, using Default background for slide %d",
+                        template_name_for_slide,
+                        slide["slide_number"]
+                    )
+
+                bg_index += 1
+
+            # Insert the slide with the determined background path and template ID
             detail_params = (
                 presentation_id,
                 slide["slide_number"],
-                slide["slide_type"],
-                slide.get("slide_bg_file_name") or "",
+                slide_type,
+                path_to_save,  # Full background image path
                 slide.get("slide_description") or "",
                 slide.get("group_name") or "",
                 slide.get("category") or "",
@@ -1020,7 +1087,7 @@ class PresentationService:
                 slide.get("notation") or "",
                 slide.get("kana") or "",
                 slide.get("logo_filename") or "",
-                slide.get("template_id", 0),
+                template_id_to_save,  # Correct template ID for the applied background
                 slide.get("name_sub_group") or "",
             )
             cursor.execute(detail_sql, detail_params)
