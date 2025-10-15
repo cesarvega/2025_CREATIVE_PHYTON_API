@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import random
 import re
 from io import BytesIO
 from typing import Tuple
@@ -9,6 +10,7 @@ from typing import Tuple
 from openpyxl import load_workbook
 
 from app.models.excel_models import ProcessedExcelData
+from app.models.presentation_models import TestNameOrder
 from app.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
@@ -61,15 +63,61 @@ def _split_name_and_notation(raw_value: str) -> Tuple[str, str]:
     return name, notation.strip() if notation else ""
 
 
+def _apply_test_name_order(all_rows: list, test_name_order: TestNameOrder) -> list:
+    """Apply the test_name_order logic to randomize rows if needed.
+
+    Args:
+        all_rows: List of Excel rows
+        test_name_order: Ordering strategy (Default, Randomize, or Randomize_top_5)
+
+    Returns:
+        Reordered list of rows based on the strategy
+    """
+    if test_name_order == TestNameOrder.DEFAULT:
+        # Keep original order
+        return all_rows
+
+    elif test_name_order == TestNameOrder.RANDOMIZE:
+        # Randomize all rows
+        randomized = all_rows.copy()
+        random.shuffle(randomized)
+        logger.info("Applied Randomize: shuffled all %d rows", len(randomized))
+        return randomized
+
+    elif test_name_order == TestNameOrder.RANDOMIZE_TOP_5:
+        # Randomize only the first 5 rows, keep the rest in order
+        if len(all_rows) <= 5:
+            randomized = all_rows.copy()
+            random.shuffle(randomized)
+            logger.info("Applied Randomize_top_5: shuffled all %d rows (less than 5)", len(randomized))
+            return randomized
+        else:
+            top_5 = all_rows[:5].copy()
+            rest = all_rows[5:]
+            random.shuffle(top_5)
+            logger.info("Applied Randomize_top_5: shuffled first 5 rows, kept %d rows in order", len(rest))
+            return top_5 + rest
+
+    # Default fallback
+    return all_rows
+
+
 def process_excel_file(
     file_content: bytes,
     is_phonetics: bool = False,
     has_groups: bool = False,
+    test_name_order: TestNameOrder = TestNameOrder.DEFAULT,
 ) -> ProcessedExcelData:
     """
     Parse the Excel workbook and return a structure equivalent to clsExcel.LoadExcelFile.
 
     Optimized with efficient row filtering and minimal memory allocations.
+
+    Args:
+        file_content: Raw bytes of the Excel file
+        is_phonetics: Whether to process phonetic columns
+        has_groups: Whether the Excel contains group/sub-group rows
+        test_name_order: Ordering strategy for test names (Default, Randomize, Randomize_top_5)
     """
     workbook = load_workbook(filename=BytesIO(file_content), data_only=True)
     sheet = workbook.active
@@ -90,6 +138,9 @@ def process_excel_file(
         if all(cell.value is None or str(cell.value).strip() == "" for cell in row[:LOGO_COLUMN]):
             continue
         all_rows.append(row)
+
+    # Apply test_name_order logic
+    all_rows = _apply_test_name_order(all_rows, test_name_order)
 
     if not has_groups:
         for row in all_rows:
@@ -238,9 +289,18 @@ def process_excel_file(
 # Singleton service
 class ExcelProcessingService:
     def process_excel_file(
-        self, file_content: bytes, is_phonetics: bool = False, has_groups: bool = False
+        self,
+        file_content: bytes,
+        is_phonetics: bool = False,
+        has_groups: bool = False,
+        test_name_order: TestNameOrder = TestNameOrder.DEFAULT,
     ) -> ProcessedExcelData:
-        return process_excel_file(file_content, is_phonetics=is_phonetics, has_groups=has_groups)
+        return process_excel_file(
+            file_content,
+            is_phonetics=is_phonetics,
+            has_groups=has_groups,
+            test_name_order=test_name_order,
+        )
 
 
 excel_processing_service = ExcelProcessingService()

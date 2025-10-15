@@ -5,7 +5,7 @@ Response models for API endpoints.
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class PPTXConversionResponse(BaseModel):
@@ -62,11 +62,20 @@ class DisplayNamesResponse(BaseModel):
 
 
 class TemplateGroup(BaseModel):
-    """Model for a single template group."""
+    """Model for a single template group (background template).
+
+    Represents a background image template from the nw_Templates table.
+    The template_file_name contains the relative path to the background image
+    (e.g., 'images/BackGrounds/Backgrounds2019/BrandDNA.jpg').
+    """
 
     template_group_id: int
     template_name: str
     category: Optional[str] = None
+    template_file_name: Optional[str] = Field(
+        default=None,
+        description="Relative path to the background image file"
+    )
 
 
 class TemplateGroupsResponse(BaseModel):

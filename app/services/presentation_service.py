@@ -241,11 +241,13 @@ class PresentationService:
                 file_content=request.excel_file,
                 is_phonetics=request.is_phonetics,
                 has_groups=request.has_groups,
+                test_name_order=request.test_name_order,
             )
 
             logger.info(
-                "Excel processing completed: %d rows processed",
+                "Excel processing completed: %d rows processed, test_name_order=%s",
                 result.total_rows_processed,
+                request.test_name_order,
             )
             return result
 

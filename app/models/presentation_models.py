@@ -3,12 +3,34 @@ Presentation creation and management models.
 """
 
 from typing import Dict, List, Optional
+from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.models.response_models import PPTXConversionResponse
 from app.models.excel_models import ProcessedExcelData
 from app.utils.path_utils import sanitize_folder_name
+
+
+class ProjectKind(str, Enum):
+    """Project type enumeration."""
+    NW = "NW"
+    BSR = "BSR"
+    NSR = "NSR"
+    DW = "DW"
+
+
+class TestNameOrder(str, Enum):
+    """Test name ordering options."""
+    DEFAULT = "Default"
+    RANDOMIZE = "Randomize"
+    RANDOMIZE_TOP_5 = "Randomize_top_5"
+
+
+class BackgroundType(str, Enum):
+    """Background type options."""
+    DEFAULT = "Default"
+    ROTATE = "Rotate"
 
 
 class CreatePresentationMetadata(BaseModel):
@@ -96,16 +118,20 @@ class CreatePresentationMetadata(BaseModel):
         description="Starting page number offset written into generated slides.",
     )
     project_type: str = Field(
-        "bipresents",
-        description="Presentation family that determines directory routing (for example 'bipresents' or 'nw').",
+        "NW",
+        description="Presentation family that determines directory routing (NW, BSR, NSR, DW).",
     )
     is_phonetics: bool = Field(
         False,
         description="Indicates that phonetic columns (kana/notation) should be processed from the Excel sheet.",
     )
     has_groups: bool = Field(
-        False,
+        True,
         description="Whether the Excel sheet contains subgroup rows that must be converted into group slides.",
+    )
+    test_name_order: TestNameOrder = Field(
+        TestNameOrder.DEFAULT,
+        description="Ordering strategy for test names: Default (keep original), Randomize (shuffle all), or Randomize_top_5 (shuffle only first 5).",
     )
     template_rotation: Optional[List[str]] = Field(
         default=None,
@@ -163,6 +189,7 @@ class CreatePresentationMetadata(BaseModel):
             pptx_filename=pptx_filename,
             is_phonetics=self.is_phonetics,
             has_groups=self.has_groups,
+            test_name_order=self.test_name_order,
             project=self.project,
             display_name=self.display_name,
             presentation_type=self.presentation_type,
@@ -213,6 +240,10 @@ class CreatePresentationRequest(BaseModel):
     )
     has_groups: bool = Field(
         False, description="Flag indicating whether the Excel file contains group/sub-group rows."
+    )
+    test_name_order: TestNameOrder = Field(
+        TestNameOrder.DEFAULT,
+        description="Ordering strategy for test names: Default, Randomize, or Randomize_top_5."
     )
 
     project: str = Field(

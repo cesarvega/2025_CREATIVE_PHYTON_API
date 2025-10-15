@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from app.config.db import get_connection_scope
 from app.models.response_models import ActivePresentation, TemplateGroup
@@ -267,24 +267,41 @@ class BIGuidelinesService:
                 # Convert row to dictionary for easier access
                 row_dict = dict(zip(columns, row))
 
-                # The SP returns data in a column that might be named 'TempGroup' or similar
-                # Get the value from the first column
-                temp_group_value = row_dict.get("'TempGroup'") or row_dict.get('TempGroup') or list(row_dict.values())[0] if row_dict else None
+                # The SP might return multiple columns or a single concatenated column
+                # Try to get individual columns first
+                temp_group_value = row_dict.get("'TempGroup'") or row_dict.get('TempGroup')
+                template_file_name = row_dict.get("'TemplateFileName'") or row_dict.get('TemplateFileName')
 
-                # Parse the value if it contains delimited data (e.g., "Category~TemplateName")
-                if temp_group_value:
+                # If we have a concatenated value, parse it
+                if temp_group_value and not template_file_name:
+                    # Parse the value if it contains delimited data (e.g., "Category~TemplateName~Path")
                     parts = str(temp_group_value).split('~')
                     category = parts[0] if len(parts) > 0 else None
                     template_name = parts[1] if len(parts) > 1 else str(temp_group_value)
+                    template_file_name = parts[2] if len(parts) > 2 else None
+                elif not temp_group_value and row_dict:
+                    # Fallback: use first value if column name is unexpected
+                    temp_group_value = list(row_dict.values())[0] if row_dict else None
+                    parts = str(temp_group_value).split('~') if temp_group_value else []
+                    category = parts[0] if len(parts) > 0 else None
+                    template_name = parts[1] if len(parts) > 1 else str(temp_group_value) if temp_group_value else ''
+                    template_file_name = parts[2] if len(parts) > 2 else None
                 else:
-                    template_name = ''
-                    category = None
+                    # We have separate columns
+                    if temp_group_value:
+                        parts = str(temp_group_value).split('~')
+                        category = parts[0] if len(parts) > 0 else None
+                        template_name = parts[1] if len(parts) > 1 else str(temp_group_value)
+                    else:
+                        category = None
+                        template_name = ''
 
                 template_groups.append(
                     TemplateGroup(
                         template_group_id=idx + 1,  # Use index as ID since SP doesn't return one
                         template_name=template_name,
                         category=category,
+                        template_file_name=template_file_name,
                     )
                 )
 
@@ -296,6 +313,62 @@ class BIGuidelinesService:
             )
 
             return template_groups, total
+
+    def get_background_templates_by_names(self, template_names: List[str]) -> Dict[str, str]:
+        """Query nw_Templates table to get background image paths for given template names.
+
+        Args:
+            template_names: List of template names (e.g., ['BMW_1', 'BrandDNA', 'Kitchen2'])
+
+        Returns:
+            Dictionary mapping template_name to template_file_name (image path)
+            Example: {'BMW_1': 'images/BackGrounds/Backgrounds2019/BMW_1.jpg'}
+
+        Raises:
+            DatabaseConnectionError: If connection to database fails.
+            DatabaseTransactionError: If query execution fails.
+        """
+        if not template_names:
+            logger.warning("BI_GUIDELINES - No template names provided")
+            return {}
+
+        logger.debug(
+            "BI_GUIDELINES - Fetching background templates for names: %s",
+            template_names
+        )
+
+        # Build parameterized query with IN clause
+        placeholders = ','.join(['?'] * len(template_names))
+        query = f"""
+            SELECT TemplateName, TemplateFileName
+            FROM [BI_GUIDELINES].[dbo].[nw_Templates]
+            WHERE TemplateName IN ({placeholders})
+        """
+
+        with get_connection_scope(timeout=30) as cursor:
+            cursor.execute(query, template_names)
+            rows = cursor.fetchall()
+
+            # Build dictionary mapping
+            template_map = {}
+            for row in rows:
+                template_map[row.TemplateName] = row.TemplateFileName
+
+            logger.info(
+                "BI_GUIDELINES - Retrieved %d background templates out of %d requested",
+                len(template_map),
+                len(template_names),
+            )
+
+            # Log any missing templates
+            missing = set(template_names) - set(template_map.keys())
+            if missing:
+                logger.warning(
+                    "BI_GUIDELINES - Templates not found in database: %s",
+                    list(missing)
+                )
+
+            return template_map
 
 
 # Global service instance
