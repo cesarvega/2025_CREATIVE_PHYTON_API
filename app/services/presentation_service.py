@@ -1,5 +1,6 @@
 """
 Presentation creation orchestration service.
+Presentation creation orchestration service dispatcher.
 """
 
 import time
@@ -23,6 +24,8 @@ from app.models.presentation_models import (
 from app.models.response_models import PPTXConversionResponse
 from app.services.excel_service import GROUP_MARKERS, process_excel_file
 from app.services.pptx_service import pptx_service
+from app.services.projects.base_presentation_service import BasePresentationService
+from app.services.projects.nw_presentation_service import nw_presentation_service
 from app.services.pptx_builder_service import pptx_builder_service
 from app.services.word_service import generate_feedback_document
 from app.services.email_service import send_presentation_emails
@@ -37,6 +40,8 @@ logger = get_logger(__name__)
 _template_metadata_cache: Dict[str, Dict[str, Any]] = {}
 _cache_timestamp: Optional[float] = None
 _CACHE_TTL_SECONDS = 300  # 5 minutes
+class PresentationService:
+    """Service dispatcher for presentation creation.
 
 
 class PresentationService:
@@ -44,6 +49,8 @@ class PresentationService:
     
     This service coordinates between multiple services (Excel, PPTX, Word, Email)
     to create complete presentations with all associated artifacts.
+    This service routes presentation creation requests to the appropriate
+    project-specific service based on the `project_type` field.
     """
 
     def create_presentation(
@@ -59,6 +66,8 @@ class PresentationService:
             CreatePresentationResponse: Result of the presentation creation
         """
         start_time = time.time()
+        service = self._get_service_for_project(request.project_type)
+        return service.create_presentation(request)
 
         try:
             # 1. Process Excel file
@@ -77,12 +86,17 @@ class PresentationService:
                 request=request,
             )
 
-            # 4. Template rotation no longer used - backgrounds handled differently
+            # 4. Apply templates if specified
+            if request.template_rotation:
+                slides_data = self._apply_template_rotation(
+                    slides_data, request.template_rotation
+                )
 
             logger.info(
-                "Slides data generated: %d detail items, background=%s",
+                "Slides data generated: %d detail items, background=%s, rotation_applied=%s",
                 len(slides_data.get("details", [])),
                 slides_data.get("background_name"),
+                bool(request.template_rotation),
             )
 
             # 5. Generate physical PowerPoint file (if enabled)
@@ -157,6 +171,11 @@ class PresentationService:
     ):
         """Generate PowerPoint deliverables directly from Excel data."""
 
+        """
+        Generate PowerPoint deliverables directly from Excel data.
+        This currently uses the pptx_builder_service directly and might need
+        to be routed to project-specific builders in the future.
+        """
         logger.info(
             "Assembling PPT files for project=%s display=%s slide_range=%s-%s",
             build_request.project,
@@ -166,7 +185,12 @@ class PresentationService:
         )
 
         excel_data = self._process_excel_file(build_request)
+        # Use the appropriate service to process the excel file
+        service = self._get_service_for_project(build_request.project_type)
+        excel_data = service._process_excel_file(build_request)
 
+        # The rest of this method uses the generic builder service.
+        # This could be refactored into project-specific build methods if needed.
         stub_conversion = PPTXConversionResponse(
             message="Generated for PPT assembly",
             conversion_id=build_request.display_name,
@@ -179,6 +203,7 @@ class PresentationService:
         )
 
         slides_dict = self._generate_slides_from_excel(
+        slides_dict = service.generate_slides_from_excel(
             excel_data=excel_data,
             pptx_data=stub_conversion,
             request=build_request,
@@ -193,62 +218,32 @@ class PresentationService:
             excel_data=excel_data,
         )
 
-    def presentation_exists(
-        self,
-        project_name: str,
-        display_name: str,
-        exclude_id: Optional[int] = None,
-    ) -> bool:
-        """
-        Check if a presentation with the given project and display name already exists.
-
-        Args:
-            project_name: The name of the project.
-            display_name: The display name of the presentation.
-            exclude_id: Optional presentation ID to exclude from the check.
-
-        Returns:
-            True if a matching presentation exists, False otherwise.
-        """
-        sql = "SELECT TOP 1 1 FROM [BI_GUIDELINES].[dbo].[nw_Master] WHERE Project = ? AND DisplayName = ?"
-        params = [project_name, display_name]
-
-        if exclude_id is not None:
-            sql += " AND PresentationId != ?"
-            params.append(exclude_id)
-
-        try:
-            with create_connection() as conn:
-                with conn.cursor() as cursor:
-                    cursor.execute(sql, tuple(params))
-                    return cursor.fetchone() is not None
-        except Exception as e:
-            logger.error("Error checking if presentation exists: %s", e, exc_info=True)
-            raise HTTPException(status_code=500, detail="Database error while checking for presentation.") from e
-
     def _process_excel_file(
         self, request: CreatePresentationRequest
     ) -> ProcessedExcelData:
         """Process Excel file using the existing Excel service."""
         try:
-            # Derive is_phonetics from presentation_type
-            # If presentation_type is "Phonetics", process phonetic columns
-            is_phonetics = request.presentation_type.lower() == "phonetics"
-
             # Process the Excel file
             result = process_excel_file(
                 file_content=request.excel_file,
-                is_phonetics=is_phonetics,
+                is_phonetics=request.is_phonetics,
                 has_groups=request.has_groups,
-                test_name_order=request.test_name_order,
             )
+    def _get_service_for_project(self, project_type: str) -> BasePresentationService:
+        """Returns the appropriate service instance for the project type."""
+        project_type_lower = project_type.lower()
+        if project_type_lower in {"nw", "dw"}:
+            return nw_presentation_service
+        # Add other project types here
+        # elif project_type_lower in {"bsr", "nsr"}:
+        #     return bsr_presentation_service
+        else:
+            logger.warning("No specific service for project type '%s', using NW service as default.", project_type)
+            return nw_presentation_service
 
             logger.info(
-                "Excel processing completed: %d rows processed, test_name_order=%s, is_phonetics=%s (from presentation_type='%s')",
+                "Excel processing completed: %d rows processed",
                 result.total_rows_processed,
-                request.test_name_order,
-                is_phonetics,
-                request.presentation_type,
             )
             return result
 
@@ -341,6 +336,8 @@ class PresentationService:
             if not pptx_original_path.exists():
                 with open(pptx_original_path, "wb") as f:
                     f.write(request.pptx_file)
+        """This method is now part of the pptx_builder_service."""
+        raise NotImplementedError("Physical PPTX generation is handled by PPTXBuilderService.")
 
             artifacts = pptx_builder_service.compose_presentation_with_original_slides(
                 request=request,
@@ -537,8 +534,12 @@ class PresentationService:
                 slide_number += 1
 
     # Background and template info
-        background_type = request.background_type or "Default"
-        background_name = request.background_name or "Default"
+        if request.template_rotation:
+            background_type = "Rotate"
+            background_name = "|".join(request.template_rotation)
+        else:
+            background_type = "Default"
+            background_name = "Default"
 
         powerpoint_file = pptx_data.pptx_file or ""
         excel_file = ""  # Will be populated if needed in the future
@@ -548,15 +549,18 @@ class PresentationService:
             display_name=request.display_name,
             powerpoint_file=powerpoint_file,
             excel_file=excel_file,
-            background_type=background_type,
-            background_name=background_name,
+            background_type=request.background_type or background_type,
+            background_name=request.background_name or background_name,
             page_number=request.page_number,
             presentation_type=request.presentation_type,
             user_name=request.user_name,
+            bsr_display_name=request.bsr_display_name or request.display_name,
             mobile_link_bsr=request.mobile_link_bsr,
             participant_vote=request.participant_vote,
             is_wide_ppt=request.is_wide_ppt,
             is_aws_email=request.is_aws_email,
+            is_design_mode=request.is_design_mode,
+            is_printed=request.presentation_type.lower() == "design",
             details=details,
         ).model_dump()
 
@@ -738,6 +742,49 @@ class PresentationService:
         if project_type.lower() == "nsr":
             return "NSR-Japan" if "Japan" in presentation_type else "NSR"
         return "NameEvaluation"
+
+    def _apply_template_rotation(
+        self, slides_data: Dict[str, Any], template_rotation: List[str]
+    ) -> Dict[str, Any]:
+        """Apply template rotation to slides with improved logic."""
+        if not template_rotation:
+            return slides_data
+
+        templates = [item.strip() for item in template_rotation if item and item.strip()]
+        if not templates:
+            return slides_data
+
+        template_cache: Dict[str, Dict[str, Any]] = {}
+        rotation_index = 0
+
+        for slide in slides_data["details"]:
+            # Skip group slides, summary slides, and image slides
+            slide_type = (slide.get("slide_type", "")).lower()
+            if slide_type in {"image", "namesummary"}:
+                continue
+
+            # Skip if this is a group slide (group name == slide description)
+            is_group_slide = (
+                slide.get("group_name", "").strip().lower()
+                == slide.get("slide_description", "").strip().lower()
+            )
+            if is_group_slide or not slide.get("name"):
+                continue
+
+            template_name = templates[rotation_index % len(templates)]
+
+            # Get template metadata with caching
+            if template_name not in template_cache:
+                template_cache[template_name] = self._get_template_metadata(
+                    template_name
+                )
+
+            metadata = template_cache[template_name]
+            slide["slide_bg_file_name"] = ""
+            slide["template_id"] = metadata["template_id"]
+            rotation_index += 1
+
+        return slides_data
 
     def _get_template_metadata(self, template_name: str) -> Dict[str, Any]:
         """Get template metadata from the database with robust error handling and caching.
@@ -927,7 +974,7 @@ class PresentationService:
             slides_data["page_number"],
             slides_data["presentation_type"],
             slides_data["user_name"],
-            slides_data["mobile_link_bsr"],
+            slides_data["bsr_display_name"],
             slides_data["participant_vote"],
             slides_data["is_wide_ppt"],
             slides_data["is_aws_email"],
@@ -997,44 +1044,7 @@ class PresentationService:
     def _insert_detail_records(
         self, cursor, presentation_id: int, slides_data: Dict[str, Any]
     ) -> None:
-        """Insert detail records for each slide with background rotation for NameEvaluation slides.
-
-        This method applies background rotation ONLY for NameEvaluation type presentations.
-        Background paths are fetched from nw_Templates table and rotated through slides.
-        """
-        from app.services.template_selector import background_image_selector
-
-        # 1. Determine if we should apply background rotation
-        background_type = slides_data.get("background_type", "Default")
-        background_name = slides_data.get("background_name", "")
-
-        use_background_rotation = (
-            background_type.lower() == "rotate"
-            and background_name
-            and background_name.lower() != "default"
-        )
-
-        # 2. Fetch background paths from database if rotating
-        background_paths = {}
-        selected_bg_names = []
-
-        if use_background_rotation:
-            selected_bg_names = background_image_selector.parse_background_names(background_name)
-            names_to_fetch = set(selected_bg_names)
-            names_to_fetch.add("Default")
-
-            # Query nw_Templates table for template IDs and paths
-            from app.services.bi_guidelines_service import bi_guidelines_service
-            background_paths = bi_guidelines_service.get_background_templates_by_names(
-                list(names_to_fetch)
-            )
-
-            logger.info(
-                "Background rotation enabled: %d templates will be rotated across NameEvaluation slides",
-                len(selected_bg_names)
-            )
-
-        # 3. Insert slides with background rotation
+        """Insert detail records for each slide while handling null values."""
         detail_sql = """
             EXEC [dbo].[nw_InsertPresentationDetail_copy]
                 @PresentationId=?, @SlideNumber=?, @SlideType=?, @SlideBGFileName=?,
@@ -1042,43 +1052,13 @@ class PresentationService:
                 @NameRationale=?, @NameNotation=?, @KanaNames=?, @NameLogo=?,
                 @TemplateId=?, @NameSubGroup=?;
         """
-
-        bg_index = 0
+        
         for slide in slides_data["details"]:
-            slide_type = slide.get("slide_type", "")
-
-            # Determine the background path and template ID for this slide
-            path_to_save = slide.get("slide_bg_file_name") or ""
-            template_id_to_save = slide.get("template_id", 0)
-
-            # Apply background rotation ONLY for NameEvaluation slides
-            if use_background_rotation and slide_type == "NameEvaluation":
-                # Rotate through selected backgrounds
-                template_name_for_slide = selected_bg_names[bg_index % len(selected_bg_names)]
-                template_info = background_paths.get(template_name_for_slide)
-
-                if template_info:
-                    path_to_save = template_info.get('template_file_name', "")
-                    template_id_to_save = template_info.get('template_id', 0)
-                else:
-                    # Fallback to Default if template not found
-                    default_info = background_paths.get("Default", {})
-                    path_to_save = default_info.get('template_file_name', "")
-                    template_id_to_save = default_info.get('template_id', 0)
-                    logger.warning(
-                        "Template '%s' not found, using Default background for slide %d",
-                        template_name_for_slide,
-                        slide["slide_number"]
-                    )
-
-                bg_index += 1
-
-            # Insert the slide with the determined background path and template ID
             detail_params = (
                 presentation_id,
                 slide["slide_number"],
-                slide_type,
-                path_to_save,  # Full background image path
+                slide["slide_type"],
+                slide.get("slide_bg_file_name") or "",
                 slide.get("slide_description") or "",
                 slide.get("group_name") or "",
                 slide.get("category") or "",
@@ -1087,7 +1067,7 @@ class PresentationService:
                 slide.get("notation") or "",
                 slide.get("kana") or "",
                 slide.get("logo_filename") or "",
-                template_id_to_save,  # Correct template ID for the applied background
+                slide.get("template_id", 0),
                 slide.get("name_sub_group") or "",
             )
             cursor.execute(detail_sql, detail_params)

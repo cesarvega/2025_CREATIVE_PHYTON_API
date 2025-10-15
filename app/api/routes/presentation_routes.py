@@ -3,7 +3,6 @@
 import base64
 import time
 from pathlib import Path
-from typing import Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
@@ -330,49 +329,6 @@ async def build_presentation_files(
             detail="Failed to assemble presentation from provided inputs.",
         ) from exc
 
-
-@router.get(
-    "/exists",
-    summary="Check if a presentation exists",
-    response_description="Returns a boolean indicating if the presentation exists.",
-    responses={
-        200: {
-            "description": "Check completed successfully.",
-            "content": {
-                "application/json": {
-                    "example": {"exists": True}
-                }
-            },
-        },
-        500: {
-            "description": "Database error during check.",
-            "content": {
-                "application/json": {
-                    "example": {"detail": "Database error while checking for presentation."}
-                }
-            },
-        },
-    },
-)
-async def check_presentation_exists(
-    project_name: str,
-    display_name: str,
-    exclude_id: Optional[int] = None,
-) -> dict[str, bool]:
-    """
-    Check if a presentation with the given project name and display name already exists.
-    An optional `exclude_id` can be provided to exclude a specific presentation ID
-    from the check, which is useful for update operations.
-    """
-    try:
-        exists = presentation_service.presentation_exists(
-            project_name=project_name,
-            display_name=display_name,
-            exclude_id=exclude_id,
-        )
-        return {"exists": exists}
-    except HTTPException:
-        raise
 
 @router.get(
     "/files/{token}",
