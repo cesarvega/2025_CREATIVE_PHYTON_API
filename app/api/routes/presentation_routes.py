@@ -10,6 +10,8 @@ from fastapi.responses import FileResponse
 from app.api.dependencies import (
     parse_build_metadata,
     parse_presentation_metadata,
+    get_nw_build_metadata,
+    get_nw_presentation_metadata,
 )
 from app.config.settings import settings
 from app.models.presentation_models import (
@@ -18,6 +20,11 @@ from app.models.presentation_models import (
     CreatePresentationResponse,
     PresentationBuildMetadata,
     PresentationBuildResponse,
+)
+from app.models.projects.nw_models import (
+    NWCreatePresentationMetadata,
+    NWCreatePresentationRequest,
+    NWCreatePresentationResponse,
 )
 from app.services.presentation_service import presentation_service
 from app.utils.download_utils import (
@@ -30,14 +37,26 @@ from app.utils.logging_utils import get_logger
 router = APIRouter(prefix="/presentations", tags=["Presentation Creation"])
 logger = get_logger(__name__)
 
+# Main router for all presentation-related endpoints
+router = APIRouter(prefix="/presentations", tags=["Presentations"])
 
 @router.post(
+# Project-specific router for NW
+nw_router = APIRouter(prefix="/nw", tags=["NW Presentations"])
+
+
+@nw_router.post(
     "/create",
     response_model=CreatePresentationResponse,
     summary="Create a complete presentation from Excel + PPTX inputs with physical file generation",
+    response_model=NWCreatePresentationResponse,
+    summary="Create a complete NW presentation from Excel + PPTX inputs",
     description=(
         "Upload the Excel candidate workbook, a base PPTX template, and a metadata JSON payload "
         "to generate a fully populated presentation. This endpoint:\n\n"
+        "**Project Type: NW (Name Writing)**\n\n"
+        "Upload an Excel candidate workbook, a base PPTX template, and metadata "
+        "to generate a fully populated NW presentation. This endpoint orchestrates the entire process:\n\n"
         "1. **Processes Excel data** - Extracts names, categories, groups, and rationales\n"
         "2. **Converts PPTX to images** - Generates JPG images from each slide of the original PPTX\n"
         "3. **Generates slide metadata** - Creates detailed slide information for database storage\n"
@@ -50,10 +69,12 @@ logger = get_logger(__name__)
         "7. **Returns complete response** - Includes presentation ID, generated file paths, and processing stats\n\n"
         "The generated PowerPoint file is a complete, ready-to-present deck that seamlessly integrates "
         "your original slides with dynamically generated content from the Excel data."
+        "7. **Returns complete response** - Includes presentation ID and processing stats"
     ),
     response_description=(
         "Creation status with presentation ID, total slide count, processing time, "
         "and paths to generated PowerPoint files (.pptx and optional .pptm)."
+        "and structured data from the process."
     ),
     responses={
         400: {
@@ -94,11 +115,15 @@ logger = get_logger(__name__)
 )
 async def create_presentation(
     metadata: CreatePresentationMetadata = Depends(parse_presentation_metadata),
+    metadata: NWCreatePresentationMetadata = Depends(get_nw_presentation_metadata),
     excel_file: UploadFile = File(..., description="Excel file (.xlsx or .xls)"),
     pptx_file: UploadFile = File(..., description="PowerPoint file (.pptx)"),
 ) -> CreatePresentationResponse:
     """Create a presentation by combining JSON metadata with uploaded template files.
 
+) -> NWCreatePresentationResponse:
+    """Create an NW presentation by combining JSON metadata with uploaded files.
+    
     The client must submit a `metadata` field containing a JSON object with all
     presentation parameters (project name, display name, background settings, flags,
     etc.) together with two file uploads: the Excel candidate sheet (`excel_file`) and
@@ -119,6 +144,7 @@ async def create_presentation(
     The service then executes the full pipeline:
     Excel processing → PPTX conversion → slide generation → template application →
     database persistence → [optional] physical PowerPoint generation.
+    complete physical PowerPoint file.
     """
     try:
         # Validate Excel file
@@ -149,6 +175,7 @@ async def create_presentation(
 
         # Create request object from metadata + files
         request: CreatePresentationRequest = metadata.to_service_request(
+        request: NWCreatePresentationRequest = metadata.to_service_request(
             excel_content=excel_content,
             excel_filename=excel_file.filename,
             pptx_content=pptx_content,
@@ -173,8 +200,10 @@ async def create_presentation(
             result.presentation_id,
             result.total_slides,
             processing_time,
+            result.processing_time_seconds,
         )
 
+        # The response model is already a subclass, so it can be returned directly
         return result
 
     except HTTPException:
@@ -187,6 +216,7 @@ async def create_presentation(
 
 
 @router.post(
+@nw_router.post(
     "/createTemplate",
     response_model=PresentationBuildResponse,
     summary="Assemble presentation files directly from an Excel candidate sheet",
@@ -235,6 +265,7 @@ async def create_presentation(
 )
 async def build_presentation_files(
     metadata: PresentationBuildMetadata = Depends(parse_build_metadata),
+    metadata: PresentationBuildMetadata = Depends(get_nw_build_metadata),
     excel_file: UploadFile = File(..., description="Excel file (.xlsx or .xls)"),
 ) -> PresentationBuildResponse:
     try:
@@ -293,6 +324,7 @@ async def build_presentation_files(
             metadata.project,
             metadata.display_name,
             processing_time,
+            artifacts.total_slides, # This seems wrong, should be time
             artifacts.total_slides,
         )
 
@@ -331,6 +363,7 @@ async def build_presentation_files(
 
 
 @router.get(
+@nw_router.get(
     "/files/{token}",
     summary="Download a generated presentation artifact",
     responses={
@@ -361,6 +394,7 @@ async def download_generated_file(token: str) -> FileResponse:
 
 
 @router.post(
+@nw_router.post(
     "/test-slide-generation",
     summary="Test slide generation with multi-candidate layout",
     description=(
@@ -525,6 +559,7 @@ async def test_slide_generation(
 
 
 @router.post(
+@nw_router.post(
     "/test-table-layout",
     summary="Test table layout with simple list of names",
     description="Simple endpoint to test dynamic table layout with just a list of names",
@@ -648,3 +683,7 @@ async def test_table_layout(names: list[str]) -> dict:
             status_code=500,
             detail=f"Failed to test table layout: {str(e)}"
         ) from e
+
+
+# Include the project-specific router in the main router
+router.include_router(nw_router)
