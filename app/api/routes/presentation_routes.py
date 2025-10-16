@@ -20,7 +20,12 @@ from app.models.presentation_models import (
     PresentationBuildMetadata,
     PresentationBuildResponse,
 )
+from app.models.nw_reports_models import (
+    DownloadResultsRequest,
+    DownloadResultsResponse,
+)
 from app.services.presentation_service import presentation_service
+from app.services.report_orchestrator_service import report_orchestrator_service
 from app.utils.download_utils import (
     build_api_download_url,
     decode_download_token,
@@ -691,4 +696,196 @@ async def test_table_layout(names: list[str]) -> dict:
         raise HTTPException(
             status_code=500,
             detail=f"Failed to test table layout: {str(e)}"
+        ) from e
+
+
+@router.post(
+    "/download-results",
+    response_model=DownloadResultsResponse,
+    summary="Download NW presentation results in various formats",
+    description=(
+        "Generate and download presentation results in different formats:\n\n"
+        "- **Excel**: Complete NW Results workbook with retained names, newly created names, "
+        "roots/concepts to explore/avoid, notes, and optional votes and participants sheets\n"
+        "- **Word**: NW Report document with formatted tables and charts (requires template)\n"
+        "- **Analytics**: NW Analytics workbook with project-specific and region-specific metrics\n"
+        "- **BSR**: BSR download with specialized Excel and Word templates\n\n"
+        "The endpoint:\n"
+        "1. Retrieves data from stored procedures based on presentation ID\n"
+        "2. Processes and transforms data (vote conversion, name grouping, Unicode handling)\n"
+        "3. Generates the requested report type\n"
+        "4. Returns a download token for secure file access\n\n"
+        "**Data Processing:**\n"
+        "- Grouped names (delimited by ## or $$) are split into separate rows in Excel\n"
+        "- Numeric votes (-1, 0, 1) are converted to text (Negative, Neutral, Positive)\n"
+        "- Unicode characters are normalized for compatibility\n\n"
+        "**Template Requirements:**\n"
+        "- Analytics reports require: C:/Templates/CreativeMacros/NW_Analytics/NWAnalytics.xlsx\n"
+        "- Word reports require: Nomenclature Workshop Report_Template_new_*.doc\n"
+        "- BSR reports require: BSR_EXCEL_TEMPLATE.xls and BSR_WORD_TEMPLATE.docx"
+    ),
+    response_description=(
+        "Report generation status with file path, filename, and secure download token. "
+        "Use the download token with the /presentations/files/{token} endpoint to retrieve the file."
+    ),
+    responses={
+        200: {
+            "description": "Report generated successfully.",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "success": True,
+                        "message": "EXCEL report generated successfully",
+                        "file_path": "C:/output/TestProject/NW_Results_TestPresentation_20250116_143022.xlsx",
+                        "file_name": "NW_Results_TestPresentation_20250116_143022.xlsx",
+                        "download_token": "eyJ0eXAiOiJKV1QiLCJhbGc...",
+                        "report_type": "excel",
+                        "presentation_id": 12345,
+                        "generated_at": "2025-01-16T14:30:22.123456",
+                        "warnings": []
+                    }
+                }
+            },
+        },
+        400: {
+            "description": "Invalid request parameters.",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Presentation with ID 12345 not found"}
+                }
+            },
+        },
+        404: {
+            "description": "Required template file not found.",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Analytics template not found at: C:/Templates/CreativeMacros/NW_Analytics/NWAnalytics.xlsx"}
+                }
+            },
+        },
+        500: {
+            "description": "Unexpected error during report generation.",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "Failed to generate report: Database connection error"
+                    }
+                }
+            },
+        },
+        501: {
+            "description": "Report type not yet implemented.",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "Word report generation is not yet implemented. This requires Word COM automation or python-docx integration."
+                    }
+                }
+            },
+        },
+    },
+)
+async def download_results(request: DownloadResultsRequest) -> DownloadResultsResponse:
+    """Generate and download NW presentation results.
+
+    This endpoint orchestrates the generation of various NW report types:
+
+    **Excel Report (report_type: "excel"):**
+    - Generates a complete workbook with multiple sheets
+    - Includes retained names, newly created names, roots/concepts, and notes
+    - Optionally includes voting data and participant information
+    - Data is retrieved from stored procedures:
+      - nw_dlRetainedNames_withRecraft
+      - nw_CombineNewNames
+      - nw_dlRootsOrConceptsToExplore
+      - nw_dlRootsOrConceptsToAvoid
+      - nw_dlOpenNotes
+      - nw_Votesbygroups (if include_votes=true)
+      - nw_VotedParticipants (if include_participants=true)
+
+    **Analytics Report (report_type: "analytics"):**
+    - Generates from NWAnalytics.xlsx template
+    - Fills Project-Specific and Region-Specific sheets
+    - Data from stored procedures:
+      - NW_ProjectAnalytics
+      - NW_RegionSpecificAnalytics
+
+    **Word Report (report_type: "word"):** [Not Yet Implemented]
+    - Would generate formatted Word document from template
+    - Would use stored procedures:
+      - nw_wdValuesToReplace (for placeholders)
+      - nw_wdGetResults or nw_wdGetResults_Phonetics
+      - Would include pie charts and formatted tables
+
+    **BSR Report (report_type: "bsr"):** [Not Yet Implemented]
+    - Would generate BSR-specific Excel and Word documents
+    - Would use stored procedures:
+      - bsr_GetExcelReport
+      - Plus direct queries to bsr_ProjectConcepts and BSR_PageComments tables
+
+    Args:
+        request: Download results request containing:
+            - presentation_id: The presentation to generate report for
+            - report_type: Type of report (excel, word, analytics, bsr)
+            - summary_type: Optional, for Word phonetics reports
+            - mobile_link: Optional, for BSR downloads
+            - include_votes: Whether to include votes sheet
+            - include_participants: Whether to include participants sheet
+
+    Returns:
+        DownloadResultsResponse with:
+            - success: Boolean indicating if generation succeeded
+            - message: Descriptive message
+            - file_path: Full path to generated file
+            - file_name: Name of generated file
+            - download_token: Secure token for downloading the file
+            - report_type: Type of report generated
+            - presentation_id: ID of presentation
+            - generated_at: Timestamp of generation
+            - warnings: List of any warnings during generation
+
+    Raises:
+        HTTPException 400: If presentation ID is invalid or not found
+        HTTPException 404: If required template files are missing
+        HTTPException 500: If report generation fails
+        HTTPException 501: If report type is not yet implemented
+    """
+    try:
+        logger.info(
+            "Received download results request: presentation_id=%d, report_type=%s",
+            request.presentation_id,
+            request.report_type,
+        )
+
+        # Generate report using orchestrator service
+        response = report_orchestrator_service.generate_report(request)
+
+        logger.info(
+            "Report generated successfully: %s for presentation %d",
+            request.report_type,
+            request.presentation_id,
+        )
+
+        return response
+
+    except ValueError as e:
+        logger.error("Invalid request: %s", str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    except FileNotFoundError as e:
+        logger.error("Template file not found: %s", str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+    except NotImplementedError as e:
+        logger.error("Feature not implemented: %s", str(e))
+        raise HTTPException(status_code=501, detail=str(e)) from e
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.error("Error generating report: %s", str(e), exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate report: {str(e)}"
         ) from e

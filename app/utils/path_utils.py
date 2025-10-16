@@ -103,3 +103,43 @@ def build_relative_slide_path(
         parts.append(subdir)
     parts.append(filename)
     return "/".join(parts)
+
+
+def get_nw_downloads_dir() -> Path:
+    """Get the NW downloads directory.
+
+    Returns:
+        Path to NW_Files/downloads in the project directory
+
+    Note: For now, using local project directory due to permission issues.
+    In production, this should be configured to use C:/nw_files/downloads
+    """
+    # Always use local project directory for now
+    return settings.app_dir / "NW_Files" / "downloads"
+
+
+def get_bsr_downloads_dir() -> Path:
+    """Get the BSR downloads directory.
+
+    Returns:
+        Path to NW_Files/BRS_files/downloads in the project directory
+    """
+    return settings.app_dir / "NW_Files" / "BRS_files" / "downloads"
+
+
+def get_nw_analytics_dir() -> Path:
+    """Get the NW Analytics directory.
+
+    Returns:
+        Path to NW_Files/NWAnalytics in the project directory
+    """
+    return settings.app_dir / "NW_Files" / "NWAnalytics"
+
+
+def get_bsr_analytics_dir() -> Path:
+    """Get the BSR Analytics directory.
+
+    Returns:
+        Path to NW_Files/BRS_files/BSR_Analytics in the project directory
+    """
+    return settings.app_dir / "NW_Files" / "BRS_files" / "BSR_Analytics"
