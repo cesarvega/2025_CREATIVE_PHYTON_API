@@ -5,18 +5,20 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, Form
 from fastapi.responses import FileResponse
 
 from app.api.dependencies import (
     parse_build_metadata,
     parse_presentation_metadata,
+    parse_simple_dw_metadata,
 )
 from app.config.settings import settings
 from app.models.presentation_models import (
     CreatePresentationMetadata,
     CreatePresentationRequest,
     CreatePresentationResponse,
+    SimpleDWMetadata,
     PresentationBuildMetadata,
     PresentationBuildResponse,
 )
@@ -26,16 +28,24 @@ from app.models.nw_reports_models import (
     DownloadResultsRequest,
     DownloadResultsResponse,
 )
+from app.models.response_models import ReplaceProjectImagesResponse, CreateSimpleDWResponse
 from app.services.presentation_service import presentation_service
 from app.services.report_orchestrator_service import report_orchestrator_service
 from app.services.feedback_template_generator import feedback_template_generator
 from app.services.bi_guidelines_service import bi_guidelines_service
+from app.services.pptx_service import pptx_service
+from app.config.db import get_connection_scope
 from app.utils.download_utils import (
     build_api_download_url,
     decode_download_token,
     guess_media_type,
 )
 from app.utils.logging_utils import get_logger
+from app.api.dependencies import (
+    validate_project_type,
+    validate_pptx_file,
+    validate_file_size,
+)
 
 router = APIRouter(prefix="/presentations", tags=["Presentation Creation"])
 logger = get_logger(__name__)
@@ -195,6 +205,251 @@ async def create_presentation(
             status_code=500, detail=f"Failed to create presentation: {str(e)}"
         ) from e
 
+
+@router.post(
+    "/replace-project-images/",
+    summary="Replace slide images for an existing project",
+    response_model=ReplaceProjectImagesResponse,
+)
+async def replace_project_images(
+    powerpointFile: UploadFile = File(..., description="PowerPoint file (.pptx)"),
+    project_name: str = Form(..., description="Existing project folder name"),
+    project_type: str = Depends(validate_project_type),
+):
+    """Replace images and thumbnails in an existing project folder.
+
+    - project_name: Must match an existing folder under the project type base dir.
+    - project_type: 'bipresents' or 'nw' (used to resolve base directory).
+    - powerpoint file: Uploaded PPTX used to export new slide images.
+    """
+    try:
+        # Validate file type and size (50MB default for PPTX)
+        validated_file = await validate_pptx_file(powerpointFile)
+        file_content = await validate_file_size(validated_file, 50)
+
+        # Basic validation for project_name (no path separators or whitespace trim changes)
+        if not project_name or project_name.strip() != project_name or ("/" in project_name or "\\" in project_name):
+            raise HTTPException(status_code=400, detail="Invalid project name")
+
+        result = pptx_service.replace_project_images(
+            file_content=file_content,
+            filename=validated_file.filename,
+            project_name=project_name,
+            project_type=project_type,
+        )
+
+        return ReplaceProjectImagesResponse(
+            message=result["message"],
+            project_name=result["project_name"],
+            project_type=result["project_type"],
+            total_images=result["total_images"],
+            images=result["images"],
+            thumbnails=result.get("thumbnails", []),
+        )
+
+    except FileNotFoundError as fnf:
+        raise HTTPException(status_code=404, detail=str(fnf)) from fnf
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve)) from ve
+    except Exception as e:
+        logger.error("Error replacing project images: %s", str(e), exc_info=True)
+        raise HTTPException(
+            status_code=500, detail=f"Replace images error: {str(e)}"
+        ) from e
+
+
+@router.post(
+    "/create-simple-dw",
+    summary="Create DW slide images from a PPTX using simplified metadata",
+    response_model=CreateSimpleDWResponse,
+)
+async def create_simple_dw_presentation(
+    metadata: SimpleDWMetadata = Depends(parse_simple_dw_metadata),
+    powerpointFile: UploadFile = File(..., description="PowerPoint file (.pptx)"),
+):
+    """Simplified create endpoint for DW that only requires a PPTX.
+
+    This endpoint reuses the image export logic from the presentations routes,
+    saving all slide images into the existing DW project's folder:
+    C:\\inetpub\\wwwroot\\nw2\\nw_slides\\{projectName}
+
+    Notes:
+    - projectName must match an existing folder under nw2/nw_slides
+    - displayName and widePresentation are accepted for compatibility/logging
+    - Files are exported as 001.jpg, 002.jpg, ... and Thumbnails/...
+    """
+    try:
+        validated_file = await validate_pptx_file(powerpointFile)
+        file_content = await validate_file_size(validated_file, 50)
+
+        projectName = metadata.projectName
+        displayName = metadata.displayName
+        userName = metadata.userName
+        slideType = (metadata.slideType or "Image").strip() or "Image"
+        presentationType = (metadata.presentationType or "Design").strip() or "Design"
+
+        # Basic validation for projectName (disallow path separators and trimmed changes)
+        if (
+            not projectName
+            or projectName.strip() != projectName
+            or ("/" in projectName or "\\" in projectName)
+        ):
+            raise HTTPException(status_code=400, detail="Invalid project name")
+
+        logger.info(
+            "DW create-simple request: projectName='%s', displayName='%s', user='%s'",
+            projectName,
+            displayName,
+            userName,
+        )
+
+        # Generate images under displayName folder (nw_slides/[displayName]/001.jpg)
+        result = pptx_service.convert_pptx_to_images(
+            file_content,
+            validated_file.filename,
+            metadata.displayName,
+            settings.PROJECT_TYPE_DW,
+        )
+
+        # After generating images, record slide details with SlideType='Design'
+        # into nw_InsertPresentationDetail_copy for the matching presentation
+        presentation_id: Optional[int] = None
+        try:
+            with get_connection_scope(timeout=30) as cursor:
+                # Resolve PresentationId from nw_Master via Project + DisplayName
+                cursor.execute(
+                    (
+                        "SELECT TOP 1 PresentationId "
+                        "FROM [BI_GUIDELINES].[dbo].[nw_Master] "
+                        "WHERE Project = ? AND DisplayName = ? "
+                        "ORDER BY PresentationId DESC"
+                    ),
+                    (projectName, displayName),
+                )
+                row = cursor.fetchone()
+                if not row:
+                    # If no master exists, create a minimal master record (Design/DW)
+                    master_sql = (
+                        "EXEC [dbo].[nw_InsertPresentationMaster_sep2025] "
+                        "@Project=?, @DisplayName=?, @MainPptFileName=?, @NameCandidateFileName=?, "
+                        "@NameCandidateBGType=?, @NameCandidateBGName=?, @NameCandidateStartingSlide=?, "
+                        "@PresentationType=?, @UploadedBy=?, @BSRDisplayName=?, "
+                        "@isParticipantsVote=?, @isWideScreenPPT=?, @isAWSLinkReq=?;"
+                    )
+                    master_params = (
+                        projectName,
+                        displayName,
+                        validated_file.filename or "",
+                        "",  # NameCandidateFileName not used in DW simple flow
+                        "Default",  # BG type
+                        "",  # BG name
+                        1,  # Starting slide
+                        presentationType,  # PresentationType from frontend (e.g., 'Design')
+                        userName or "",
+                        "",  # BSRDisplayName
+                        0,  # isParticipantsVote
+                        1 if getattr(metadata, "widePresentation", False) else 0,  # isWideScreenPPT
+                        0,  # isAWSLinkReq
+                    )
+
+                    cursor.execute(master_sql, master_params)
+
+                    # Try to fetch PresentationId from result set(s)
+                    while True:
+                        try:
+                            created_row = cursor.fetchone()
+                            if created_row:
+                                presentation_id = int(created_row[0])
+                                break
+                        except Exception:
+                            # Some drivers/SPs return no row; proceed to nextset
+                            pass
+                        if not cursor.nextset():
+                            break
+
+                    # Fallback lookup if SP did not return ID
+                    if not presentation_id:
+                        cursor.execute(
+                            (
+                                "SELECT TOP 1 PresentationId "
+                                "FROM [BI_GUIDELINES].[dbo].[nw_Master] "
+                                "WHERE Project = ? AND DisplayName = ? "
+                                "ORDER BY PresentationId DESC"
+                            ),
+                            (projectName, displayName),
+                        )
+                        row2 = cursor.fetchone()
+                        if not row2:
+                            raise HTTPException(
+                                status_code=404,
+                                detail=(
+                                    "Presentation master not found and could not be created"
+                                ),
+                            )
+                        presentation_id = int(row2[0])
+                else:
+                    presentation_id = int(row[0])
+
+                # Insert a detail row for each generated image with the requested SlideType
+                insert_sql = (
+                    "EXEC [dbo].[nw_InsertPresentationDetail_copy] "
+                    "@PresentationId=?, @SlideNumber=?, @SlideType=?, @SlideBGFileName=?, "
+                    "@SlideDescription=?, @NameGroup=?, @NameCategory=?, @Name=?, "
+                    "@NameRationale=?, @NameNotation=?, @KanaNames=?, @NameLogo=?, "
+                    "@TemplateId=?, @NameSubGroup=?;"
+                )
+
+                total = int(result.get("total_images", 0))
+                for idx in range(1, total + 1):
+                    # Use relative image path as background filename reference
+                    # and store userName in SlideDescription for traceability
+                    rel_path = result.get("images", [])[idx - 1] if result.get("images") else ""
+                    cursor.execute(
+                        insert_sql,
+                        (
+                            presentation_id,  # @PresentationId
+                            idx,              # @SlideNumber
+                            slideType,        # @SlideType
+                            rel_path,         # @SlideBGFileName
+                            "",              # @SlideDescription (left empty per DW spec)
+                            "", "", "", "", "", "", "",  # group/category/name fields
+                            0,                # @TemplateId
+                            "",              # @NameSubGroup
+                        ),
+                    )
+        except HTTPException:
+            raise
+        except Exception as db_exc:
+            logger.error("Failed to insert DW detail records: %s", str(db_exc), exc_info=True)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to record DW slide details: {str(db_exc)}",
+            ) from db_exc
+
+        return CreateSimpleDWResponse(
+            message=result["message"],
+            project_name=result.get("project_name", projectName),
+            display_name=displayName,
+            project_type=result.get("project_type", settings.PROJECT_TYPE_DW),
+            slide_type=slideType,
+            user_name=userName,
+            total_images=result["total_images"],
+            images=result["images"],
+            thumbnails=result.get("thumbnails", []),
+            presentation_id=presentation_id,
+        )
+
+    except FileNotFoundError as fnf:
+        raise HTTPException(status_code=404, detail=str(fnf)) from fnf
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve)) from ve
+    except Exception as e:
+        logger.error(
+            "Error creating DW images from PPTX: %s", str(e), exc_info=True
+        )
+        raise HTTPException(
+            status_code=500, detail=f"DW create-simple error: {str(e)}"
+        ) from e
 
 @router.post(
     "/createTemplate",

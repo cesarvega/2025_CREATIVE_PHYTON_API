@@ -13,6 +13,7 @@ from app.config.settings import settings
 from app.models.presentation_models import (
     CreatePresentationMetadata,
     PresentationBuildMetadata,
+    SimpleDWMetadata,
 )
 from app.utils.logging_utils import get_logger
 
@@ -262,6 +263,32 @@ async def validate_excel_file_with_size(
     file_content = await validate_file_size(validated_file, max_size_mb)
     
     return validated_file, file_content
+
+
+async def parse_simple_dw_metadata(
+    metadata: str = Form(
+        ..., description="JSON payload containing simplified DW metadata"
+    )
+) -> SimpleDWMetadata:
+    """Parse and validate simplified DW metadata from form data.
+
+    Expects a 'metadata' form field containing JSON with keys:
+    projectName, displayName, widePresentation, userName, and optional slideType.
+    """
+    try:
+        payload = json.loads(metadata)
+    except json.JSONDecodeError as exc:
+        logger.warning("Invalid JSON in DW metadata: %s", exc)
+        raise HTTPException(
+            status_code=400,
+            detail="Metadata payload must be valid JSON",
+        ) from exc
+
+    try:
+        return SimpleDWMetadata(**payload)
+    except Exception as exc:
+        logger.warning("DW metadata validation failed: %s", str(exc))
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 async def validate_pptx_file_with_size(

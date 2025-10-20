@@ -83,3 +83,29 @@ class TemplateGroupsResponse(BaseModel):
 
     template_groups: List[TemplateGroup]
     total: int
+
+
+class ReplaceProjectImagesResponse(BaseModel):
+    """Response model for replacing slide images of an existing project."""
+
+    message: str
+    project_name: str
+    project_type: str
+    total_images: int
+    images: List[str]
+    thumbnails: List[str] = []
+
+
+class CreateSimpleDWResponse(BaseModel):
+    """Response model for simplified DW PPTX-to-images + DB detail insertion."""
+
+    message: str
+    project_name: str
+    display_name: str
+    project_type: str  # expected 'dw'
+    slide_type: str  # e.g., 'Design'
+    user_name: str
+    total_images: int
+    images: List[str]
+    thumbnails: List[str] = []
+    presentation_id: Optional[int] = None

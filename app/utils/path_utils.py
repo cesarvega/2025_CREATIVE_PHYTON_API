@@ -48,7 +48,7 @@ def get_relative_slide_root(project_type: Optional[str]) -> str:
     normalized = project_type.lower()
     if normalized == settings.PROJECT_TYPE_BIPRESENTS:
         return "bsr_slides"
-    if normalized == settings.PROJECT_TYPE_NW:
+    if normalized == settings.PROJECT_TYPE_NW or normalized == settings.PROJECT_TYPE_DW:
         return "nw_slides"
     return ""
 

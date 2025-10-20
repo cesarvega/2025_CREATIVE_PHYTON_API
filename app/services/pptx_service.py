@@ -152,6 +152,96 @@ class PPTXService:
             logger.error("Error in PPTX conversion: %s", str(e))
             raise
 
+    def replace_project_images(
+        self, file_content: bytes, filename: str, project_name: str, project_type: str
+    ) -> Dict[str, Any]:
+        """Replace slide images for an existing project folder.
+
+        This writes the provided PPTX to the target project folder and exports
+        each slide as JPEG into the project folder and its Thumbnails subfolder,
+        overwriting existing images (001.jpg, 002.jpg, ...).
+
+        Args:
+            file_content: PPTX content bytes
+            filename: Original uploaded filename (for reference)
+            project_name: Existing project folder name
+            project_type: 'nw' or 'bipresents'
+
+        Returns:
+            Dict with counts and relative paths to images and thumbnails
+        """
+        # Validate project_name to prevent path traversal
+        if not project_name or project_name != Path(project_name).name:
+            raise ValueError("Invalid project name")
+
+        # Resolve existing project folder
+        base_dir = get_project_base_dir(project_type)
+        project_folder = base_dir / project_name
+        thumbnails_folder = project_folder / "Thumbnails"
+
+        if not project_folder.exists():
+            raise FileNotFoundError(
+                f"Project folder not found: {project_folder}"
+            )
+
+        # Ensure thumbnails folder exists
+        thumbnails_folder.mkdir(parents=True, exist_ok=True)
+
+        # Remove existing JPGs to avoid stale files if slide count shrinks
+        try:
+            for f in project_folder.glob("*.jpg"):
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+            for f in thumbnails_folder.glob("*.jpg"):
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning("Failed to clean old images in %s: %s", project_folder, str(e))
+
+        # Save PPTX into the project folder (temporary name)
+        pptx_file_path = project_folder / (Path(filename).name or "updated_layout.pptx")
+        with open(pptx_file_path, "wb") as buffer:
+            buffer.write(file_content)
+
+        # Export slides using PowerPoint COM
+        slide_results = self._pptx_to_images_with_titles(
+            pptx_file_path, project_folder, thumbnails_folder
+        )
+
+        # Build relative URLs similar to convert flow
+        image_urls: List[str] = []
+        thumbnail_urls: List[str] = []
+        titles: List[str] = []
+
+        # Build relative URLs without re-sanitizing folder name
+        root = get_relative_slide_root(project_type)
+        for result in slide_results:
+            image_filename = Path(result["image_path"]).name
+            thumbnail_filename = Path(result["thumbnail_path"]).name
+            if root:
+                image_urls.append("/".join([root, project_name, image_filename]))
+                thumbnail_urls.append("/".join([root, project_name, "Thumbnails", thumbnail_filename]))
+            else:
+                image_urls.append(str(Path(result["image_path"])) )
+                thumbnail_urls.append(str(Path(result["thumbnail_path"])) )
+            titles.append(result.get("title", ""))
+
+        return {
+            "project_name": project_name,
+            "project_type": project_type,
+            "total_images": len(image_urls),
+            "images": image_urls,
+            "thumbnails": thumbnail_urls,
+            "titles": titles,
+            "message": (
+                f"Replaced images for '{project_name}'. Generated {len(image_urls)} images."
+            ),
+        }
+
     def _pptx_to_images_with_titles(
         self, pptx_path: Path, project_folder: Path, thumbnails_folder: Path
     ) -> List[Dict[str, Any]]:

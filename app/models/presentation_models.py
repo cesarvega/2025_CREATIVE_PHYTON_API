@@ -684,3 +684,19 @@ class PresentationBuildResponse(BaseModel):
         default_factory=list,
         description="Collection of non-fatal warnings encountered during assembly.",
     )
+
+
+# --- Simplified DW metadata model ---
+class SimpleDWMetadata(BaseModel):
+    """Minimal metadata for the simplified DW endpoint.
+
+    Fields mirror the simplified request while using a single JSON 'metadata' field
+    similar to the Presentations/Create endpoint.
+    """
+
+    projectName: str = Field(..., description="Existing DW project folder name (Salesboard)")
+    displayName: str = Field(..., description="Visible display name for UI; used for image folder")
+    widePresentation: bool = Field(False, description="Widescreen flag (informational)")
+    userName: str = Field(..., description="User initiating the operation")
+    slideType: str = Field("Image", description="SlideType to record in details, default 'Image'")
+    presentationType: str = Field("Design", description="Master PresentationType, default 'Design'")

@@ -143,6 +143,7 @@ class Settings(BaseSettings):
     # Projects types
     PROJECT_TYPE_BIPRESENTS: str = "bipresents"
     PROJECT_TYPE_NW: str = "nw"
+    PROJECT_TYPE_DW: str = "dw"
 
     # Email notification settings
     email_creative: str = "creative@brandinstitute.com"
@@ -154,6 +155,9 @@ class Settings(BaseSettings):
         if project_type == self.PROJECT_TYPE_BIPRESENTS:
             return self.base_dir_bipresents
         elif project_type == self.PROJECT_TYPE_NW:
+            return self.base_dir_nw
+        elif project_type == self.PROJECT_TYPE_DW:
+            # DW shares the same base directory as NW (nw2/nw_slides)
             return self.base_dir_nw
         else:
             raise ValueError(f"Unknown project type: {project_type}")
