@@ -59,388 +59,6 @@ def _safe_fetch_sp_results(cursor, sp_name: str, presentation_id: int):
 class NWReportsService:
     """Service for handling NW Reports stored procedures."""
 
-    def get_retained_names(
-        self, presentation_id: int, include_recraft: bool = True
-    ) -> List[RetainedName]:
-        """Get retained names from nw_dlRetainedNames_withRecraft SP.
-
-        Args:
-            presentation_id: The presentation ID.
-            include_recraft: Whether to include recraft option.
-
-        Returns:
-            List of RetainedName objects.
-        """
-        logger.debug(
-            "Fetching retained names for presentation_id=%d", presentation_id
-        )
-
-        try:
-            with get_connection_scope(timeout=30) as cursor:
-                cursor.execute(
-                    "{CALL [BI_GUIDELINES].[dbo].[nw_dlRetainedNames_withRecraft](?)}",
-                    (presentation_id,)
-                )
-
-                columns, rows = _safe_fetch_sp_results(
-                    cursor, "nw_dlRetainedNames_withRecraft", presentation_id
-                )
-
-                if columns is None or rows is None:
-                    return []
-
-                retained_names = []
-                for row in rows:
-                    row_dict = dict(zip(columns, row))
-                    retained_names.append(
-                        RetainedName(
-                            name=row_dict.get("Name", ""),
-                            category=row_dict.get("Category"),
-                            rationale=row_dict.get("Rationale"),
-                            vote=row_dict.get("Vote"),
-                            recraft_flag=row_dict.get("RecraftFlag", False),
-                        )
-                    )
-
-                logger.info(
-                    "Retrieved %d retained names for presentation_id=%d",
-                    len(retained_names),
-                    presentation_id,
-                )
-                return retained_names
-
-        except Exception as e:
-            logger.error(
-                "Error fetching retained names for presentation_id=%d: %s",
-                presentation_id,
-                str(e),
-                exc_info=True
-            )
-            # Return empty list instead of raising to allow report generation to continue
-            return []
-
-    def get_newly_created_names(self, presentation_id: int) -> List[NewlyCreatedName]:
-        """Get newly created names from nw_dlNewlyCreatedNames SP.
-
-        Args:
-            presentation_id: The presentation ID.
-
-        Returns:
-            List of NewlyCreatedName objects.
-        """
-        logger.debug(
-            "Fetching newly created names for presentation_id=%d", presentation_id
-        )
-
-        try:
-            with get_connection_scope(timeout=30) as cursor:
-                cursor.execute(
-                    "{CALL [BI_GUIDELINES].[dbo].[nw_dlNewlyCreatedNames](?)}",
-                    (presentation_id,)
-                )
-
-                columns, rows = _safe_fetch_sp_results(
-                    cursor, "nw_dlNewlyCreatedNames", presentation_id
-                )
-
-                if columns is None or rows is None:
-                    return []
-
-                new_names = []
-                for row in rows:
-                    row_dict = dict(zip(columns, row))
-                    new_names.append(
-                        NewlyCreatedName(
-                            name=row_dict.get("Name", ""),
-                            category=row_dict.get("Category"),
-                            rationale=row_dict.get("Rationale"),
-                        )
-                    )
-
-                logger.info(
-                    "Retrieved %d newly created names for presentation_id=%d",
-                    len(new_names),
-                    presentation_id,
-                )
-                return new_names
-
-        except Exception as e:
-            logger.error(
-                "Error fetching newly created names for presentation_id=%d: %s",
-                presentation_id,
-                str(e),
-                exc_info=True
-            )
-            return []
-
-    def get_roots_to_explore(self, presentation_id: int) -> List[RootConcept]:
-        """Get roots/concepts to explore from nw_dlRootsOrConceptsToExplore SP.
-
-        Args:
-            presentation_id: The presentation ID.
-
-        Returns:
-            List of RootConcept objects.
-        """
-        logger.debug(
-            "Fetching roots to explore for presentation_id=%d", presentation_id
-        )
-
-        try:
-            with get_connection_scope(timeout=30) as cursor:
-                cursor.execute(
-                    "{CALL [BI_GUIDELINES].[dbo].[nw_dlRootsOrConceptsToExplore](?)}",
-                    (presentation_id,)
-                )
-
-                columns, rows = _safe_fetch_sp_results(
-                    cursor, "nw_dlRootsOrConceptsToExplore", presentation_id
-                )
-
-                if columns is None or rows is None:
-                    return []
-
-                concepts = []
-                for row in rows:
-                    row_dict = dict(zip(columns, row))
-                    concepts.append(
-                        RootConcept(
-                            concept=row_dict.get("Concept", ""),
-                            description=row_dict.get("Description"),
-                        )
-                    )
-
-                logger.info(
-                    "Retrieved %d roots to explore for presentation_id=%d",
-                    len(concepts),
-                    presentation_id,
-                )
-                return concepts
-
-        except Exception as e:
-            logger.error(
-                "Error fetching roots to explore for presentation_id=%d: %s",
-                presentation_id,
-                str(e),
-                exc_info=True
-            )
-            return []
-
-    def get_roots_to_avoid(self, presentation_id: int) -> List[RootConcept]:
-        """Get roots/concepts to avoid from nw_dlRootsOrConceptsToAvoid SP.
-
-        Args:
-            presentation_id: The presentation ID.
-
-        Returns:
-            List of RootConcept objects.
-        """
-        logger.debug("Fetching roots to avoid for presentation_id=%d", presentation_id)
-
-        try:
-            with get_connection_scope(timeout=30) as cursor:
-                cursor.execute(
-                    "{CALL [BI_GUIDELINES].[dbo].[nw_dlRootsOrConceptsToAvoid](?)}",
-                    (presentation_id,)
-                )
-
-                columns, rows = _safe_fetch_sp_results(
-                    cursor, "nw_dlRootsOrConceptsToAvoid", presentation_id
-                )
-
-                if columns is None or rows is None:
-                    return []
-
-                concepts = []
-                for row in rows:
-                    row_dict = dict(zip(columns, row))
-                    concepts.append(
-                        RootConcept(
-                            concept=row_dict.get("Concept", ""),
-                            description=row_dict.get("Description"),
-                        )
-                    )
-
-                logger.info(
-                    "Retrieved %d roots to avoid for presentation_id=%d",
-                    len(concepts),
-                    presentation_id,
-                )
-                return concepts
-
-        except Exception as e:
-            logger.error(
-                "Error fetching roots to avoid for presentation_id=%d: %s",
-                presentation_id,
-                str(e),
-                exc_info=True
-            )
-            return []
-
-    def get_open_notes(self, presentation_id: int) -> List[OpenNote]:
-        """Get open notes from nw_dlOpenNotes SP.
-
-        Args:
-            presentation_id: The presentation ID.
-
-        Returns:
-            List of OpenNote objects.
-        """
-        logger.debug("Fetching open notes for presentation_id=%d", presentation_id)
-
-        try:
-            with get_connection_scope(timeout=30) as cursor:
-                cursor.execute(
-                    "{CALL [BI_GUIDELINES].[dbo].[nw_dlOpenNotes](?)}",
-                    (presentation_id,)
-                )
-
-                columns, rows = _safe_fetch_sp_results(
-                    cursor, "nw_dlOpenNotes", presentation_id
-                )
-
-                if columns is None or rows is None:
-                    return []
-
-                notes = []
-                for row in rows:
-                    row_dict = dict(zip(columns, row))
-                    notes.append(
-                        OpenNote(
-                            note_id=row_dict.get("NoteId", 0),
-                            note_text=row_dict.get("NoteText", ""),
-                            created_by=row_dict.get("CreatedBy"),
-                            created_date=row_dict.get("CreatedDate"),
-                        )
-                    )
-
-                logger.info(
-                    "Retrieved %d open notes for presentation_id=%d",
-                    len(notes),
-                    presentation_id,
-                )
-                return notes
-
-        except Exception as e:
-            logger.error(
-                "Error fetching open notes for presentation_id=%d: %s",
-                presentation_id,
-                str(e),
-                exc_info=True
-            )
-            return []
-
-    def get_votes_by_groups(self, presentation_id: int) -> List[VoteByGroup]:
-        """Get votes by groups from nw_Votesbygroups SP.
-
-        Args:
-            presentation_id: The presentation ID.
-
-        Returns:
-            List of VoteByGroup objects.
-        """
-        logger.debug(
-            "Fetching votes by groups for presentation_id=%d", presentation_id
-        )
-
-        try:
-            with get_connection_scope(timeout=30) as cursor:
-                cursor.execute(
-                    "{CALL [BI_GUIDELINES].[dbo].[nw_Votesbygroups](?)}",
-                    (presentation_id,)
-                )
-
-                columns, rows = _safe_fetch_sp_results(
-                    cursor, "nw_Votesbygroups", presentation_id
-                )
-
-                if columns is None or rows is None:
-                    return []
-
-                votes = []
-                for row in rows:
-                    row_dict = dict(zip(columns, row))
-                    votes.append(
-                        VoteByGroup(
-                            group_name=row_dict.get("GroupName", ""),
-                            positive_votes=row_dict.get("PositiveVotes", 0),
-                            neutral_votes=row_dict.get("NeutralVotes", 0),
-                            negative_votes=row_dict.get("NegativeVotes", 0),
-                            total_votes=row_dict.get("TotalVotes", 0),
-                        )
-                    )
-
-                logger.info(
-                    "Retrieved %d vote groups for presentation_id=%d",
-                    len(votes),
-                    presentation_id,
-                )
-                return votes
-
-        except Exception as e:
-            logger.error(
-                "Error fetching votes by groups for presentation_id=%d: %s",
-                presentation_id,
-                str(e),
-                exc_info=True
-            )
-            return []
-
-    def get_voted_participants(self, presentation_id: int) -> List[VotedParticipant]:
-        """Get voted participants from nw_VotedParticipants SP.
-
-        Args:
-            presentation_id: The presentation ID.
-
-        Returns:
-            List of VotedParticipant objects.
-        """
-        logger.debug(
-            "Fetching voted participants for presentation_id=%d", presentation_id
-        )
-
-        try:
-            with get_connection_scope(timeout=30) as cursor:
-                cursor.execute(
-                    "{CALL [BI_GUIDELINES].[dbo].[nw_VotedParticipants](?)}",
-                    (presentation_id,)
-                )
-
-                columns, rows = _safe_fetch_sp_results(
-                    cursor, "nw_VotedParticipants", presentation_id
-                )
-
-                if columns is None or rows is None:
-                    return []
-
-                participants = []
-                for row in rows:
-                    row_dict = dict(zip(columns, row))
-                    participants.append(
-                        VotedParticipant(
-                            participant_id=row_dict.get("ParticipantId", 0),
-                            participant_name=row_dict.get("ParticipantName", ""),
-                            email=row_dict.get("Email"),
-                            voted_date=row_dict.get("VotedDate"),
-                        )
-                    )
-
-                logger.info(
-                    "Retrieved %d voted participants for presentation_id=%d",
-                    len(participants),
-                    presentation_id,
-                )
-                return participants
-
-        except Exception as e:
-            logger.error(
-                "Error fetching voted participants for presentation_id=%d: %s",
-                presentation_id,
-                str(e),
-                exc_info=True
-            )
-            return []
-
     def check_has_participants(self, presentation_id: int) -> int:
         """Check if presentation has participant voting enabled.
 
@@ -541,36 +159,90 @@ class NWReportsService:
             presentation_id,
         )
 
-        with get_connection_scope(timeout=30) as cursor:
-            cursor.execute(
-                "{CALL [BI_GUIDELINES].[dbo].[nw_wdValuesToReplace](?)}",
-                (presentation_id,)
-            )
-
-            columns = [column[0] for column in cursor.description]
-            rows = cursor.fetchall()
-
-            replacements = []
-            for row in rows:
-                row_dict = dict(zip(columns, row))
-                replacements.append(
-                    WordReportReplacement(
-                        placeholder=row_dict.get("Placeholder", ""),
-                        value=row_dict.get("Value", ""),
-                    )
+        try:
+            with get_connection_scope(timeout=30) as cursor:
+                cursor.execute(
+                    "{CALL [BI_GUIDELINES].[dbo].[nw_wdValuesToReplace](?)}",
+                    (presentation_id,)
                 )
 
-            logger.info(
-                "Retrieved %d Word report replacements for presentation_id=%d",
-                len(replacements),
+                # This SP might return multiple result sets, iterate through all
+                columns = None
+                rows = None
+                result_set_num = 0
+
+                while True:
+                    if cursor.description is not None:
+                        result_set_num += 1
+                        temp_columns = [column[0] for column in cursor.description]
+                        temp_rows = cursor.fetchall()
+
+                        logger.debug(
+                            "nw_wdValuesToReplace result set %d: columns=%s, rows=%d",
+                            result_set_num,
+                            temp_columns,
+                            len(temp_rows)
+                        )
+
+                        # Use the first result set that has data with 'key' and 'value' columns
+                        if temp_rows and 'key' in temp_columns and 'value' in temp_columns:
+                            columns = temp_columns
+                            rows = temp_rows
+                            logger.info("Found replacement data in result set #%d", result_set_num)
+                            break
+
+                    # Try to move to next result set
+                    if not cursor.nextset():
+                        break
+
+                if columns is None or rows is None or not rows:
+                    logger.warning(
+                        "SP nw_wdValuesToReplace returned no data for presentation_id=%d "
+                        "(processed %d result sets)",
+                        presentation_id,
+                        result_set_num
+                    )
+                    return []
+
+                replacements = []
+                for row in rows:
+                    row_dict = dict(zip(columns, row))
+                    # Use 'key' and 'value' as column names
+                    placeholder = row_dict.get("key", "")
+                    value = row_dict.get("value", "")
+
+                    logger.debug("Placeholder: '%s' -> Value: '%s'", placeholder, value)
+
+                    replacements.append(
+                        WordReportReplacement(
+                            placeholder=placeholder,
+                            value=value,
+                        )
+                    )
+
+                logger.info(
+                    "Retrieved %d Word report replacements for presentation_id=%d",
+                    len(replacements),
+                    presentation_id,
+                )
+                return replacements
+
+        except Exception as e:
+            logger.error(
+                "Error fetching Word report replacements for presentation_id=%d: %s",
                 presentation_id,
+                str(e),
+                exc_info=True
             )
-            return replacements
+            return []
 
     def get_word_report_results_phonetics(
         self, presentation_id: int, summary_type: SummaryType
     ) -> List[WordReportResult]:
         """Get results for Word phonetics report from nw_wdGetResults_Phonetics SP.
+
+        This SP returns MULTIPLE result sets. We need to iterate through all of them
+        to find the one that matches our SummaryType.
 
         Args:
             presentation_id: The presentation ID.
@@ -585,76 +257,304 @@ class NWReportsService:
             summary_type,
         )
 
-        with get_connection_scope(timeout=30) as cursor:
-            cursor.execute(
-                "{CALL [BI_GUIDELINES].[dbo].[nw_wdGetResults_Phonetics](?, ?)}",
-                (presentation_id, summary_type.value)
-            )
-
-            columns = [column[0] for column in cursor.description]
-            rows = cursor.fetchall()
-
-            results = []
-            for row in rows:
-                row_dict = dict(zip(columns, row))
-                results.append(
-                    WordReportResult(
-                        name=row_dict.get("Name", ""),
-                        category=row_dict.get("Category"),
-                        rationale=row_dict.get("Rationale"),
-                        vote=row_dict.get("Vote"),
-                        name_rationale_part1=row_dict.get("NameRationalePart1"),
-                        name_rationale_part2=row_dict.get("NameRationalePart2"),
-                    )
+        try:
+            with get_connection_scope(timeout=30) as cursor:
+                cursor.execute(
+                    "{CALL [BI_GUIDELINES].[dbo].[nw_wdGetResults_Phonetics](?, ?)}",
+                    (presentation_id, summary_type.value)
                 )
 
-            logger.info(
-                "Retrieved %d Word phonetics results for presentation_id=%d",
-                len(results),
-                presentation_id,
-            )
-            return results
+                # This SP returns MULTIPLE result sets, we need to iterate through all
+                columns = None
+                rows = None
+                result_set_num = 0
+                target_columns_found = False
 
-    def get_word_report_results(self, presentation_id: int) -> List[WordReportResult]:
+                while True:
+                    if cursor.description is not None:
+                        result_set_num += 1
+                        temp_columns = [column[0] for column in cursor.description]
+                        temp_rows = cursor.fetchall()
+
+                        logger.debug(
+                            "nw_wdGetResults_Phonetics result set %d: columns=%s, rows=%d",
+                            result_set_num,
+                            temp_columns,
+                            len(temp_rows)
+                        )
+
+                        # For ByTheNumbers, look for result set with Positive, Neutral, Reconsider columns
+                        if summary_type == SummaryType.BY_THE_NUMBERS:
+                            if any(col in temp_columns for col in ['Positive', 'Neutral', 'Reconsider', 'TotNewNames']):
+                                columns = temp_columns
+                                rows = temp_rows
+                                target_columns_found = True
+                                logger.info("Found ByTheNumbers result set #%d", result_set_num)
+                                break
+                        # For other summary types, look for Name, NameRationale, NameCategory
+                        elif 'Name' in temp_columns and ('NameRationale' in temp_columns or 'NameCategory' in temp_columns):
+                            # Use result sets that have data OR if we have no data yet
+                            if temp_rows or columns is None:
+                                columns = temp_columns
+                                rows = temp_rows
+                                target_columns_found = True
+
+                    # Try to move to next result set
+                    if not cursor.nextset():
+                        break
+
+                if not target_columns_found or columns is None or rows is None:
+                    logger.warning(
+                        "No matching result set found from nw_wdGetResults_Phonetics for "
+                        "presentation_id=%d, summary_type=%s (processed %d result sets)",
+                        presentation_id,
+                        summary_type.value,
+                        result_set_num
+                    )
+                    return []
+
+                results = []
+                for row in rows:
+                    row_dict = dict(zip(columns, row))
+
+                    # For ByTheNumbers, structure is different
+                    if summary_type == SummaryType.BY_THE_NUMBERS:
+                        # Return a single result with the counts
+                        results.append(
+                            WordReportResult(
+                                name="Summary",
+                                positive_count=row_dict.get("Positive", 0),
+                                neutral_count=row_dict.get("Neutral", 0),
+                                reconsider_count=row_dict.get("Reconsider", 0),
+                                new_names_count=row_dict.get("TotNewNames", 0),
+                                total_count=row_dict.get("TotalNames", 0),
+                            )
+                        )
+                    else:
+                        # Regular name results
+                        # Columns from SP: Name, Pronunciation (phonetics), NameRationale, NameCategory
+                        results.append(
+                            WordReportResult(
+                                name=row_dict.get("Name", ""),
+                                pronunciation=row_dict.get("Pronunciation") or row_dict.get("NamePronunciation") or row_dict.get("Positive Pronounciation"),
+                                category=row_dict.get("NameCategory", ""),
+                                rationale=row_dict.get("NameRationale", ""),
+                                vote=row_dict.get("Vote"),
+                                name_rationale_part1=row_dict.get("NameRationalePart1"),
+                                name_rationale_part2=row_dict.get("NameRationalePart2"),
+                            )
+                        )
+
+                logger.info(
+                    "Retrieved %d Word phonetics results for presentation_id=%d, summary_type=%s",
+                    len(results),
+                    presentation_id,
+                    summary_type.value
+                )
+                return results
+
+        except Exception as e:
+            logger.error(
+                "Error fetching Word phonetics results for presentation_id=%d: %s",
+                presentation_id,
+                str(e),
+                exc_info=True
+            )
+            return []
+
+    def get_word_report_results(
+        self, presentation_id: int, summary_type: SummaryType = SummaryType.BY_THE_NUMBERS
+    ) -> List[WordReportResult]:
         """Get general results for Word report from nw_wdGetResults SP.
 
         Args:
             presentation_id: The presentation ID.
+            summary_type: Type of summary to retrieve (default: BY_THE_NUMBERS).
 
         Returns:
             List of WordReportResult objects.
         """
         logger.debug(
-            "Fetching Word report results for presentation_id=%d", presentation_id
+            "Fetching Word report results for presentation_id=%d, summary_type=%s",
+            presentation_id,
+            summary_type,
         )
 
-        with get_connection_scope(timeout=30) as cursor:
-            cursor.execute(
-                "{CALL [BI_GUIDELINES].[dbo].[nw_wdGetResults](?)}",
-                (presentation_id,)
-            )
-
-            columns = [column[0] for column in cursor.description]
-            rows = cursor.fetchall()
-
-            results = []
-            for row in rows:
-                row_dict = dict(zip(columns, row))
-                results.append(
-                    WordReportResult(
-                        name=row_dict.get("Name", ""),
-                        category=row_dict.get("Category"),
-                        rationale=row_dict.get("Rationale"),
-                        vote=row_dict.get("Vote"),
-                    )
+        try:
+            with get_connection_scope(timeout=30) as cursor:
+                cursor.execute(
+                    "{CALL [BI_GUIDELINES].[dbo].[nw_wdGetResults](?, ?)}",
+                    (presentation_id, summary_type.value)
                 )
 
-            logger.info(
-                "Retrieved %d Word report results for presentation_id=%d",
-                len(results),
+                columns, rows = _safe_fetch_sp_results(
+                    cursor, "nw_wdGetResults", presentation_id
+                )
+
+                if columns is None or rows is None:
+                    return []
+
+                results = []
+                for row in rows:
+                    row_dict = dict(zip(columns, row))
+                    results.append(
+                        WordReportResult(
+                            name=row_dict.get("Name", ""),
+                            category=row_dict.get("Category"),
+                            rationale=row_dict.get("Rationale"),
+                            vote=row_dict.get("Vote"),
+                        )
+                    )
+
+                logger.info(
+                    "Retrieved %d Word report results for presentation_id=%d",
+                    len(results),
+                    presentation_id,
+                )
+                return results
+
+        except Exception as e:
+            logger.error(
+                "Error fetching Word report results for presentation_id=%d: %s",
                 presentation_id,
+                str(e),
+                exc_info=True
             )
-            return results
+            return []
+
+    def get_newly_created_names_for_word(
+        self, presentation_id: int
+    ) -> List[WordReportResult]:
+        """Get newly created names for Word report from nw_CombineNewNames SP.
+
+        Args:
+            presentation_id: The presentation ID.
+
+        Returns:
+            List of WordReportResult objects with newly created names.
+        """
+        logger.debug(
+            "Fetching newly created names for Word report for presentation_id=%d",
+            presentation_id,
+        )
+
+        try:
+            with get_connection_scope(timeout=30) as cursor:
+                cursor.execute(
+                    "{CALL [BI_GUIDELINES].[dbo].[nw_CombineNewNames](?)}",
+                    (presentation_id,)
+                )
+
+                # This SP may return multiple result sets, iterate through them
+                columns = None
+                rows = None
+                result_set_num = 0
+
+                while True:
+                    if cursor.description is not None:
+                        result_set_num += 1
+                        temp_columns = [column[0] for column in cursor.description]
+                        temp_rows = cursor.fetchall()
+
+                        # Use result sets that have data OR if we have no data yet
+                        if temp_rows or columns is None:
+                            columns = temp_columns
+                            rows = temp_rows
+                            logger.debug("nw_CombineNewNames result set %d: %d columns, %d rows",
+                                       result_set_num, len(columns), len(rows))
+
+                    # Try to move to next result set
+                    if not cursor.nextset():
+                        break
+
+                if columns is None or rows is None:
+                    logger.warning(
+                        "No result set from nw_CombineNewNames for presentation_id=%d",
+                        presentation_id
+                    )
+                    return []
+
+                # Find the name column index
+                name_col_idx = None
+                for idx, col in enumerate(columns):
+                    col_lower = col.lower() if col else ''
+                    if col_lower in ['name', 'newname']:
+                        name_col_idx = idx
+                        break
+
+                results = []
+                for row in rows:
+                    row_dict = dict(zip(columns, row))
+
+                    # Get the name value
+                    name_value = row_dict.get("Name") or row_dict.get("NewName", "")
+                    category_value = row_dict.get("NameCategory") or row_dict.get("Category")
+                    rationale_value = row_dict.get("NameRationale") or row_dict.get("Rationale")
+
+                    # Check if name contains group delimiters (## or $$)
+                    if name_value and isinstance(name_value, str) and ('##' in name_value or '$$' in name_value):
+                        # Determine delimiter
+                        delimiter = '##' if '##' in name_value else '$$'
+
+                        # Split all fields by the delimiter
+                        names = [n.strip() for n in name_value.split(delimiter) if n.strip()]
+
+                        # Split category and rationale if they also contain the delimiter
+                        categories = []
+                        if category_value and delimiter in str(category_value):
+                            categories = [c.strip() for c in str(category_value).split(delimiter)]
+                        else:
+                            categories = [category_value] * len(names)
+
+                        rationales = []
+                        if rationale_value and delimiter in str(rationale_value):
+                            rationales = [r.strip() for r in str(rationale_value).split(delimiter)]
+                        else:
+                            rationales = [rationale_value] * len(names)
+
+                        # Pad arrays to match length
+                        while len(categories) < len(names):
+                            categories.append(category_value)
+                        while len(rationales) < len(names):
+                            rationales.append(rationale_value)
+
+                        # Create a result for each expanded name
+                        for i, expanded_name in enumerate(names):
+                            if expanded_name:  # Skip empty names
+                                results.append(
+                                    WordReportResult(
+                                        name=expanded_name,
+                                        category=categories[i] if i < len(categories) else category_value,
+                                        rationale=rationales[i] if i < len(rationales) else rationale_value,
+                                        vote=row_dict.get("Vote"),
+                                    )
+                                )
+                    else:
+                        # No grouping, add normally
+                        results.append(
+                            WordReportResult(
+                                name=name_value,
+                                category=category_value,
+                                rationale=rationale_value,
+                                vote=row_dict.get("Vote"),
+                            )
+                        )
+
+                logger.info(
+                    "Retrieved %d newly created names for Word report for presentation_id=%d",
+                    len(results),
+                    presentation_id,
+                )
+                return results
+
+        except Exception as e:
+            logger.error(
+                "Error fetching newly created names for Word report for presentation_id=%d: %s",
+                presentation_id,
+                str(e),
+                exc_info=True
+            )
+            return []
 
     # Analytics SPs
 

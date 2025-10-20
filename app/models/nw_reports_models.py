@@ -100,11 +100,19 @@ class WordReportReplacement(BaseModel):
 class WordReportResult(BaseModel):
     """Result for Word report from nw_wdGetResults or nw_wdGetResults_Phonetics SP."""
     name: str
+    pronunciation: Optional[str] = None  # For phonetics reports
     category: Optional[str] = None
     rationale: Optional[str] = None
     vote: Optional[str] = None
     name_rationale_part1: Optional[str] = None
     name_rationale_part2: Optional[str] = None
+
+    # For ByTheNumbers summary type
+    positive_count: Optional[int] = None
+    neutral_count: Optional[int] = None
+    reconsider_count: Optional[int] = None
+    new_names_count: Optional[int] = None
+    total_count: Optional[int] = None
 
 
 # Analytics Report Models
@@ -174,6 +182,26 @@ class DownloadResultsRequest(BaseModel):
         default=False,
         description="Include participants sheet in Excel report"
     )
+
+
+# Feedback Template Models
+
+class CreateFeedbackTemplateRequest(BaseModel):
+    """Request for creating a Feedback Template document."""
+    presentation_id: int = Field(..., description="Presentation ID to generate feedback template for")
+
+
+class CreateFeedbackTemplateResponse(BaseModel):
+    """Response for create feedback template endpoint."""
+    success: bool = True
+    message: str = "Feedback template generated successfully"
+    file_path: Optional[str] = None
+    file_name: Optional[str] = None
+    download_token: Optional[str] = None
+    presentation_id: int
+    presentation_type: Optional[str] = None
+    generated_at: datetime = Field(default_factory=datetime.utcnow)
+    warnings: List[str] = Field(default_factory=list)
 
 
 # Response Models

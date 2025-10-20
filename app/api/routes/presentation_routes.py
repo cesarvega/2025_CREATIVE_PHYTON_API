@@ -21,11 +21,15 @@ from app.models.presentation_models import (
     PresentationBuildResponse,
 )
 from app.models.nw_reports_models import (
+    CreateFeedbackTemplateRequest,
+    CreateFeedbackTemplateResponse,
     DownloadResultsRequest,
     DownloadResultsResponse,
 )
 from app.services.presentation_service import presentation_service
 from app.services.report_orchestrator_service import report_orchestrator_service
+from app.services.feedback_template_generator import feedback_template_generator
+from app.services.bi_guidelines_service import bi_guidelines_service
 from app.utils.download_utils import (
     build_api_download_url,
     decode_download_token,
@@ -810,12 +814,14 @@ async def download_results(request: DownloadResultsRequest) -> DownloadResultsRe
       - NW_ProjectAnalytics
       - NW_RegionSpecificAnalytics
 
-    **Word Report (report_type: "word"):** [Not Yet Implemented]
-    - Would generate formatted Word document from template
-    - Would use stored procedures:
-      - nw_wdValuesToReplace (for placeholders)
-      - nw_wdGetResults or nw_wdGetResults_Phonetics
-      - Would include pie charts and formatted tables
+    **Word Report (report_type: "word"):**
+    - Genera un documento Word basado en plantilla
+    - Reemplaza placeholders (portada, headers, footers, cuadros de texto)
+    - Tablas pobladas por tipo (Positive, Neutral, Reconsider, New Names, Explore)
+    - Inserta gráfico de torta (By The Numbers)
+    - Procedimientos utilizados:
+      - nw_wdValuesToReplace (placeholders)
+      - nw_wdGetResults_Phonetics / nw_CombineNewNames
 
     **BSR Report (report_type: "bsr"):** [Not Yet Implemented]
     - Would generate BSR-specific Excel and Word documents
@@ -888,4 +894,206 @@ async def download_results(request: DownloadResultsRequest) -> DownloadResultsRe
         raise HTTPException(
             status_code=500,
             detail=f"Failed to generate report: {str(e)}"
+        ) from e
+
+
+@router.post(
+    "/create-feedback-template",
+    response_model=CreateFeedbackTemplateResponse,
+    summary="Create NW Feedback Template document (InputDocumentRationales)",
+    description=(
+        "Generate a complete Feedback Template document from the InputDocumentRationales template.\n\n"
+        "This endpoint replicates the 'Create Feedback Template' button functionality from the original app. "
+        "It generates a fully populated Word document with:\n\n"
+        "**Document Generation Process:**\n"
+        "1. **Template Selection** - Automatically selects the correct InputDocumentRationales template:\n"
+        "   - `InputDocumentRationales.doc` for Normal presentations\n"
+        "   - `InputDocumentRationales_Phonetics.doc` for Phonetics presentations\n"
+        "   - `InputDocumentRationales_Katakana.doc` for Katakana presentations\n\n"
+        "2. **Placeholder Replacement** - Replaces all placeholders throughout the document:\n"
+        "   - `<Client>`, `<ProjectName>`, `<DateNormalCase>`, etc.\n"
+        "   - Searches in body, headers, footers, text boxes, and shapes\n"
+        "   - Data from `nw_wdValuesToReplace` stored procedure\n\n"
+        "3. **Table Population** - Fills all feedback tables with project data:\n"
+        "   - **Positive Names** table (from `Positive` or `Positive_Phonetics`)\n"
+        "   - **Neutral Names** table (from `Neutral` or `Negative_Phonetics`)\n"
+        "   - **Reconsider Names** table (from `Reconsider` or `Reconsider_Phonetics`)\n"
+        "   - **Newly Created Names** table (from `nw_CombineNewNames`)\n"
+        "   - **Roots/Concepts to Explore** table (from `Explore`)\n"
+        "   - Uses Open Sans 12pt font, rationales in 10pt\n"
+        "   - Handles HTML content in rationale fields\n"
+        "   - Processes name groups (## or $$ delimiters)\n\n"
+        "4. **Pie Chart Generation** - Creates and inserts a pie chart:\n"
+        "   - Uses data from `ByTheNumbers` summary type\n"
+        "   - Shows Positive/Neutral/Reconsider distribution\n"
+        "   - Corporate colors: Green (92,184,92), Brown (183,122,51), Purple (153,0,76)\n"
+        "   - Generated in Excel and pasted into PieChart bookmark\n\n"
+        "5. **Cleanup** - Removes all bookmarks from the final document\n\n"
+        "**Data Sources:**\n"
+        "- `nw_wdValuesToReplace` - Placeholder values (client, project, date, etc.)\n"
+        "- `nw_wdGetResults_Phonetics` - Name results by category (Positive, Neutral, Reconsider, Explore)\n"
+        "- `nw_CombineNewNames` - Newly created names with categories and rationales\n\n"
+        "**Output Format:**\n"
+        "- Word 97-2003 Document (.doc)\n"
+        "- Saved to NW_Downloads directory\n"
+        "- Filename: `Feedback_Template_{DisplayName}_{timestamp}.doc`\n\n"
+        "The generated document is ready for client delivery and contains all project feedback data."
+    ),
+    response_description=(
+        "Generation status with file path, filename, and secure download token. "
+        "Use the download token with the /presentations/files/{token} endpoint to retrieve the file."
+    ),
+    responses={
+        200: {
+            "description": "Feedback template generated successfully.",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "success": True,
+                        "message": "Feedback template generated successfully",
+                        "file_path": "C:/output/NW_Downloads/Feedback_Template_MyProject_20250117_103045.doc",
+                        "file_name": "Feedback_Template_MyProject_20250117_103045.doc",
+                        "download_token": "eyJ0eXAiOiJKV1QiLCJhbGc...",
+                        "presentation_id": 12345,
+                        "presentation_type": "Phonetics",
+                        "generated_at": "2025-01-17T10:30:45.123456",
+                        "warnings": []
+                    }
+                }
+            },
+        },
+        400: {
+            "description": "Invalid presentation ID or presentation not found.",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Presentation with ID 12345 not found"}
+                }
+            },
+        },
+        404: {
+            "description": "Required template file not found.",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Feedback template not found: C:/Templates/InputDocumentRationales_Phonetics.doc"}
+                }
+            },
+        },
+        500: {
+            "description": "Unexpected error during document generation.",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "Failed to generate feedback template: Word COM automation error"
+                    }
+                }
+            },
+        },
+    },
+)
+async def create_feedback_template(request: CreateFeedbackTemplateRequest) -> CreateFeedbackTemplateResponse:
+    """Generate a Feedback Template document for an NW presentation.
+
+    This endpoint creates a complete InputDocumentRationales document populated with all
+    feedback data for a specific presentation. The document includes:
+
+    - Client and project metadata in headers/footers
+    - Positive, Neutral, and Reconsider name tables
+    - Newly created names table
+    - Roots/concepts to explore table
+    - Pie chart showing name distribution
+
+    The template used is automatically selected based on the presentation type
+    (Normal, Phonetics, or Katakana).
+
+    Args:
+        request: CreateFeedbackTemplateRequest with presentation_id
+
+    Returns:
+        CreateFeedbackTemplateResponse with:
+            - success: Boolean indicating if generation succeeded
+            - message: Descriptive message
+            - file_path: Full path to generated Word file
+            - file_name: Name of generated file
+            - download_token: Secure token for downloading the file
+            - presentation_id: ID of presentation
+            - presentation_type: Type of presentation (Normal, Phonetics, Katakana)
+            - generated_at: Timestamp of generation
+            - warnings: List of any warnings during generation
+
+    Raises:
+        HTTPException 400: If presentation ID is invalid or not found
+        HTTPException 404: If required template files are missing
+        HTTPException 500: If document generation fails
+    """
+    try:
+        logger.info(
+            "Received create feedback template request: presentation_id=%d",
+            request.presentation_id,
+        )
+
+        # Get presentation info
+        presentation_info = bi_guidelines_service.get_project_info(
+            request.presentation_id
+        )
+
+        if not presentation_info:
+            raise ValueError(
+                f"Presentation with ID {request.presentation_id} not found"
+            )
+
+        display_name = presentation_info.get("DisplayName", "Unknown")
+        presentation_type = presentation_info.get("PresentationType", "Normal")
+
+        logger.info(
+            "Generating feedback template for display_name='%s', type='%s'",
+            display_name,
+            presentation_type,
+        )
+
+        # Generate the feedback template document
+        warnings = []
+        try:
+            file_path = feedback_template_generator.generate_feedback_template(
+                presentation_id=request.presentation_id,
+                display_name=display_name,
+            )
+
+            logger.info("Feedback template generated successfully: %s", file_path)
+
+        except Exception as e:
+            logger.error("Error generating feedback template: %s", str(e), exc_info=True)
+            raise
+
+        # Build download token
+        download_token = None
+        if file_path and file_path.exists():
+            download_token = build_api_download_url(file_path)
+
+        return CreateFeedbackTemplateResponse(
+            success=True,
+            message="Feedback template generated successfully",
+            file_path=str(file_path),
+            file_name=file_path.name,
+            download_token=download_token,
+            presentation_id=request.presentation_id,
+            presentation_type=presentation_type,
+            warnings=warnings,
+        )
+
+    except ValueError as e:
+        logger.error("Invalid request: %s", str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    except FileNotFoundError as e:
+        logger.error("Template file not found: %s", str(e))
+        raise HTTPException(status_code=404, detail=str(e)) from e
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.error("Error creating feedback template: %s", str(e), exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate feedback template: {str(e)}"
         ) from e

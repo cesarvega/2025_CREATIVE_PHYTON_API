@@ -12,11 +12,7 @@ from openpyxl.utils import get_column_letter
 
 from app.services.nw_reports_service import nw_reports_service
 from app.utils.logging_utils import get_logger
-from app.utils.nw_data_utils import (
-    convert_vote_to_text,
-    sanitize_filename,
-    split_grouped_names,
-)
+from app.utils.nw_data_utils import sanitize_filename
 from app.utils.path_utils import get_nw_downloads_dir
 
 logger = get_logger(__name__)
@@ -261,243 +257,19 @@ class ExcelReportGenerator:
             self._create_sheet_from_sp("Participants", "nw_VotedParticipants", presentation_id)
 
         # Save workbook to NW downloads directory
-        # Format: [DisplayName].xlsx
+        # Format: [DisplayName]_[Timestamp].xlsx
         output_dir = get_nw_downloads_dir()
         output_dir.mkdir(parents=True, exist_ok=True)
 
         safe_display_name = sanitize_filename(display_name)
-        filename = f"{safe_display_name}.xlsx"
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{safe_display_name}_{timestamp}.xlsx"
         output_path = output_dir / filename
 
         self.workbook.save(str(output_path))
         logger.info("Excel report saved to: %s", output_path)
 
         return output_path
-
-    def _create_retained_names_sheet(self, presentation_id: int) -> None:
-        """Create 'Retained Names' sheet."""
-        logger.debug("Creating Retained Names sheet")
-
-        ws = self.workbook.create_sheet("Retained Names")
-
-        # Get data directly from SP without processing
-        retained_names_data = nw_reports_service.get_retained_names(presentation_id)
-
-        if not retained_names_data:
-            # Create empty sheet with just headers
-            headers = ["Name"]
-            self._write_header_row(ws, headers)
-            logger.info("Retained Names sheet created (empty - no data)")
-            return
-
-        # Since we don't know the exact column structure from SP,
-        # we'll write the data as-is from the stored procedure
-        # The SP should return all columns needed
-        try:
-            with nw_reports_service._get_raw_sp_data(presentation_id, "nw_dlRetainedNames_withRecraft") as (columns, rows):
-                if not columns or not rows:
-                    headers = ["Name"]
-                    self._write_header_row(ws, headers)
-                    logger.info("Retained Names sheet created (empty)")
-                    return
-
-                # Write headers from SP columns
-                self._write_header_row(ws, columns)
-
-                # Write data rows
-                for row_num, row in enumerate(rows, start=2):
-                    for col_num, value in enumerate(row, start=1):
-                        ws.cell(row=row_num, column=col_num, value=value)
-
-                # Auto-size columns
-                self._auto_size_columns(ws)
-
-                logger.info("Retained Names sheet created with %d rows", len(rows))
-
-        except Exception as e:
-            logger.error("Error creating Retained Names sheet: %s", e)
-            # Fallback: create sheet with basic headers
-            headers = ["Name"]
-            self._write_header_row(ws, headers)
-            logger.info("Retained Names sheet created (fallback due to error)")
-
-    def _create_newly_created_names_sheet(self, presentation_id: int) -> None:
-        """Create 'Newly Created Names' sheet."""
-        logger.debug("Creating Newly Created Names sheet")
-
-        ws = self.workbook.create_sheet("Newly Created Names")
-
-        # Headers
-        headers = ["Name", "Category", "Rationale"]
-        self._write_header_row(ws, headers)
-
-        # Get data
-        new_names = nw_reports_service.get_newly_created_names(presentation_id)
-
-        # Write data rows
-        row_num = 2
-        for item in new_names:
-            # Handle grouped names
-            names = split_grouped_names(item.name)
-
-            for name in names:
-                ws.cell(row=row_num, column=1, value=name)
-                ws.cell(row=row_num, column=2, value=item.category or "")
-                ws.cell(row=row_num, column=3, value=item.rationale or "")
-                row_num += 1
-
-        # Auto-size columns
-        self._auto_size_columns(ws)
-
-        logger.info("Newly Created Names sheet created with %d rows", row_num - 2)
-
-    def _create_roots_to_explore_sheet(self, presentation_id: int) -> None:
-        """Create 'Roots Or Concepts To Explore' sheet."""
-        logger.debug("Creating Roots To Explore sheet")
-
-        ws = self.workbook.create_sheet("Roots Or Concepts To Explore")
-
-        # Headers
-        headers = ["Concept", "Description"]
-        self._write_header_row(ws, headers)
-
-        # Get data
-        concepts = nw_reports_service.get_roots_to_explore(presentation_id)
-
-        # Write data rows
-        row_num = 2
-        for item in concepts:
-            ws.cell(row=row_num, column=1, value=item.concept)
-            ws.cell(row=row_num, column=2, value=item.description or "")
-            row_num += 1
-
-        # Auto-size columns
-        self._auto_size_columns(ws)
-
-        logger.info("Roots To Explore sheet created with %d rows", row_num - 2)
-
-    def _create_roots_to_avoid_sheet(self, presentation_id: int) -> None:
-        """Create 'Roots Or Concepts To Avoid' sheet."""
-        logger.debug("Creating Roots To Avoid sheet")
-
-        ws = self.workbook.create_sheet("Roots Or Concepts To Avoid")
-
-        # Headers
-        headers = ["Concept", "Description"]
-        self._write_header_row(ws, headers)
-
-        # Get data
-        concepts = nw_reports_service.get_roots_to_avoid(presentation_id)
-
-        # Write data rows
-        row_num = 2
-        for item in concepts:
-            ws.cell(row=row_num, column=1, value=item.concept)
-            ws.cell(row=row_num, column=2, value=item.description or "")
-            row_num += 1
-
-        # Auto-size columns
-        self._auto_size_columns(ws)
-
-        logger.info("Roots To Avoid sheet created with %d rows", row_num - 2)
-
-    def _create_notes_sheet(self, presentation_id: int) -> None:
-        """Create 'Notes' sheet."""
-        logger.debug("Creating Notes sheet")
-
-        ws = self.workbook.create_sheet("Notes")
-
-        # Headers
-        headers = ["Note", "Created By", "Created Date"]
-        self._write_header_row(ws, headers)
-
-        # Get data
-        notes = nw_reports_service.get_open_notes(presentation_id)
-
-        # Write data rows
-        row_num = 2
-        for item in notes:
-            ws.cell(row=row_num, column=1, value=item.note_text)
-            ws.cell(row=row_num, column=2, value=item.created_by or "")
-
-            # Format date
-            date_str = ""
-            if item.created_date:
-                if isinstance(item.created_date, datetime):
-                    date_str = item.created_date.strftime("%Y-%m-%d %H:%M:%S")
-                else:
-                    date_str = str(item.created_date)
-
-            ws.cell(row=row_num, column=3, value=date_str)
-            row_num += 1
-
-        # Auto-size columns
-        self._auto_size_columns(ws)
-
-        logger.info("Notes sheet created with %d rows", row_num - 2)
-
-    def _create_votes_sheet(self, presentation_id: int) -> None:
-        """Create 'NW_Votes' sheet."""
-        logger.debug("Creating Votes sheet")
-
-        ws = self.workbook.create_sheet("NW_Votes")
-
-        # Headers
-        headers = ["Group", "Positive", "Neutral", "Negative", "Total"]
-        self._write_header_row(ws, headers)
-
-        # Get data
-        votes = nw_reports_service.get_votes_by_groups(presentation_id)
-
-        # Write data rows
-        row_num = 2
-        for item in votes:
-            ws.cell(row=row_num, column=1, value=item.group_name)
-            ws.cell(row=row_num, column=2, value=item.positive_votes)
-            ws.cell(row=row_num, column=3, value=item.neutral_votes)
-            ws.cell(row=row_num, column=4, value=item.negative_votes)
-            ws.cell(row=row_num, column=5, value=item.total_votes)
-            row_num += 1
-
-        # Auto-size columns
-        self._auto_size_columns(ws)
-
-        logger.info("Votes sheet created with %d rows", row_num - 2)
-
-    def _create_participants_sheet(self, presentation_id: int) -> None:
-        """Create 'Participants' sheet."""
-        logger.debug("Creating Participants sheet")
-
-        ws = self.workbook.create_sheet("Participants")
-
-        # Headers
-        headers = ["Participant Name", "Email", "Voted Date"]
-        self._write_header_row(ws, headers)
-
-        # Get data
-        participants = nw_reports_service.get_voted_participants(presentation_id)
-
-        # Write data rows
-        row_num = 2
-        for item in participants:
-            ws.cell(row=row_num, column=1, value=item.participant_name)
-            ws.cell(row=row_num, column=2, value=item.email or "")
-
-            # Format date
-            date_str = ""
-            if item.voted_date:
-                if isinstance(item.voted_date, datetime):
-                    date_str = item.voted_date.strftime("%Y-%m-%d %H:%M:%S")
-                else:
-                    date_str = str(item.voted_date)
-
-            ws.cell(row=row_num, column=3, value=date_str)
-            row_num += 1
-
-        # Auto-size columns
-        self._auto_size_columns(ws)
-
-        logger.info("Participants sheet created with %d rows", row_num - 2)
 
     def _write_header_row(self, ws, headers: list) -> None:
         """Write and format header row.
