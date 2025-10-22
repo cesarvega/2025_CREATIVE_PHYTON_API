@@ -135,6 +135,14 @@ class CreatePresentationMetadata(BaseModel):
         description="Background template names separated by '|' (e.g., 'BMW_1|BrandDNA'). Default: ''",
     )
 
+    # ===== BACKUP OPTIONS (FROM FRONTEND) =====
+    create_backup: int = Field(
+        0,
+        ge=0,
+        le=1,
+        description="Create backup file flag (0 or 1). When 1, creates a full backup of the presentation. Default: 0",
+    )
+
     def to_service_request(
         self,
         *,
@@ -164,6 +172,7 @@ class CreatePresentationMetadata(BaseModel):
             background_name=self.background_name or "",
             page_number=self.page_number,
             project_type=self.project_type,
+            create_backup=self.create_backup,
         )
 
 
@@ -241,39 +250,11 @@ class CreatePresentationRequest(BaseModel):
         "bipresents",
         description="Directory and business unit routing (typically 'bipresents' or 'nw').",
     )
-
-    # Physical PowerPoint generation options
-    template_pack: Optional[str] = Field(
-        default="BackgroundDefaultTemplate",
-        description="Template pack folder to use for generating physical PowerPoint slides.",
-    )
-    base_template: Optional[str] = Field(
-        default="template_default_2019.pptx",
-        description="Base template file for individual candidate slides.",
-    )
-    multi_template: Optional[str] = Field(
-        default="template_default_withgroups2019.pptx",
-        description="Template file for slides containing multiple grouped candidates.",
-    )
-    group_template: Optional[str] = Field(
-        default="template_default_withgroup_2019.pptx",
-        description="Template file for group header slides (A, B, C, etc.).",
-    )
-    separator_template: Optional[str] = Field(
-        default="template_default_seperator_2019.pptx",
-        description="Template file for separator slides between sections.",
-    )
-    summary_template: Optional[str] = Field(
-        default="template_default_summary2019.pptx",
-        description="Template file for summary slides at the end of presentation.",
-    )
-    include_macro_version: bool = Field(
-        default=False,
-        description="Generate a macro-enabled (.pptm) version of the PowerPoint file.",
-    )
-    generate_physical_pptx: bool = Field(
-        default=True,
-        description="Generate physical PowerPoint file combining original slides and template-generated slides.",
+    create_backup: int = Field(
+        0,
+        ge=0,
+        le=1,
+        description="Create backup file flag (0 or 1). When 1, creates a full backup copy of the generated presentation.",
     )
 
 

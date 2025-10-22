@@ -7,6 +7,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, Form
 from fastapi.responses import FileResponse
+from urllib.parse import quote
 
 from app.api.dependencies import (
     parse_build_metadata,
@@ -37,6 +38,7 @@ from app.services.pptx_service import pptx_service
 from app.config.db import get_connection_scope
 from app.utils.download_utils import (
     build_api_download_url,
+    create_download_token,
     decode_download_token,
     guess_media_type,
 )
@@ -661,11 +663,24 @@ async def download_generated_file(token: str) -> FileResponse:
         FileResponse with the requested file.
     """
     file_path = decode_download_token(token)
-    return FileResponse(
+    media_type = guess_media_type(file_path)
+
+    # Build response and force attachment filename to avoid browsers/proxies
+    # inferring a name based on the URL token or changing extensions.
+    response = FileResponse(
         path=file_path,
-        filename=file_path.name,
-        media_type=guess_media_type(file_path),
+        media_type=media_type,
+        filename=file_path.name,  # best-effort for Starlette versions that support it
     )
+    # Force Content-Disposition with RFC 5987 UTF-8 filename
+    utf8_name = quote(file_path.name)
+    response.headers["Content-Disposition"] = (
+        f"attachment; filename=\"{file_path.name}\"; filename*=UTF-8''{utf8_name}"
+    )
+    # Prevent type sniffing that may alter extensions
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Content-Transfer-Encoding"] = "binary"
+    return response
 
 
 @router.post(
@@ -961,46 +976,36 @@ async def test_table_layout(names: list[str]) -> dict:
 @router.post(
     "/download-results",
     response_model=DownloadResultsResponse,
-    summary="Download NW presentation results in various formats",
+    summary="Descargar resultados NW (genera Excel y Word en ZIP)",
     description=(
-        "Generate and download presentation results in different formats:\n\n"
-        "- **Excel**: Complete NW Results workbook with retained names, newly created names, "
-        "roots/concepts to explore/avoid, notes, and optional votes and participants sheets\n"
-        "- **Word**: NW Report document with formatted tables and charts (requires template)\n"
-        "- **Analytics**: NW Analytics workbook with project-specific and region-specific metrics\n"
-        "- **BSR**: BSR download with specialized Excel and Word templates\n\n"
-        "The endpoint:\n"
-        "1. Retrieves data from stored procedures based on presentation ID\n"
-        "2. Processes and transforms data (vote conversion, name grouping, Unicode handling)\n"
-        "3. Generates the requested report type\n"
-        "4. Returns a download token for secure file access\n\n"
-        "**Data Processing:**\n"
-        "- Grouped names (delimited by ## or $$) are split into separate rows in Excel\n"
-        "- Numeric votes (-1, 0, 1) are converted to text (Negative, Neutral, Positive)\n"
-        "- Unicode characters are normalized for compatibility\n\n"
-        "**Template Requirements:**\n"
-        "- Analytics reports require: C:/Templates/CreativeMacros/NW_Analytics/NWAnalytics.xlsx\n"
-        "- Word reports require: Nomenclature Workshop Report_Template_new_*.doc\n"
-        "- BSR reports require: BSR_EXCEL_TEMPLATE.xls and BSR_WORD_TEMPLATE.docx"
+        "Genera siempre dos archivos para la presentación indicada y los empaqueta en un archivo ZIP:\n\n"
+        "- **Excel**: Workbook de resultados (retained, new names, explore/avoid, notes) y, si corresponde, hojas de votes y participants (lógica interna).\n"
+        "- **Word**: Reporte NW basado en plantilla, con tablas y gráfico.\n\n"
+        "**Salida**: Archivo ZIP que contiene ambos reportes (Excel y Word).\n\n"
+        "Entrada mínima: solo `presentation_id`. El endpoint resuelve internamente qué hojas incluir y devuelve un token de descarga para el archivo ZIP."
     ),
     response_description=(
-        "Report generation status with file path, filename, and secure download token. "
-        "Use the download token with the /presentations/files/{token} endpoint to retrieve the file."
+        "Estado de generación con ruta, nombre de archivo y token de descarga para el archivo ZIP. "
+        "Usa `/presentations/files/{token}` para descargarlo. El ZIP contiene ambos archivos (Excel y Word)."
     ),
     responses={
         200: {
-            "description": "Report generated successfully.",
+            "description": "Reportes generados en archivo ZIP (Excel y Word).",
             "content": {
                 "application/json": {
                     "example": {
                         "success": True,
-                        "message": "EXCEL report generated successfully",
-                        "file_path": "C:/output/TestProject/NW_Results_TestPresentation_20250116_143022.xlsx",
-                        "file_name": "NW_Results_TestPresentation_20250116_143022.xlsx",
+                        "message": "Generated 2 reports (Excel and Word) in ZIP archive",
+                        "file_path": "C:/.../NW_Files/downloads/TestPresentation_Reports_20250122_143022.zip",
+                        "file_name": "TestPresentation_Reports_20250122_143022.zip",
                         "download_token": "eyJ0eXAiOiJKV1QiLCJhbGc...",
+                        "excel_download_token": "eyJ0eXAiOiJKV1QiLCJhbGc...",
+                        "word_download_token": "eyJ0eXAiOiJKV1QiLCJhbGc...",
+                        "excel_file_name": "TestPresentation_20250122_143022.xlsx",
+                        "word_file_name": "TestPresentation_20250122_143022.doc",
                         "report_type": "excel",
                         "presentation_id": 12345,
-                        "generated_at": "2025-01-16T14:30:22.123456",
+                        "generated_at": "2025-01-22T14:30:22.123456",
                         "warnings": []
                     }
                 }
@@ -1018,7 +1023,7 @@ async def test_table_layout(names: list[str]) -> dict:
             "description": "Required template file not found.",
             "content": {
                 "application/json": {
-                    "example": {"detail": "Analytics template not found at: C:/Templates/CreativeMacros/NW_Analytics/NWAnalytics.xlsx"}
+                    "example": {"detail": "Word template not found at: C:/Templates/Nomenclature Workshop Report_Template_new_xxx.doc"}
                 }
             },
         },
@@ -1028,16 +1033,6 @@ async def test_table_layout(names: list[str]) -> dict:
                 "application/json": {
                     "example": {
                         "detail": "Failed to generate report: Database connection error"
-                    }
-                }
-            },
-        },
-        501: {
-            "description": "Report type not yet implemented.",
-            "content": {
-                "application/json": {
-                    "example": {
-                        "detail": "Word report generation is not yet implemented. This requires Word COM automation or python-docx integration."
                     }
                 }
             },
@@ -1113,17 +1108,15 @@ async def download_results(request: DownloadResultsRequest) -> DownloadResultsRe
     """
     try:
         logger.info(
-            "Received download results request: presentation_id=%d, report_type=%s",
+            "Received download results request: presentation_id=%d",
             request.presentation_id,
-            request.report_type,
         )
 
         # Generate report using orchestrator service
         response = report_orchestrator_service.generate_report(request)
 
         logger.info(
-            "Report generated successfully: %s for presentation %d",
-            request.report_type,
+            "Reports (Excel+Word) generated for presentation %d",
             request.presentation_id,
         )
 
@@ -1322,7 +1315,8 @@ async def create_feedback_template(request: CreateFeedbackTemplateRequest) -> Cr
         # Build download token
         download_token = None
         if file_path and file_path.exists():
-            download_token = build_api_download_url(file_path)
+            # Return only the token; client prepends /api/presentations/files/
+            download_token = create_download_token(file_path)
 
         return CreateFeedbackTemplateResponse(
             success=True,
@@ -1351,4 +1345,138 @@ async def create_feedback_template(request: CreateFeedbackTemplateRequest) -> Cr
         raise HTTPException(
             status_code=500,
             detail=f"Failed to generate feedback template: {str(e)}"
+        ) from e
+
+
+@router.get(
+    "/download-presentation/{presentation_id}",
+    summary="Download generated PowerPoint presentation file",
+    description=(
+        "Download the physical PowerPoint file (.pptx) generated for a specific presentation.\n\n"
+        "This endpoint retrieves the PowerPoint file that was created when `create_backup=1` "
+        "was specified during presentation creation.\n\n"
+        "**Requirements:**\n"
+        "- The presentation must exist in the database\n"
+        "- A PowerPoint file must have been generated (create_backup=1)\n"
+        "- The file must exist on the server\n\n"
+        "**Returns:** Direct file download of the .pptx file"
+    ),
+    responses={
+        200: {
+            "description": "PowerPoint file download",
+            "content": {"application/vnd.openxmlformats-officedocument.presentationml.presentation": {}},
+        },
+        404: {"description": "Presentation not found or file doesn't exist"},
+        500: {"description": "Server error"},
+    },
+)
+async def download_presentation_file(presentation_id: int) -> FileResponse:
+    """Download the generated PowerPoint file for a presentation.
+
+    Args:
+        presentation_id: The ID of the presentation to download
+
+    Returns:
+        FileResponse with the PowerPoint file
+
+    Raises:
+        HTTPException: 404 if presentation or file not found, 500 on server error
+    """
+    try:
+        logger.info("Downloading presentation file for ID: %d", presentation_id)
+
+        # Get presentation info from database
+        with get_connection_scope(timeout=30) as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    DisplayName,
+                    MainPptFileName,
+                    Project
+                FROM [BI_GUIDELINES].[dbo].[nw_Master]
+                WHERE PresentationId = ?
+                """,
+                (presentation_id,)
+            )
+
+            row = cursor.fetchone()
+
+            if not row:
+                logger.warning("Presentation ID %d not found", presentation_id)
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Presentation with ID {presentation_id} not found"
+                )
+
+            display_name = row.DisplayName
+            main_ppt_filename = row.MainPptFileName
+            project = row.Project
+
+            if not main_ppt_filename:
+                logger.warning(
+                    "Presentation ID %d has no PowerPoint file (create_backup was not enabled)",
+                    presentation_id
+                )
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No PowerPoint file available for presentation ID {presentation_id}. "
+                           f"The file was not generated (create_backup=0)."
+                )
+
+        # Construct file path
+        # Files are typically stored in: nw_slides/{DisplayName}/Presentations/{filename}
+        file_path = settings.nw_files_dir / display_name / "Presentations" / main_ppt_filename
+
+        if not file_path.exists():
+            logger.error(
+                "PowerPoint file not found on disk: %s (presentation_id=%d)",
+                file_path,
+                presentation_id
+            )
+            raise HTTPException(
+                status_code=404,
+                detail=f"PowerPoint file not found on server. Expected path: {main_ppt_filename}"
+            )
+
+        # Get file info
+        file_size = file_path.stat().st_size
+        media_type = guess_media_type(file_path)
+
+        logger.info(
+            "Serving PowerPoint file: %s (size: %d bytes, presentation_id: %d)",
+            file_path.name,
+            file_size,
+            presentation_id
+        )
+
+        # Create FileResponse with proper headers
+        response = FileResponse(
+            path=file_path,
+            media_type=media_type,
+            filename=file_path.name,
+        )
+
+        # Set headers for download
+        utf8_name = quote(file_path.name)
+        response.headers["Content-Disposition"] = (
+            f"attachment; filename=\"{file_path.name}\"; filename*=UTF-8''{utf8_name}"
+        )
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Content-Transfer-Encoding"] = "binary"
+
+        return response
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.error(
+            "Error downloading presentation file for ID %d: %s",
+            presentation_id,
+            str(e),
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to download presentation file: {str(e)}"
         ) from e

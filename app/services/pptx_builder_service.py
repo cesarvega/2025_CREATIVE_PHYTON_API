@@ -1155,27 +1155,26 @@ class PPTXBuilderService:
         summary_tracker: Dict[str, List[str]],
         warnings: Optional[List[str]] = None,
     ) -> None:
-        lines: List[str] = []
-        for category, names in summary_tracker.items():
-            if not names:
-                continue
-            unique_names: List[str] = list(dict.fromkeys(name for name in names if name))
-            if not unique_names:
-                continue
-            lines.append(f"{category}: {', '.join(unique_names)}")
+        """Populate summary slide - leaves content empty, only keeps the title.
 
-        body = "Name Candidates - Summary"
-        if lines:
-            body = f"{body}\n\n" + "\n".join(lines)
-        self._replace_placeholder_text(
-            slide,
-            "Name Candidates - Summary",
-            body,
-            replace_all=True,
-            warnings=warnings,
-            required=True,
-            context="summary slide",
-        )
+        The summary slide template is used as-is without filling in candidate names.
+        This allows users to manually add content if needed.
+        """
+        # Don't populate the summary slide with candidate names
+        # The template slide is used as-is
+        logger.debug("Summary slide created from template (content not auto-populated)")
+
+        # Optionally, you can still replace the title placeholder if needed
+        # but leave the body empty for manual editing
+        # self._replace_placeholder_text(
+        #     slide,
+        #     "Name Candidates - Summary",
+        #     "",  # Empty content
+        #     replace_all=False,
+        #     warnings=warnings,
+        #     required=False,
+        #     context="summary slide",
+        # )
 
     def _select_template_kind(self, detail: Dict[str, Any]) -> str:
         slide_type = (detail.get("slide_type") or "").lower()

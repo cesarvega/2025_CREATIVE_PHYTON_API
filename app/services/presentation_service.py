@@ -85,40 +85,41 @@ class PresentationService:
                 slides_data.get("background_name"),
             )
 
-            # 5. Generate physical PowerPoint file (if enabled)
-            # generated_files = None
-            # if request.generate_physical_pptx:
-            #     logger.info("Generating physical PowerPoint file")
-            #     try:
-            #         ppt_files = self._generate_physical_powerpoint(
-            #             slides_data=slides_data,
-            #             excel_data=excel_data,
-            #             request=request,
-            #             pptx_data=pptx_data,
-            #         )
-            #         generated_files = ppt_files
-                    
-            #         # Update slides_data with generated file path for DB storage
-            #         if ppt_files.get("printable_path"):
-            #             slides_data["powerpoint_file"] = ppt_files["printable_path"]
-                    
-            #         logger.info(
-            #             "Physical PowerPoint generated: %s (total slides: %s)",
-            #             ppt_files.get("printable_path", "N/A"),
-            #             ppt_files.get("total_slides", "0"),
-            #         )
-            #     except Exception as ppt_error:
-            #         logger.error("Failed to generate physical PowerPoint: %s", str(ppt_error))
-            #         # Continue execution - physical file generation is optional
-            #         generated_files = {
-            #             "error": str(ppt_error),
-            #             "printable_path": "",
-            #             "macro_path": "",
-            #             "total_slides": "0",
-            #             "warnings": "Failed to generate",
-            #         }
-            # else:
-            #     logger.info("Physical PowerPoint generation skipped (generate_physical_pptx=False)")
+            # 5. Generate physical PowerPoint file (if backup requested)
+            generated_files = None
+            if request.create_backup == 1:
+                logger.info("Generating physical PowerPoint backup file")
+                try:
+                    ppt_files = self._generate_physical_powerpoint(
+                        slides_data=slides_data,
+                        excel_data=excel_data,
+                        request=request,
+                        pptx_data=pptx_data,
+                    )
+                    generated_files = ppt_files
+
+                    # Update slides_data with generated file path for DB storage
+                    if ppt_files.get("printable_path"):
+                        slides_data["powerpoint_file"] = ppt_files["printable_path"]
+
+                    logger.info(
+                        "Physical PowerPoint backup generated: %s (total slides: %s)",
+                        ppt_files.get("printable_path", "N/A"),
+                        ppt_files.get("total_slides", "0"),
+                    )
+
+                except Exception as ppt_error:
+                    logger.error("Failed to generate physical PowerPoint backup: %s", str(ppt_error))
+                    # Continue execution - physical file generation is optional
+                    generated_files = {
+                        "error": str(ppt_error),
+                        "printable_path": "",
+                        "macro_path": "",
+                        "total_slides": "0",
+                        "warnings": "Failed to generate",
+                    }
+            else:
+                logger.info("Physical PowerPoint backup generation skipped (create_backup=0)")
 
             # 6. Create presentation in DB
             logger.info("Creating presentation in database")
@@ -309,18 +310,18 @@ class PresentationService:
             - macro_path: Path to .pptm file (if generated)
         """
         try:
-            # Build presentation build options from request
+            # Build presentation build options with default templates
             build_options = PresentationBuildOptions(
-                template_pack=request.template_pack or "BackgroundDefaultTemplate",
-                base_template=request.base_template or "template_default_2019.pptx",
-                multi_template=request.multi_template or "template_default_withgroups2019.pptx",
-                group_template=request.group_template or "template_default_withgroup_2019.pptx",
-                separator_template=request.separator_template or "template_default_seperator_2019.pptx",
-                summary_template=request.summary_template or "template_default_summary2019.pptx",
+                template_pack="BackgroundDefaultTemplate",
+                base_template="template_default_2019.pptx",
+                multi_template="template_default_withgroups2019.pptx",
+                group_template="template_default_withgroup_2019.pptx",
+                separator_template="template_default_seperator_2019.pptx",
+                summary_template="template_default_summary2019.pptx",
                 slide_start=1,
                 slide_end=None,
                 include_print_ready_version=True,
-                include_macro_version=request.include_macro_version,
+                include_macro_version=False,  # Default: no macro version
                 return_urls=False,  # Not needed for internal generation
             )
             
@@ -350,7 +351,7 @@ class PresentationService:
                 original_pptx_path=str(pptx_original_path.resolve()),
                 page_number_insert=request.page_number,
             )
-            
+
             # Convert PresentationBuildArtifacts to Dict[str, str] for response model
             result = {
                 "printable_path": str(artifacts.printable_path) if artifacts.printable_path else "",
@@ -358,13 +359,13 @@ class PresentationService:
                 "total_slides": str(artifacts.total_slides),
                 "warnings": ", ".join(artifacts.warnings) if artifacts.warnings else "None",
             }
-            
+
             logger.info(
                 "Physical PowerPoint generated successfully: %d total slides, %d warnings",
                 artifacts.total_slides,
                 len(artifacts.warnings),
             )
-            
+
             if artifacts.warnings:
                 for warning in artifacts.warnings:
                     logger.warning("PowerPoint generation warning: %s", warning)

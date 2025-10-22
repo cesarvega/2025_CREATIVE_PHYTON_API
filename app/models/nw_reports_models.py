@@ -157,30 +157,14 @@ class BSRExcelReportData(BaseModel):
 # Request Models
 
 class DownloadResultsRequest(BaseModel):
-    """Request for downloading results."""
-    presentation_id: int = Field(..., description="Presentation ID to download results for")
-    report_type: ReportType = Field(..., description="Type of report to generate")
+    """Request for downloading NW results.
 
-    # Optional parameters for Word reports
-    summary_type: Optional[SummaryType] = Field(
-        default=None,
-        description="Summary type for Word phonetics reports"
-    )
-
-    # Optional parameters for BSR
-    mobile_link: Optional[str] = Field(
-        default=None,
-        description="Mobile link for BSR download"
-    )
-
-    include_votes: bool = Field(
-        default=False,
-        description="Include votes sheet in Excel report"
-    )
-
-    include_participants: bool = Field(
-        default=False,
-        description="Include participants sheet in Excel report"
+    Only ``presentation_id`` is required. The API always generates both
+    the Excel results workbook and the Word report document. Any logic for
+    including votes/participants sheets is handled internally.
+    """
+    presentation_id: int = Field(
+        ..., description="Presentation ID to generate results for"
     )
 
 
@@ -213,6 +197,11 @@ class DownloadResultsResponse(BaseModel):
     file_path: Optional[str] = None
     file_name: Optional[str] = None
     download_token: Optional[str] = None
+    # Optional explicit tokens and filenames for each artifact
+    excel_download_token: Optional[str] = None
+    word_download_token: Optional[str] = None
+    excel_file_name: Optional[str] = None
+    word_file_name: Optional[str] = None
     report_type: ReportType
     presentation_id: int
     generated_at: datetime = Field(default_factory=datetime.utcnow)

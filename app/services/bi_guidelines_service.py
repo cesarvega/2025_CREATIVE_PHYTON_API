@@ -14,6 +14,20 @@ logger = get_logger(__name__)
 class BIGuidelinesService:
     """Service for handling BI_GUIDELINES database queries."""
 
+    def _get_ci(self, row_dict: dict, *candidates: str):
+        """Case-insensitive getter for row dictionaries from pyodbc.
+
+        Tries multiple candidate column names and returns the first match.
+        """
+        lowered = {str(k).lower(): v for k, v in row_dict.items()}
+        for key in candidates:
+            if key is None:
+                continue
+            v = lowered.get(str(key).lower())
+            if v is not None:
+                return v
+        return None
+
     def get_active_presentations(
         self,
         search: Optional[str] = None,
@@ -117,6 +131,111 @@ class BIGuidelinesService:
             )
 
             return presentations, total
+
+    def get_bsr_active_presentations(
+        self,
+        search: Optional[str] = None,
+        page: int = 1,
+        limit: int = 50,
+    ) -> Tuple[List[ActivePresentation], int]:
+        """Retrieve paginated and filtered active BSR presentations via stored procedure.
+
+        Executes [BI_GUIDELINES].[dbo].[BSR_ActivePresentations] and maps results to
+        the same schema as ActivePresentation. The stored procedure returns all BSR
+        presentations ordered by PresentationId DESC with a pre-generated BSR link.
+
+        Since the SP takes no parameters, filtering by status='OPEN', search, and
+        pagination are applied in Python to match the behavior of get_active_presentations.
+        """
+        logger.debug(
+            "BI_GUIDELINES - Fetching BSR active presentations: search=%s, page=%d, limit=%d",
+            search or "(none)",
+            page,
+            limit,
+        )
+
+        with get_connection_scope(timeout=30) as cursor:
+            # Execute stored procedure to get BSR presentations
+            # SP returns: PresentationId, Project, DisplayName, UploadedBy, UploadedDate,
+            #             Link (pre-generated BSR link), PresentationStatus, LastUpdateDate
+            cursor.execute("{CALL [BI_GUIDELINES].[dbo].[BSR_ActivePresentations]}")
+
+            # Fetch all rows and column names
+            columns = [column[0] for column in cursor.description]
+            rows = cursor.fetchall()
+
+        # Convert to dictionaries for easier processing and case-insensitive access
+        row_dicts: List[dict] = [dict(zip(columns, row)) for row in rows]
+
+        # Filter by PresentationStatus = 'OPEN' (similar to get_active_presentations)
+        def is_open(d: dict) -> bool:
+            status = self._get_ci(d, "PresentationStatus", "Status", "status")
+            return str(status).upper() == "OPEN" if status is not None else False
+
+        filtered = [d for d in row_dicts if is_open(d)]
+
+        # Optional search on project or display name (case-insensitive, contains)
+        if search:
+            term = str(search).lower()
+            def matches(d: dict) -> bool:
+                project_val = self._get_ci(d, "Project")
+                display_val = self._get_ci(d, "DisplayName", "displayname")
+                project = str(project_val).lower() if project_val is not None else ""
+                display = str(display_val).lower() if display_val is not None else ""
+                return term in project or term in display
+            filtered = [d for d in filtered if matches(d)]
+
+        total = len(filtered)
+
+        # Stable sort by last update date descending when available
+        def last_update_key(d: dict):
+            val = self._get_ci(d, "LastUpdateDate", "lastupdatedate", "Last_Update_Date")
+            return (val is None, val)  # None sorts last
+
+        filtered.sort(key=last_update_key, reverse=True)
+
+        # Pagination
+        start = max(0, (page - 1) * limit)
+        end = start + limit
+        page_rows = filtered[start:end]
+
+        # Map to ActivePresentation
+        presentations: List[ActivePresentation] = []
+        for d in page_rows:
+            presentation_id = self._get_ci(d, "PresentationId", "PresentationID", "presentationid")
+            project = self._get_ci(d, "Project") or ""
+            display_name = self._get_ci(d, "DisplayName", "displayname") or ""
+            uploaded_by = self._get_ci(d, "UploadedBy", "uploadedby")
+            uploaded_date = self._get_ci(d, "UploadedDate", "uploadeddate")
+            presentation_status = self._get_ci(d, "PresentationStatus", "Status", "status") or "OPEN"
+            last_update_date = self._get_ci(d, "LastUpdateDate", "lastupdatedate", "Last_Update_Date")
+
+            # Use the Link column from the SP which already contains the BSR link
+            # Format: https://tools.brandinstitute.com/bsr/#/main/{DisplayName}
+            link = self._get_ci(d, "Link", "link") or f"https://tools.brandinstitute.com/bsr/#/main/{display_name}"
+
+            presentations.append(
+                ActivePresentation(
+                    presentation_id=int(presentation_id) if presentation_id is not None else 0,
+                    project=str(project),
+                    display_name=str(display_name),
+                    uploaded_by=str(uploaded_by) if uploaded_by is not None else None,
+                    uploaded_date=uploaded_date,  # pyodbc returns datetime already
+                    link=link,
+                    presentation_status=str(presentation_status),
+                    last_update_date=last_update_date,
+                )
+            )
+
+        logger.info(
+            "BI_GUIDELINES - Retrieved %d BSR active presentations (total: %d) for search='%s', page=%d",
+            len(presentations),
+            total,
+            search or "",
+            page,
+        )
+
+        return presentations, total
 
     def get_bsr_display_names(
         self,
@@ -377,6 +496,126 @@ class BIGuidelinesService:
                 )
 
             return template_map
+
+    def reload_project_sounds(self, display_name: str) -> None:
+        """Reload MP3 file paths for a NW project by executing the stored procedure.
+
+        Executes [BI_GUIDELINES].[dbo].[NW_UpdateMP3FilePath] to resynchronize
+        audio file paths for a project based on existing files in the cloud.
+
+        Args:
+            display_name: The display name of the project to reload sounds for.
+
+        Raises:
+            DatabaseConnectionError: If connection to database fails.
+            DatabaseTransactionError: If stored procedure execution fails.
+        """
+        if not display_name or not display_name.strip():
+            raise ValueError("Display name cannot be empty")
+
+        display_name = display_name.strip()
+
+        logger.debug(
+            "BI_GUIDELINES - Reloading project sounds for display_name=%s",
+            display_name
+        )
+
+        with get_connection_scope(timeout=30) as cursor:
+            # Execute stored procedure to update MP3 file paths
+            cursor.execute(
+                "{CALL [BI_GUIDELINES].[dbo].[NW_UpdateMP3FilePath](?)}",
+                (display_name,)
+            )
+
+            logger.info(
+                "BI_GUIDELINES - Successfully reloaded sounds for project: %s",
+                display_name
+            )
+
+    def update_project_details(
+        self,
+        presentation_id: int,
+        display_name: str,
+        presentation_status: str,
+        bsr_display_name: Optional[str] = None,
+    ) -> None:
+        """Update NW project presentation master details by executing the stored procedure.
+
+        Executes [BI_GUIDELINES].[dbo].[nw_UpdatePresentationMaster] to modify
+        the master details of an existing NW presentation. The LastUpdateDate is
+        automatically updated in the database.
+
+        Args:
+            presentation_id: ID of the presentation to update.
+            display_name: The new display name for the NW project.
+            presentation_status: The new presentation status (e.g., 'OPEN', 'CLOSED').
+            bsr_display_name: The BSR display name associated with this presentation (optional).
+
+        Raises:
+            ValueError: If display name is already in use by another presentation.
+            DatabaseConnectionError: If connection to database fails.
+            DatabaseTransactionError: If stored procedure execution fails.
+        """
+        logger.debug(
+            "BI_GUIDELINES - Updating project presentation_id=%d, display_name=%s, status=%s",
+            presentation_id,
+            display_name,
+            presentation_status
+        )
+
+        with get_connection_scope(timeout=30) as cursor:
+            # First, verify the presentation exists and get current display name
+            cursor.execute(
+                "SELECT DisplayName, PresentationId FROM [BI_GUIDELINES].[dbo].[nw_Master] WHERE PresentationId = ?",
+                (presentation_id,)
+            )
+            current_record = cursor.fetchone()
+
+            if not current_record:
+                raise ValueError(f"Presentation with ID {presentation_id} not found")
+
+            current_display_name = current_record.DisplayName
+
+            # If display name is changing, check if the new name is already in use
+            if display_name != current_display_name:
+                logger.debug(
+                    "BI_GUIDELINES - Display name changing from '%s' to '%s', checking availability",
+                    current_display_name,
+                    display_name
+                )
+
+                # Check if the new display name is already in use by another presentation
+                cursor.execute(
+                    "SELECT PresentationId, Project FROM [BI_GUIDELINES].[dbo].[nw_Master] WHERE DisplayName = ?",
+                    (display_name,)
+                )
+                existing_record = cursor.fetchone()
+
+                if existing_record and existing_record.PresentationId != presentation_id:
+                    raise ValueError(
+                        f"Display name '{display_name}' is already in use by project '{existing_record.Project}' "
+                        f"(PresentationId: {existing_record.PresentationId})"
+                    )
+
+            # Execute stored procedure to update presentation master details
+            # SP signature: nw_UpdatePresentationMaster @PresentationId, @DisplayName,
+            #               @PresentationStatus, @BsrDisplayName
+            cursor.execute(
+                "{CALL [BI_GUIDELINES].[dbo].[nw_UpdatePresentationMaster](?, ?, ?, ?)}",
+                (
+                    presentation_id,
+                    display_name,
+                    presentation_status,
+                    bsr_display_name,
+                )
+            )
+
+            logger.info(
+                "BI_GUIDELINES - Successfully updated project presentation_id=%d, display_name=%s, status=%s",
+                presentation_id,
+                display_name,
+                presentation_status
+            )
 
 
 # Global service instance
