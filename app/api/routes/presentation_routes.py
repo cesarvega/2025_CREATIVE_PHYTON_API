@@ -13,6 +13,7 @@ from app.api.dependencies import (
     parse_build_metadata,
     parse_presentation_metadata,
     parse_simple_dw_metadata,
+    parse_bsr_metadata,
 )
 from app.config.settings import settings
 from app.models.presentation_models import (
@@ -24,6 +25,8 @@ from app.models.presentation_models import (
     PresentationBuildResponse,
     GenerateBackupRequest,
     GenerateBackupResponse,
+    BSRCreatePresentationMetadata,
+    BSRCreatePresentationResponse,
 )
 from app.models.nw_reports_models import (
     CreateFeedbackTemplateRequest,
@@ -455,6 +458,180 @@ async def create_simple_dw_presentation(
         raise HTTPException(
             status_code=500, detail=f"DW create-simple error: {str(e)}"
         ) from e
+
+
+@router.post(
+    "/create-bsr",
+    summary="Create BSR presentation from PowerPoint file",
+    response_model=BSRCreatePresentationResponse,
+    description=(
+        "Create a new BSR (Board Sales Request) presentation by uploading a PowerPoint file.\n\n"
+        "This endpoint:\n"
+        "1. Validates presentation doesn't already exist\n"
+        "2. Validates display name hasn't been used\n"
+        "3. Converts PowerPoint slides to images\n"
+        "4. Reads slide titles from the PowerPoint\n"
+        "5. Creates presentation record in database\n"
+        "6. Inserts slide details including summary slide at specified position\n\n"
+        "**Slide Insertion Logic:**\n"
+        "If the PowerPoint has 5 slides and slide_number=3:\n"
+        "- Slide 1 (Image) -> Slide #1\n"
+        "- Slide 2 (Image) -> Slide #2\n"
+        "- Summary (NameSummary) -> Slide #3 (inserted at slide_number)\n"
+        "- Slide 3 (Image) -> Slide #4\n"
+        "- Slide 4 (Image) -> Slide #5\n"
+        "- Slide 5 (Image) -> Slide #6\n"
+        "Total: 6 slides (5 original + 1 summary)\n\n"
+        "**Data Storage:**\n"
+        "- Master record: bsr_InsertPresentationMaster\n"
+        "- Detail records: bsr_InsertPresentationDetail (one per slide)\n"
+        "- Images stored in: BRS_slides/{ProjectName}/\n"
+    ),
+    responses={
+        200: {
+            "description": "BSR presentation created successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "message": "BSR Presentation created successfully",
+                        "presentation_id": 12345,
+                        "total_slides": 6,
+                        "processing_time_seconds": 8.45,
+                    }
+                }
+            },
+        },
+        400: {
+            "description": "Invalid request or presentation already exists",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "already_exists": {
+                            "summary": "Presentation already exists",
+                            "value": {
+                                "detail": "Presentation already exists for project 'BSR_Project' with display name 'BSR_Presentation'"
+                            }
+                        },
+                        "display_name_used": {
+                            "summary": "Display name already used",
+                            "value": {
+                                "detail": "Display name 'BSR_Presentation' has already been used"
+                            }
+                        }
+                    }
+                }
+            },
+        },
+        422: {
+            "description": "Metadata validation failed",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": [
+                            {
+                                "loc": ["metadata", "slide_number"],
+                                "msg": "Field required",
+                                "type": "missing",
+                            }
+                        ]
+                    }
+                }
+            },
+        },
+        500: {
+            "description": "Unexpected error during creation",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "Failed to create BSR presentation: Database connection error"
+                    }
+                }
+            },
+        },
+    },
+)
+async def create_bsr_presentation(
+    metadata: BSRCreatePresentationMetadata = Depends(parse_bsr_metadata),
+    pptx_file: UploadFile = File(..., description="PowerPoint file (.pptx)"),
+) -> BSRCreatePresentationResponse:
+    """Create a BSR presentation from a PowerPoint file.
+
+    This endpoint handles the complete BSR presentation creation workflow:
+    1. Validation checks (existence, display name uniqueness)
+    2. PowerPoint conversion to images
+    3. Slide title extraction
+    4. Database persistence
+
+    Args:
+        metadata: BSR presentation metadata (project_name, display_name, etc.)
+        pptx_file: PowerPoint file to process
+
+    Returns:
+        BSRCreatePresentationResponse with presentation ID and statistics
+
+    Raises:
+        HTTPException 400: If validation fails or presentation already exists
+        HTTPException 500: If creation process fails
+    """
+    try:
+        # Validate file
+        if not pptx_file.filename or not pptx_file.filename.lower().endswith(".pptx"):
+            raise HTTPException(status_code=400, detail="PPTX file must be .pptx")
+
+        # Read file content
+        pptx_content = await pptx_file.read()
+
+        # Validate size (max 50MB for PowerPoint files)
+        max_pptx_size = 50 * 1024 * 1024
+        if len(pptx_content) == 0:
+            raise HTTPException(status_code=400, detail="Empty PPTX file provided")
+        if len(pptx_content) > max_pptx_size:
+            raise HTTPException(status_code=413, detail="PPTX file too large. Maximum size is 50MB")
+
+        logger.info(
+            "Starting BSR presentation creation: project=%s, display_name=%s",
+            metadata.project_name,
+            metadata.display_name,
+        )
+
+        start_time = time.time()
+
+        # Call service to create BSR presentation
+        result = presentation_service.create_bsr_presentation(
+            project_name=metadata.project_name,
+            display_name=metadata.display_name,
+            slide_number=metadata.slide_number,
+            presentation_type=metadata.presentation_type,
+            user_name=metadata.user_name,
+            is_wide_ppt=metadata.is_wide_ppt,
+            pptx_content=pptx_content,
+            pptx_filename=pptx_file.filename,
+        )
+
+        processing_time = time.time() - start_time
+
+        logger.info(
+            "BSR presentation created successfully. ID: %s, Slides: %d, Time: %.2fs",
+            result.get("presentation_id"),
+            result.get("total_slides", 0),
+            processing_time,
+        )
+
+        return BSRCreatePresentationResponse(
+            message="BSR Presentation created successfully",
+            presentation_id=result.get("presentation_id"),
+            total_slides=result.get("total_slides", 0),
+            processing_time_seconds=processing_time,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error creating BSR presentation: %s", str(e), exc_info=True)
+        raise HTTPException(
+            status_code=500, detail=f"Failed to create BSR presentation: {str(e)}"
+        ) from e
+
 
 @router.post(
     "/createTemplate",

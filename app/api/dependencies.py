@@ -14,6 +14,7 @@ from app.models.presentation_models import (
     CreatePresentationMetadata,
     PresentationBuildMetadata,
     SimpleDWMetadata,
+    BSRCreatePresentationMetadata,
 )
 from app.utils.logging_utils import get_logger
 
@@ -296,23 +297,49 @@ async def validate_pptx_file_with_size(
     max_size_mb: int = 50
 ) -> tuple[UploadFile, bytes]:
     """Validate PPTX file type and size, returning both file object and content.
-    
+
     This is a composite dependency that validates both file type and size.
-    
+
     Args:
         file: The uploaded file to validate.
         max_size_mb: Maximum file size in MB (default: 50MB for PPTX templates).
-        
+
     Returns:
         Tuple of (UploadFile, file_content_bytes).
-        
+
     Raises:
         HTTPException: If file is invalid, empty, or too large.
     """
     # Validate file type first
     validated_file = await validate_pptx_file(file)
-    
+
     # Validate size and get content
     file_content = await validate_file_size(validated_file, max_size_mb)
-    
+
     return validated_file, file_content
+
+
+async def parse_bsr_metadata(
+    metadata: str = Form(
+        ..., description="JSON payload containing BSR presentation metadata"
+    )
+) -> BSRCreatePresentationMetadata:
+    """Parse and validate BSR presentation creation metadata from form data.
+
+    Expects a 'metadata' form field containing JSON with keys:
+    project_name, display_name, slide_number, presentation_type, user_name, is_wide_ppt
+    """
+    try:
+        payload = json.loads(metadata)
+    except json.JSONDecodeError as exc:
+        logger.warning("Invalid JSON in BSR metadata: %s", exc)
+        raise HTTPException(
+            status_code=400,
+            detail="Metadata payload must be valid JSON",
+        ) from exc
+
+    try:
+        return BSRCreatePresentationMetadata(**payload)
+    except ValidationError as exc:
+        logger.warning("BSR metadata validation failed: %s", exc.errors())
+        raise HTTPException(status_code=422, detail=exc.errors()) from exc

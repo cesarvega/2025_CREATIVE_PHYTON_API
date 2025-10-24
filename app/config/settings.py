@@ -144,6 +144,7 @@ class Settings(BaseSettings):
     PROJECT_TYPE_BIPRESENTS: str = "bipresents"
     PROJECT_TYPE_NW: str = "nw"
     PROJECT_TYPE_DW: str = "dw"
+    PROJECT_TYPE_BSR: str = "BSR"
 
     # Email notification settings
     email_creative: str = "creative@brandinstitute.com"
@@ -159,6 +160,9 @@ class Settings(BaseSettings):
         elif project_type == self.PROJECT_TYPE_DW:
             # DW shares the same base directory as NW (nw2/nw_slides)
             return self.base_dir_nw
+        elif project_type == self.PROJECT_TYPE_BSR or project_type.upper() == "BSR":
+            # BSR uses bipresents directory structure
+            return self.base_dir_bipresents
         else:
             raise ValueError(f"Unknown project type: {project_type}")
 

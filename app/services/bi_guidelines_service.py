@@ -353,6 +353,135 @@ class BIGuidelinesService:
             logger.info("BI_GUIDELINES - Retrieved project info for project_id=%d", project_id)
             return project_details
 
+    def get_bsr_project_info(self, project_id: int) -> dict | None:
+        """Retrieve BSR project information using BSR_PresentationInfo stored procedure.
+
+        This method executes the BSR_PresentationInfo stored procedure and optionally
+        retrieves project categories if available.
+
+        Args:
+            project_id: The BSR project ID to retrieve information for.
+
+        Returns:
+            Dictionary containing BSR project details with categories or None if not found.
+            Structure:
+            {
+                "project": str,
+                "displayname": str,
+                "uploadedby": str,
+                "uploadeddate": datetime,
+                "presentationid": int,
+                "presentationtype": str,
+                "presentationstatus": str,
+                "link": str,
+                "lastupdatedate": datetime,
+                "slidenumber": int,
+                "iswideppt": int,
+                "categories": [
+                    {
+                        "category": str,
+                        "elements": str
+                    }
+                ]
+            }
+
+        Raises:
+            DatabaseConnectionError: If connection to database fails.
+            DatabaseTransactionError: If query execution fails.
+        """
+        logger.debug("BI_GUIDELINES - Fetching BSR project info for project_id=%d", project_id)
+
+        with get_connection_scope(timeout=30) as cursor:
+            # Execute BSR_PresentationInfo stored procedure
+            cursor.execute(
+                "{CALL [BI_GUIDELINES].[dbo].[BSR_PresentationInfo](?)}",
+                (project_id,)
+            )
+
+            # Get column names and row
+            columns = [column[0] for column in cursor.description]
+            row = cursor.fetchone()
+
+            if not row:
+                logger.warning("BI_GUIDELINES - BSR Project %d not found", project_id)
+                return None
+
+            # Convert row to dictionary
+            project_details = dict(zip(columns, row))
+
+            # Get project ID for categories lookup
+            presentation_id = project_details.get("presentationid") or project_id
+
+            # Fetch categories for this project
+            categories = self._get_bsr_project_categories(presentation_id, cursor)
+            project_details["categories"] = categories
+
+            logger.info(
+                "BI_GUIDELINES - Retrieved BSR project info for project_id=%d with %d categories",
+                project_id,
+                len(categories)
+            )
+            return project_details
+
+    def _get_bsr_project_categories(
+        self, project_id: int, cursor=None
+    ) -> List[dict]:
+        """Retrieve BSR project categories using bsr_GetCategoryValues stored procedure.
+
+        Args:
+            project_id: The BSR project ID to retrieve categories for.
+            cursor: Optional existing cursor to reuse connection.
+
+        Returns:
+            List of category dictionaries with structure:
+            [
+                {
+                    "category": "Category Name",
+                    "elements": "Element1, Element2, ..."
+                }
+            ]
+
+        Raises:
+            DatabaseConnectionError: If connection to database fails.
+            DatabaseTransactionError: If query execution fails.
+        """
+        logger.debug("BI_GUIDELINES - Fetching BSR categories for project_id=%d", project_id)
+
+        def _fetch_categories(cursor):
+            # Execute bsr_GetCategoryValues stored procedure
+            cursor.execute(
+                "{CALL [BI_GUIDELINES].[dbo].[bsr_GetCategoryValues](?)}",
+                (project_id,)
+            )
+
+            # Get column names and rows
+            columns = [column[0] for column in cursor.description]
+            rows = cursor.fetchall()
+
+            categories = []
+            for row in rows:
+                row_dict = dict(zip(columns, row))
+                # Map database column names to response format
+                category_item = {
+                    "category": row_dict.get("category") or "",
+                    "elements": row_dict.get("CategoriesElements") or "",
+                }
+                categories.append(category_item)
+
+            logger.debug(
+                "BI_GUIDELINES - Retrieved %d categories for project_id=%d",
+                len(categories),
+                project_id
+            )
+            return categories
+
+        # If cursor provided, use it; otherwise create new connection
+        if cursor:
+            return _fetch_categories(cursor)
+        else:
+            with get_connection_scope(timeout=30) as new_cursor:
+                return _fetch_categories(new_cursor)
+
     def get_template_groups(self) -> Tuple[List[TemplateGroup], int]:
         """Retrieve template groups from BI_GUIDELINES database.
 

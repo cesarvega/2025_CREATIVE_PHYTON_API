@@ -261,6 +261,105 @@ async def get_project_info(project_id: int):
 
 
 @router.get(
+    "/bsr-project-info/{project_id}",
+    summary="Get BSR project information by ID",
+    description=(
+        "Retrieve detailed information for a specific BSR (Board Sales Request) presentation.\n\n"
+        "This endpoint executes the BSR_PresentationInfo stored procedure and retrieves associated categories "
+        "to provide complete project details including:\n"
+        "- Project name and display name\n"
+        "- PowerPoint file path\n"
+        "- Slide number configuration\n"
+        "- Presentation type (BSR or BSR-Japan)\n"
+        "- Presentation status (OPEN, CLOSED, etc.)\n"
+        "- User information (uploaded by, upload date)\n"
+        "- Wide screen setting\n"
+        "- Web link (if available)\n"
+        "- Creation and update timestamps\n"
+        "- Project categories with their elements\n\n"
+        "Useful for loading existing BSR presentations for editing or viewing."
+    ),
+)
+async def get_bsr_project_info(project_id: int):
+    """Retrieve BSR project information using BSR_PresentationInfo stored procedure.
+
+    This endpoint provides complete BSR presentation information including project categories.
+    It executes two stored procedures:
+    1. BSR_PresentationInfo - for main presentation details
+    2. bsr_GetCategoryValues - for project categories
+
+    Args:
+        project_id: The BSR presentation ID to retrieve information for.
+
+    Returns:
+        Dictionary containing all BSR project details with categories.
+
+    Raises:
+        HTTPException: 404 if project not found, 500 if database error occurs.
+
+    Example response:
+        {
+            "project": "BSR_Project_2025",
+            "displayname": "Test_Presentation",
+            "uploadedby": "analyst",
+            "uploadeddate": "2025-01-15T10:30:00",
+            "presentationid": 12345,
+            "presentationtype": "BSR",
+            "presentationstatus": "OPEN",
+            "link": "https://example.com/presentation",
+            "lastupdatedate": "2025-01-15T10:30:00",
+            "slidenumber": 3,
+            "iswideppt": 0,
+            "categories": [
+                {
+                    "category": "Technology",
+                    "elements": "AI, Machine Learning, Cloud"
+                },
+                {
+                    "category": "Industry",
+                    "elements": "Healthcare, Finance"
+                }
+            ]
+        }
+    """
+    try:
+        project_details = bi_guidelines_service.get_bsr_project_info(project_id)
+
+        if project_details is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"BSR Project with ID {project_id} not found"
+            )
+
+        logger.info("Retrieved BSR project info for project_id=%d", project_id)
+        return project_details
+
+    except HTTPException:
+        raise
+
+    except DatabaseConnectionError as exc:
+        logger.error("Database connection failed: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="Database service temporarily unavailable."
+        ) from exc
+
+    except DatabaseTransactionError as exc:
+        logger.error("Database query failed for BSR project %d: %s", project_id, exc)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to retrieve BSR project information from database."
+        ) from exc
+
+    except Exception as e:
+        logger.error("Unexpected error retrieving BSR project info for %d: %s", project_id, str(e), exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="An unexpected error occurred while retrieving BSR project information."
+        ) from e
+
+
+@router.get(
     "/template-groups",
     response_model=TemplateGroupsResponse,
     summary="Get list of template groups",

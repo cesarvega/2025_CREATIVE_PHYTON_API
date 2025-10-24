@@ -749,3 +749,110 @@ class SimpleDWMetadata(BaseModel):
     userName: str = Field(..., description="User initiating the operation")
     slideType: str = Field("Image", description="SlideType to record in details, default 'Image'")
     presentationType: str = Field("Design", description="Master PresentationType, default 'Design'")
+
+
+class BSRCreatePresentationMetadata(BaseModel):
+    """Metadata payload for BSR presentation creation.
+
+    This model handles BSR-specific presentation creation with slide image generation.
+    """
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "project_name": "BSR_Project_2025",
+                "display_name": "BSR_Presentation_Q1",
+                "slide_number": 3,
+                "presentation_type": "BSR",
+                "user_name": "analyst",
+                "is_wide_ppt": 0,
+            }
+        }
+    )
+
+    project_name: str = Field(
+        ...,
+        description="Project identifier for BSR presentation"
+    )
+    display_name: str = Field(
+        ...,
+        description="Unique presentation name"
+    )
+    slide_number: int = Field(
+        ...,
+        ge=1,
+        description="Slide number where summary slide should be inserted"
+    )
+    presentation_type: str = Field(
+        "BSR",
+        description="Presentation type: 'BSR' or 'BSR-Japan'"
+    )
+    user_name: str = Field(
+        ...,
+        description="User creating the presentation"
+    )
+    is_wide_ppt: int = Field(
+        0,
+        ge=0,
+        le=1,
+        description="Wide screen format flag: 0=4:3, 1=16:9"
+    )
+
+
+class BSRCreatePresentationRequest(BaseModel):
+    """Request model for creating a BSR presentation."""
+
+    pptx_file: bytes = Field(
+        ..., description="Raw bytes for the uploaded PowerPoint file."
+    )
+    pptx_filename: str = Field(
+        "presentation.pptx",
+        description="Original filename of the PowerPoint file.",
+    )
+    project_name: str = Field(
+        ..., description="Project identifier for BSR presentation"
+    )
+    display_name: str = Field(
+        ..., description="Unique presentation name"
+    )
+    slide_number: int = Field(
+        ..., ge=1, description="Slide number where summary slide should be inserted"
+    )
+    presentation_type: str = Field(
+        "BSR", description="Presentation type: 'BSR' or 'BSR-Japan'"
+    )
+    user_name: str = Field(
+        ..., description="User creating the presentation"
+    )
+    is_wide_ppt: int = Field(
+        0, ge=0, le=1, description="Wide screen format flag: 0=4:3, 1=16:9"
+    )
+
+
+class BSRCreatePresentationResponse(BaseModel):
+    """Response model for BSR presentation creation."""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "message": "BSR Presentation created successfully",
+                "presentation_id": 12345,
+                "total_slides": 6,
+                "processing_time_seconds": 8.45,
+            }
+        }
+    )
+
+    message: str = Field(
+        ..., description="Human-readable status message"
+    )
+    presentation_id: Optional[int] = Field(
+        default=None,
+        description="Identifier of the newly created BSR presentation",
+    )
+    total_slides: int = Field(
+        0, description="Total number of slides in the presentation"
+    )
+    processing_time_seconds: float = Field(
+        ..., description="Total processing time"
+    )

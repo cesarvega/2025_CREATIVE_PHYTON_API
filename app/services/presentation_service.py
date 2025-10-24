@@ -41,10 +41,119 @@ _CACHE_TTL_SECONDS = 300  # 5 minutes
 
 class PresentationService:
     """Service for orchestrating complete presentation creation.
-    
+
     This service coordinates between multiple services (Excel, PPTX, Word, Email)
     to create complete presentations with all associated artifacts.
     """
+
+    def create_bsr_presentation(
+        self,
+        *,
+        project_name: str,
+        display_name: str,
+        slide_number: int,
+        presentation_type: str,
+        user_name: str,
+        is_wide_ppt: int,
+        pptx_content: bytes,
+        pptx_filename: str,
+    ) -> Dict[str, Any]:
+        """Create a BSR presentation from a PowerPoint file.
+
+        This method handles the complete BSR presentation creation workflow:
+        1. Validates presentation doesn't already exist
+        2. Validates display name hasn't been used
+        3. Converts PowerPoint to images
+        4. Extracts slide titles
+        5. Inserts presentation master record
+        6. Inserts presentation detail records with summary slide
+
+        Args:
+            project_name: Project identifier
+            display_name: Unique presentation name
+            slide_number: Position where summary slide will be inserted
+            presentation_type: 'BSR' or 'BSR-Japan'
+            user_name: User creating the presentation
+            is_wide_ppt: Wide screen format flag (0=4:3, 1=16:9)
+            pptx_content: PowerPoint file content bytes
+            pptx_filename: Original PowerPoint filename
+
+        Returns:
+            Dict containing:
+                - presentation_id: ID of created presentation
+                - total_slides: Total number of slides
+
+        Raises:
+            HTTPException: If validation fails or creation errors occur
+        """
+        try:
+            logger.info(
+                "Creating BSR presentation: project=%s, display=%s, slide_number=%d",
+                project_name,
+                display_name,
+                slide_number,
+            )
+
+            # 1. Validate presentation doesn't exist
+            self._validate_bsr_presentation_not_exists(project_name, display_name)
+
+            # 2. Validate display name hasn't been used
+            self._validate_bsr_display_name_not_used(display_name)
+
+            # 3. Convert PowerPoint to images (using BSR project type)
+            logger.info("Converting PowerPoint to images")
+            pptx_data = pptx_service.convert_pptx_to_images(
+                file_content=pptx_content,
+                filename=pptx_filename,
+                display_name=display_name,  # Use display_name for BSR folder structure
+                project_type="BSR",  # Use BSR project type
+            )
+
+            # 4. Extract slide titles from PowerPoint
+            logger.info("Extracting slide titles")
+            slide_titles = self._extract_slide_titles(pptx_content, pptx_filename)
+
+            # 5. Insert presentation master record
+            logger.info("Inserting presentation master record")
+            presentation_id = self._insert_bsr_master_record(
+                project_name=project_name,
+                display_name=display_name,
+                pptx_filename=pptx_filename,
+                slide_number=slide_number,
+                presentation_type=presentation_type,
+                user_name=user_name,
+                is_wide_ppt=is_wide_ppt,
+            )
+
+            # 6. Insert presentation detail records
+            logger.info("Inserting presentation detail records")
+            total_slides = self._insert_bsr_detail_records(
+                presentation_id=presentation_id,
+                display_name=display_name,  # Use display_name for image paths
+                slide_number=slide_number,
+                slide_titles=slide_titles,
+                pptx_data=pptx_data,
+            )
+
+            logger.info(
+                "BSR presentation created successfully: ID=%d, Total Slides=%d",
+                presentation_id,
+                total_slides,
+            )
+
+            return {
+                "presentation_id": presentation_id,
+                "total_slides": total_slides,
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error("Error creating BSR presentation: %s", str(e), exc_info=True)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to create BSR presentation: {str(e)}"
+            ) from e
 
     def create_presentation(
         self, request: CreatePresentationRequest
@@ -1556,6 +1665,352 @@ class PresentationService:
                 slide.get("name_sub_group") or "",
             )
             cursor.execute(detail_sql, detail_params)
+
+    def _validate_bsr_presentation_not_exists(
+        self, project_name: str, display_name: str
+    ) -> None:
+        """Validate that BSR presentation doesn't already exist.
+
+        Args:
+            project_name: Project name to check
+            display_name: Display name to check
+
+        Raises:
+            HTTPException 400: If presentation already exists
+        """
+        try:
+            with create_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "EXEC [BI_GUIDELINES].[dbo].[BSR_CheckIfPresentationExists] ?, ?",
+                        (project_name, display_name)
+                    )
+                    row = cursor.fetchone()
+                    if row and row[0]:
+                        exists = int(row[0])
+                        if exists > 0:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"Presentation already exists for project '{project_name}' with display name '{display_name}'"
+                            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error("Error checking if BSR presentation exists: %s", str(e))
+            raise HTTPException(
+                status_code=500,
+                detail=f"Database error while checking presentation existence: {str(e)}"
+            ) from e
+
+    def _validate_bsr_display_name_not_used(self, display_name: str) -> None:
+        """Validate that BSR display name hasn't been used.
+
+        Args:
+            display_name: Display name to check
+
+        Raises:
+            HTTPException 400: If display name has been used
+        """
+        try:
+            with create_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "EXEC [BI_GUIDELINES].[dbo].[BSR_CheckIfDisplayNameHasBeenUsed] ?",
+                        (display_name,)
+                    )
+                    row = cursor.fetchone()
+                    if row and row[0]:
+                        used = int(row[0])
+                        if used > 0:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"Display name '{display_name}' has already been used"
+                            )
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error("Error checking if BSR display name is used: %s", str(e))
+            raise HTTPException(
+                status_code=500,
+                detail=f"Database error while checking display name: {str(e)}"
+            ) from e
+
+    def _extract_slide_titles(self, pptx_content: bytes, pptx_filename: str) -> List[str]:
+        """Extract slide titles from PowerPoint file.
+
+        Args:
+            pptx_content: PowerPoint file bytes
+            pptx_filename: PowerPoint filename
+
+        Returns:
+            List of slide titles (one per slide)
+        """
+        try:
+            from pptx import Presentation
+            import io
+
+            # Load presentation from bytes
+            prs = Presentation(io.BytesIO(pptx_content))
+
+            titles = []
+            for slide in prs.slides:
+                # Try to get title from title placeholder
+                title = ""
+                if slide.shapes.title:
+                    title = slide.shapes.title.text.strip()
+
+                # If no title found, try to find any text in the slide
+                if not title:
+                    for shape in slide.shapes:
+                        if hasattr(shape, "text") and shape.text:
+                            title = shape.text.strip()
+                            break
+
+                # If still no title, use a default
+                if not title:
+                    title = f"Slide {len(titles) + 1}"
+
+                titles.append(title)
+
+            logger.info("Extracted %d slide titles from PowerPoint", len(titles))
+            return titles
+
+        except Exception as e:
+            logger.error("Error extracting slide titles: %s", str(e))
+            # Return empty list on error - we'll use default titles
+            return []
+
+    def _insert_bsr_master_record(
+        self,
+        *,
+        project_name: str,
+        display_name: str,
+        pptx_filename: str,
+        slide_number: int,
+        presentation_type: str,
+        user_name: str,
+        is_wide_ppt: int,
+    ) -> int:
+        """Insert BSR presentation master record.
+
+        Args:
+            project_name: Project identifier
+            display_name: Presentation display name
+            pptx_filename: PowerPoint filename
+            slide_number: Slide number for summary insertion
+            presentation_type: 'BSR' or 'BSR-Japan'
+            user_name: User creating presentation
+            is_wide_ppt: Wide screen flag
+
+        Returns:
+            Presentation ID of created record
+
+        Raises:
+            HTTPException: If insertion fails
+        """
+        try:
+            with create_connection() as conn:
+                with conn.cursor() as cursor:
+                    # Delete existing presentation if it exists
+                    cursor.execute(
+                        "EXEC [BI_GUIDELINES].[dbo].[bsr_DeletePresentation] ?, ?",
+                        (project_name, display_name)
+                    )
+
+                    # Insert master record (using positional parameters)
+                    # Parameters: ProjectName, DisplayName, PowerPointPath, Param4, Param5, Param6,
+                    #             SlideNumber, PresentationType, UserName, IsWidePPT
+                    master_sql = """
+                        EXEC [BI_GUIDELINES].[dbo].[bsr_InsertPresentationMaster]
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?;
+                    """
+
+                    cursor.execute(
+                        master_sql,
+                        (
+                            project_name,       # @ProjectName
+                            display_name,       # @DisplayName
+                            pptx_filename,      # @PowerPointPath
+                            None,               # @Param4 - DBNull.Value
+                            None,               # @Param5 - DBNull.Value
+                            None,               # @Param6 - DBNull.Value
+                            slide_number,       # @SlideNumber
+                            presentation_type,  # @PresentationType
+                            user_name,          # @UserName
+                            is_wide_ppt,        # @IsWidePPT
+                        )
+                    )
+
+                    # Get presentation ID
+                    presentation_id = None
+                    while True:
+                        try:
+                            row = cursor.fetchone()
+                            if row:
+                                presentation_id = int(row[0])
+                                logger.info("BSR PresentationId created: %s", presentation_id)
+                                break
+                        except Exception:
+                            pass
+                        if not cursor.nextset():
+                            break
+
+                    # Fallback lookup if stored procedure doesn't return ID
+                    if not presentation_id:
+                        # Try with ProjectName column first
+                        cursor.execute(
+                            """
+                            SELECT TOP 1 PresentationId
+                            FROM [BI_GUIDELINES].[dbo].[bsr_Master]
+                            WHERE ProjectName = ? AND DisplayName = ?
+                            ORDER BY PresentationId DESC
+                            """,
+                            (project_name, display_name)
+                        )
+                        row = cursor.fetchone()
+                        if row and row[0]:
+                            presentation_id = int(row[0])
+                            logger.info("BSR PresentationId resolved via lookup: %s", presentation_id)
+
+                    if not presentation_id:
+                        raise HTTPException(
+                            status_code=500,
+                            detail="Could not get PresentationId from BSR master record"
+                        )
+
+                    conn.commit()
+                    return presentation_id
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error("Error inserting BSR master record: %s", str(e))
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to insert BSR master record: {str(e)}"
+            ) from e
+
+    def _insert_bsr_detail_records(
+        self,
+        *,
+        presentation_id: int,
+        display_name: str,
+        slide_number: int,
+        slide_titles: List[str],
+        pptx_data: Dict[str, Any],
+    ) -> int:
+        """Insert BSR presentation detail records with summary slide.
+
+        Args:
+            presentation_id: ID of presentation master record
+            display_name: Display name for image paths (folder name)
+            slide_number: Position where summary slide will be inserted
+            slide_titles: List of slide titles extracted from PowerPoint
+            pptx_data: Converted PPTX data with image paths
+
+        Returns:
+            Total number of slides inserted
+
+        Raises:
+            HTTPException: If insertion fails
+        """
+        try:
+            with create_connection() as conn:
+                with conn.cursor() as cursor:
+                    # Using positional parameters for bsr_InsertPresentationDetail
+                    # Parameters: PresentationId, SlideNumber, SlideType, BGImagePath, SlideTitle,
+                    #             Param6, Param7, Param8, Param9, Param10, Param11, Param12, BGTemplateId
+                    detail_sql = """
+                        EXEC [BI_GUIDELINES].[dbo].[bsr_InsertPresentationDetail]
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?;
+                    """
+
+                    total_slides = 0
+                    images = pptx_data.get("images", [])
+
+                    # Insert slides before summary position
+                    for idx in range(min(slide_number - 1, len(images))):
+                        total_slides += 1
+                        title = slide_titles[idx] if idx < len(slide_titles) else f"Slide {idx + 1}"
+                        image_path = f"BRS_slides/{display_name}/{total_slides:03d}.jpg"
+
+                        cursor.execute(
+                            detail_sql,
+                            (
+                                presentation_id,  # @PresentationId
+                                total_slides,     # @SlideNumber
+                                "Image",          # @SlideType
+                                image_path,       # @BGImagePath
+                                title,            # @SlideTitle
+                                None,             # @Param6
+                                "",               # @Param7
+                                "",               # @Param8
+                                "",               # @Param9
+                                "",               # @Param10
+                                "",               # @Param11
+                                "",               # @Param12
+                                0,                # @BGTemplateId
+                            )
+                        )
+
+                    # Insert summary slide at specified position
+                    total_slides += 1
+                    summary_image_path = f"BRS_slides/{display_name}/{total_slides:03d}.jpg"
+
+                    cursor.execute(
+                        detail_sql,
+                        (
+                            presentation_id,      # @PresentationId
+                            total_slides,         # @SlideNumber
+                            "NameSummary",        # @SlideType
+                            summary_image_path,   # @BGImagePath
+                            "Brainstorm",         # @SlideTitle
+                            None,                 # @Param6
+                            "",                   # @Param7
+                            "",                   # @Param8
+                            "",                   # @Param9
+                            "",                   # @Param10
+                            "",                   # @Param11
+                            "",                   # @Param12
+                            0,                    # @BGTemplateId
+                        )
+                    )
+
+                    # Insert remaining slides after summary
+                    for idx in range(slide_number - 1, len(images)):
+                        total_slides += 1
+                        title = slide_titles[idx] if idx < len(slide_titles) else f"Slide {idx + 1}"
+                        image_path = f"BRS_slides/{display_name}/{total_slides:03d}.jpg"
+
+                        cursor.execute(
+                            detail_sql,
+                            (
+                                presentation_id,  # @PresentationId
+                                total_slides,     # @SlideNumber
+                                "Image",          # @SlideType
+                                image_path,       # @BGImagePath
+                                title,            # @SlideTitle
+                                None,             # @Param6
+                                "",               # @Param7
+                                "",               # @Param8
+                                "",               # @Param9
+                                "",               # @Param10
+                                "",               # @Param11
+                                "",               # @Param12
+                                0,                # @BGTemplateId
+                            )
+                        )
+
+                    conn.commit()
+                    logger.info("Inserted %d BSR detail records", total_slides)
+                    return total_slides
+
+        except Exception as e:
+            logger.error("Error inserting BSR detail records: %s", str(e))
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to insert BSR detail records: {str(e)}"
+            ) from e
 
 
 # Global presentation service instance
