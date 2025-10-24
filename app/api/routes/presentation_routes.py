@@ -22,6 +22,8 @@ from app.models.presentation_models import (
     SimpleDWMetadata,
     PresentationBuildMetadata,
     PresentationBuildResponse,
+    GenerateBackupRequest,
+    GenerateBackupResponse,
 )
 from app.models.nw_reports_models import (
     CreateFeedbackTemplateRequest,
@@ -42,6 +44,7 @@ from app.utils.download_utils import (
     decode_download_token,
     guess_media_type,
 )
+from pathlib import Path
 from app.utils.logging_utils import get_logger
 from app.api.dependencies import (
     validate_project_type,
@@ -1345,6 +1348,214 @@ async def create_feedback_template(request: CreateFeedbackTemplateRequest) -> Cr
         raise HTTPException(
             status_code=500,
             detail=f"Failed to generate feedback template: {str(e)}"
+        ) from e
+
+
+@router.post(
+    "/backup",
+    response_model=GenerateBackupResponse,
+    summary="Generate backup PowerPoint from saved files",
+    description=(
+        "Generate a complete PowerPoint backup presentation from previously saved Excel and PPTX files.\n\n"
+        "This endpoint allows users to generate the backup PowerPoint file at a later time, "
+        "even if they didn't select the 'create_backup' option during the initial presentation creation.\n\n"
+        "**How it works:**\n"
+        "1. Retrieves presentation metadata from the database using the presentation_id\n"
+        "2. Loads the saved original Excel file (saved during initial creation)\n"
+        "3. Loads the saved original PowerPoint template file\n"
+        "4. Processes the Excel data and generates slides\n"
+        "5. Creates a complete PowerPoint backup combining:\n"
+        "   - Original PPTX slides (before page_number)\n"
+        "   - Dynamically generated slides from Excel data\n"
+        "   - Original PPTX slides (after generated content)\n\n"
+        "**Requirements:**\n"
+        "- The presentation must exist in the database\n"
+        "- Original Excel file must have been saved (automatic since this update)\n"
+        "- Original PowerPoint template must exist\n\n"
+        "**Returns:** Complete PowerPoint backup file with download token"
+    ),
+    response_description=(
+        "Generation status with file path, filename, total slides, and secure download token. "
+        "Use the download token with the /presentations/files/{token} endpoint to retrieve the file."
+    ),
+    responses={
+        200: {
+            "description": "Backup generation response (success or missing files)",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "success": {
+                            "summary": "Backup generated successfully",
+                            "value": {
+                                "success": True,
+                                "message": "Backup presentation generated successfully",
+                                "presentation_id": 12345,
+                                "printable_path": "C:/inetpub/wwwroot/nw2/nw_slides/TestProject/Presentations/backup_20250123_143022.pptx",
+                                "file_name": "backup_20250123_143022.pptx",
+                                "download_token": "eyJ0eXAiOiJKV1QiLCJhbGc...",
+                                "total_slides": "24",
+                                "warnings": "None",
+                                "missing_files": []
+                            }
+                        },
+                        "missing_files": {
+                            "summary": "Required files missing",
+                            "value": {
+                                "success": False,
+                                "message": "Cannot generate backup: 2 required file(s) missing. Please contact IT to upload the missing files.",
+                                "presentation_id": 12345,
+                                "printable_path": None,
+                                "file_name": None,
+                                "download_token": None,
+                                "total_slides": None,
+                                "warnings": "Missing 2 required file(s)",
+                                "missing_files": [
+                                    {
+                                        "file_type": "Excel",
+                                        "expected_path": "C:/inetpub/wwwroot/nw2/nw_slides/TestProject/original_data.xlsx",
+                                        "instructions": "Please upload the original Excel file to: C:/inetpub/wwwroot/nw2/nw_slides/TestProject/original_data.xlsx"
+                                    },
+                                    {
+                                        "file_type": "PowerPoint",
+                                        "expected_path": "C:/inetpub/wwwroot/nw2/nw_slides/TestProject/template.pptx",
+                                        "instructions": "Please upload the original PowerPoint template to: C:/inetpub/wwwroot/nw2/nw_slides/TestProject/template.pptx"
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            },
+        },
+        404: {
+            "description": "Presentation not found in database",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Presentation with ID 12345 not found"}
+                }
+            },
+        },
+        500: {
+            "description": "Unexpected error during backup generation",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Failed to generate backup: PowerPoint automation error"}
+                }
+            },
+        },
+    },
+)
+async def generate_backup(request: GenerateBackupRequest) -> GenerateBackupResponse:
+    """Generate a backup PowerPoint presentation from saved files.
+
+    This endpoint enables deferred backup generation. Users who didn't create
+    a backup during initial presentation creation can generate it later using
+    this endpoint.
+
+    Args:
+        request: GenerateBackupRequest with presentation_id
+
+    Returns:
+        GenerateBackupResponse with:
+            - success: Boolean indicating if generation succeeded
+            - message: Descriptive message
+            - presentation_id: ID of the presentation
+            - printable_path: Full path to generated .pptx file
+            - file_name: Name of the generated file
+            - download_token: Secure token for downloading the file
+            - total_slides: Total number of slides in the presentation
+            - warnings: Any warnings encountered during generation
+
+    Raises:
+        HTTPException 404: If presentation or required files not found
+        HTTPException 500: If backup generation fails
+    """
+    try:
+        logger.info(
+            "Received generate backup request: presentation_id=%d",
+            request.presentation_id,
+        )
+
+        # Generate backup using service
+        result = presentation_service.generate_backup_presentation(
+            presentation_id=request.presentation_id
+        )
+
+        # Check if there are missing files
+        missing_files = result.get("missing_files", [])
+
+        if missing_files:
+            # Files are missing - return response with missing file details
+            logger.warning(
+                "Cannot generate backup for presentation %d: %d file(s) missing",
+                request.presentation_id,
+                len(missing_files)
+            )
+
+            return GenerateBackupResponse(
+                success=False,
+                message=f"Cannot generate backup: {len(missing_files)} required file(s) missing. Please contact IT to upload the missing files.",
+                presentation_id=request.presentation_id,
+                printable_path=None,
+                file_name=None,
+                download_token=None,
+                total_slides=None,
+                warnings=result.get("warnings", "None"),
+                missing_files=missing_files,
+            )
+
+        # Extract file path from result
+        printable_path = result.get("printable_path", "")
+
+        if not printable_path:
+            raise HTTPException(
+                status_code=500,
+                detail="Backup generation succeeded but no file path was returned"
+            )
+
+        # Convert path string to Path object
+        file_path = Path(printable_path)
+
+        if not file_path.exists():
+            raise HTTPException(
+                status_code=500,
+                detail=f"Backup file was generated but not found at: {printable_path}"
+            )
+
+        # Create download token
+        download_token = create_download_token(file_path)
+
+        logger.info(
+            "Backup generated successfully for presentation %d: %s",
+            request.presentation_id,
+            file_path.name
+        )
+
+        return GenerateBackupResponse(
+            success=True,
+            message="Backup presentation generated successfully",
+            presentation_id=request.presentation_id,
+            printable_path=printable_path,
+            file_name=file_path.name,
+            download_token=download_token,
+            total_slides=result.get("total_slides", "0"),
+            warnings=result.get("warnings", "None"),
+            missing_files=[],
+        )
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.error(
+            "Error generating backup for presentation %d: %s",
+            request.presentation_id,
+            str(e),
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate backup: {str(e)}"
         ) from e
 
 

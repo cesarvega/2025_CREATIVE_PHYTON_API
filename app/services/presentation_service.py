@@ -61,15 +61,19 @@ class PresentationService:
         start_time = time.time()
 
         try:
-            # 1. Process Excel file
-            logger.info("Processing Excel file: %s", request.excel_filename)
-            excel_data = self._process_excel_file(request)
-
-            # 2. Convert PPTX file
+            # 1. Convert PPTX file (this creates the project folder)
             logger.info("Converting PPTX file: %s", request.pptx_filename)
             pptx_data = self._convert_pptx_file(request)
 
-            # 3. Generate slides from Excel arrays
+            # 2. Save original Excel file for future backup generation (after folder is created)
+            logger.info("Saving original Excel file")
+            excel_relative_path = self._save_original_excel(request)
+
+            # 3. Process Excel file
+            logger.info("Processing Excel file: %s", request.excel_filename)
+            excel_data = self._process_excel_file(request)
+
+            # 4. Generate slides from Excel arrays
             logger.info("Generating slides from Excel data")
             slides_data = self._generate_slides_from_excel(
                 excel_data=excel_data,
@@ -77,7 +81,8 @@ class PresentationService:
                 request=request,
             )
 
-            # 4. Template rotation no longer used - backgrounds handled differently
+            # Store Excel path in slides_data for database persistence
+            slides_data["excel_file"] = excel_relative_path
 
             logger.info(
                 "Slides data generated: %d detail items, background=%s",
@@ -227,6 +232,254 @@ class PresentationService:
             logger.error("Error checking if presentation exists: %s", e, exc_info=True)
             raise HTTPException(status_code=500, detail="Database error while checking for presentation.") from e
 
+    def generate_backup_presentation(
+        self, presentation_id: int
+    ) -> Dict[str, Any]:
+        """
+        Generate a backup PowerPoint presentation from saved Excel and PPTX files.
+
+        This method retrieves a previously created presentation from the database,
+        reads the saved original Excel and PowerPoint files, and regenerates the
+        complete PowerPoint backup file.
+
+        Args:
+            presentation_id: The ID of the presentation to generate backup for
+
+        Returns:
+            Dict containing:
+                - presentation_id: ID of the presentation
+                - printable_path: Path to generated .pptx file
+                - macro_path: Path to generated .pptm file (if applicable)
+                - total_slides: Total number of slides in the presentation
+                - warnings: List of any warnings during generation
+
+        Raises:
+            HTTPException: If presentation not found, files missing, or generation fails
+        """
+        try:
+            logger.info("Generating backup for presentation ID: %d", presentation_id)
+
+            # 1. Retrieve presentation information from database
+            with create_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        """
+                        SELECT
+                            Project,
+                            DisplayName,
+                            MainPptFileName,
+                            NameCandidateFileName,
+                            NameCandidateBGType,
+                            NameCandidateBGName,
+                            NameCandidateStartingSlide,
+                            PresentationType,
+                            UploadedBy,
+                            BSRDisplayName,
+                            isParticipantsVote,
+                            isWideScreenPPT,
+                            isAWSLinkReq
+                        FROM [BI_GUIDELINES].[dbo].[nw_Master]
+                        WHERE PresentationId = ?
+                        """,
+                        (presentation_id,)
+                    )
+
+                    row = cursor.fetchone()
+
+                    if not row:
+                        raise HTTPException(
+                            status_code=404,
+                            detail=f"Presentation with ID {presentation_id} not found"
+                        )
+
+                    # Extract presentation metadata
+                    project = row[0]
+                    display_name = row[1]
+                    main_ppt_filename = row[2]
+                    excel_filename = row[3]
+                    background_type = row[4] or "Default"
+                    background_name = row[5] or "Default"
+                    page_number = row[6] or 1
+                    presentation_type = row[7] or "Normal"
+                    user_name = row[8] or ""
+                    mobile_link_bsr = row[9] or ""
+                    participant_vote = row[10] or 0
+                    is_wide_ppt = row[11] or 0
+                    is_aws_email = row[12] or 0
+
+                    logger.info(
+                        "Retrieved presentation info: project=%s, display=%s, type=%s",
+                        project,
+                        display_name,
+                        presentation_type
+                    )
+
+            # 2. Resolve file paths and check for missing files
+            output_base, _ = resolve_project_output(
+                display_name,
+                "NW",  # Default to NW project type
+                fallback_subdir="generated_presentations",
+            )
+
+            # Check for missing files
+            missing_files = []
+
+            # Check Excel file (try with the filename from DB first, then look for any .xlsx/.xls)
+            excel_path = None
+            if excel_filename:
+                excel_path = output_base / excel_filename
+                if not excel_path.exists():
+                    # Try to find any Excel file
+                    excel_files = list(output_base.glob("*.xlsx")) + list(output_base.glob("*.xls"))
+                    if excel_files:
+                        excel_path = excel_files[0]
+                        logger.info("Found alternate Excel file: %s", excel_path)
+                    else:
+                        logger.warning("Excel file not found: %s", excel_path)
+                        missing_files.append({
+                            "file_type": "Excel",
+                            "expected_path": str(excel_path),
+                            "instructions": f"Please upload the original Excel file to: {excel_path}"
+                        })
+                        excel_path = None
+            else:
+                # No filename in database, try to find any Excel file
+                excel_files = list(output_base.glob("*.xlsx")) + list(output_base.glob("*.xls"))
+                if excel_files:
+                    excel_path = excel_files[0]
+                    logger.info("Found Excel file (no filename in DB): %s", excel_path)
+                else:
+                    expected_path = output_base / "data.xlsx"
+                    logger.warning("No Excel file found in: %s", output_base)
+                    missing_files.append({
+                        "file_type": "Excel",
+                        "expected_path": str(expected_path),
+                        "instructions": f"Please upload the original Excel file to: {expected_path}"
+                    })
+                    excel_path = None
+
+            # Check PowerPoint template file
+            pptx_path = None
+            if main_ppt_filename:
+                pptx_path = output_base / main_ppt_filename
+                if not pptx_path.exists():
+                    # Try alternate naming
+                    pptx_files = list(output_base.glob("*.pptx"))
+                    # Filter out generated backups (they usually have timestamps)
+                    pptx_files = [f for f in pptx_files if "Presentations" not in str(f)]
+                    if pptx_files:
+                        pptx_path = pptx_files[0]
+                        logger.info("Found alternate PPTX file: %s", pptx_path)
+                    else:
+                        logger.warning("PowerPoint file not found: %s", pptx_path)
+                        missing_files.append({
+                            "file_type": "PowerPoint",
+                            "expected_path": str(pptx_path),
+                            "instructions": f"Please upload the original PowerPoint template to: {pptx_path}"
+                        })
+                        pptx_path = None
+            else:
+                # No filename in database, try to find any PPTX
+                pptx_files = list(output_base.glob("*.pptx"))
+                # Filter out generated backups
+                pptx_files = [f for f in pptx_files if "Presentations" not in str(f)]
+                if pptx_files:
+                    pptx_path = pptx_files[0]
+                    logger.info("Found PPTX file (no filename in DB): %s", pptx_path)
+                else:
+                    expected_path = output_base / "template.pptx"
+                    logger.warning("No PowerPoint file found in: %s", output_base)
+                    missing_files.append({
+                        "file_type": "PowerPoint",
+                        "expected_path": str(expected_path),
+                        "instructions": f"Please upload the original PowerPoint template to: {expected_path}"
+                    })
+
+            # If any files are missing, return early with detailed information
+            if missing_files:
+                logger.warning(
+                    "Cannot generate backup for presentation %d: %d file(s) missing",
+                    presentation_id,
+                    len(missing_files)
+                )
+                return {
+                    "presentation_id": presentation_id,
+                    "printable_path": None,
+                    "macro_path": None,
+                    "total_slides": None,
+                    "warnings": f"Missing {len(missing_files)} required file(s)",
+                    "missing_files": missing_files,
+                }
+
+            logger.info("Found Excel file: %s", excel_path)
+            logger.info("Found PPTX file: %s", pptx_path)
+
+            # 3. Read file contents
+            with open(excel_path, "rb") as f:
+                excel_content = f.read()
+
+            with open(pptx_path, "rb") as f:
+                pptx_content = f.read()
+
+            # 4. Create request object from database metadata
+            request = CreatePresentationRequest(
+                project=project,
+                display_name=display_name,
+                background_type=background_type,
+                background_name=background_name,
+                page_number=page_number,
+                presentation_type=presentation_type,
+                user_name=user_name,
+                mobile_link_bsr=mobile_link_bsr,
+                participant_vote=participant_vote,
+                is_wide_ppt=is_wide_ppt,
+                is_aws_email=is_aws_email,
+                excel_file=excel_content,
+                excel_filename=excel_path.name,
+                pptx_file=pptx_content,
+                pptx_filename=pptx_path.name,
+                create_backup=1,  # Always generate backup for this endpoint
+                has_groups=True,  # Default assumption
+                test_name_order="Default",  # Use Default ordering
+                project_type="NW",  # Default to NW
+            )
+
+            # 5. Process Excel file
+            logger.info("Processing Excel file for backup generation")
+            excel_data = self._process_excel_file(request)
+
+            # 6. Generate physical PowerPoint backup directly (skip image conversion)
+            logger.info("Generating physical PowerPoint backup")
+            ppt_files = self._generate_backup_powerpoint_direct(
+                excel_data=excel_data,
+                request=request,
+                pptx_path=pptx_path,
+            )
+
+            logger.info(
+                "Backup generation completed: %s (total slides: %s)",
+                ppt_files.get("printable_path", "N/A"),
+                ppt_files.get("total_slides", "0"),
+            )
+
+            return {
+                "presentation_id": presentation_id,
+                "printable_path": ppt_files.get("printable_path", ""),
+                "macro_path": ppt_files.get("macro_path", ""),
+                "total_slides": ppt_files.get("total_slides", "0"),
+                "warnings": ppt_files.get("warnings", "None"),
+                "missing_files": [],  # No missing files if we got here
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error("Error generating backup for presentation %d: %s", presentation_id, str(e), exc_info=True)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to generate backup: {str(e)}"
+            ) from e
+
     def _process_excel_file(
         self, request: CreatePresentationRequest
     ) -> ProcessedExcelData:
@@ -281,6 +534,217 @@ class PresentationService:
         except Exception as e:
             logger.error("Error converting PPTX file: %s", str(e))
             raise
+
+    def _save_original_excel(
+        self, request: CreatePresentationRequest
+    ) -> str:
+        """Save the original Excel file to the project folder for future backup generation.
+
+        Args:
+            request: The presentation creation request containing the Excel file
+
+        Returns:
+            str: Relative path to the saved Excel file
+        """
+        try:
+            # Resolve project output folder
+            output_base, _ = resolve_project_output(
+                request.display_name,
+                request.project_type,
+                fallback_subdir="generated_presentations",
+            )
+
+            # Ensure the directory exists
+            output_base.mkdir(parents=True, exist_ok=True)
+
+            # Save Excel file with its original filename
+            excel_path = output_base / request.excel_filename
+
+            with open(excel_path, "wb") as f:
+                f.write(request.excel_file)
+
+            logger.info("Original Excel file saved to: %s", excel_path)
+
+            # Return relative path for database storage
+            return f"nw_slides/{request.display_name}/{request.excel_filename}"
+
+        except Exception as e:
+            logger.error("Error saving original Excel file: %s", str(e))
+            raise
+
+    def _generate_backup_powerpoint_direct(
+        self,
+        *,
+        excel_data: ProcessedExcelData,
+        request: CreatePresentationRequest,
+        pptx_path: Path,
+    ) -> Dict[str, str]:
+        """
+        Generate physical PowerPoint backup directly without converting to images.
+
+        This optimized method is used by the /backup endpoint to generate only
+        the PowerPoint file without re-processing images (which already exist).
+
+        Args:
+            excel_data: Processed Excel data with candidate information
+            request: Presentation creation request
+            pptx_path: Path to the original PPTX file
+
+        Returns:
+            Dictionary with paths to generated files:
+            - printable_path: Path to .pptx file
+            - macro_path: Path to .pptm file (if generated)
+            - total_slides: Total number of slides
+            - warnings: Any warnings during generation
+        """
+        try:
+            # Build presentation build options with default templates
+            build_options = PresentationBuildOptions(
+                template_pack="BackgroundDefaultTemplate",
+                base_template="template_default_2019.pptx",
+                multi_template="template_default_withgroups2019.pptx",
+                group_template="template_default_withgroup_2019.pptx",
+                separator_template="template_default_seperator_2019.pptx",
+                summary_template="template_default_summary2019.pptx",
+                slide_start=1,
+                slide_end=None,
+                include_print_ready_version=True,
+                include_macro_version=False,
+                return_urls=False,
+            )
+
+            # Generate slides metadata from Excel (lightweight, no image processing)
+            logger.info("Generating slide metadata from Excel data")
+
+            # Create minimal slides_data structure for the builder
+            slides_data = self._generate_slides_from_excel_for_backup(
+                excel_data=excel_data,
+                request=request,
+            )
+
+            logger.info(
+                "Generating PowerPoint backup: %d slides from Excel, insert at position %d",
+                len(slides_data),
+                request.page_number,
+            )
+
+            # Generate the PowerPoint file
+            artifacts = pptx_builder_service.compose_presentation_with_original_slides(
+                request=request,
+                options=build_options,
+                details=slides_data,
+                excel_data=excel_data,
+                original_pptx_path=str(pptx_path.resolve()),
+                page_number_insert=request.page_number,
+            )
+
+            # Convert PresentationBuildArtifacts to Dict[str, str]
+            result = {
+                "printable_path": str(artifacts.printable_path) if artifacts.printable_path else "",
+                "macro_path": str(artifacts.macro_path) if artifacts.macro_path else "",
+                "total_slides": str(artifacts.total_slides),
+                "warnings": ", ".join(artifacts.warnings) if artifacts.warnings else "None",
+            }
+
+            logger.info(
+                "Backup PowerPoint generated: %d total slides, %d warnings",
+                artifacts.total_slides,
+                len(artifacts.warnings),
+            )
+
+            return result
+
+        except Exception as e:
+            logger.error("Error generating backup PowerPoint: %s", str(e))
+            raise
+
+    def _generate_slides_from_excel_for_backup(
+        self,
+        *,
+        excel_data: ProcessedExcelData,
+        request: CreatePresentationRequest,
+    ) -> List[DetailItem]:
+        """
+        Generate slide metadata from Excel for backup generation (without PPTX images).
+
+        This is a lightweight version of _generate_slides_from_excel that doesn't
+        require PPTX image data since we're only generating the PowerPoint file.
+        """
+        details: List[DetailItem] = []
+        last_group_name = ""
+        default_template = self._get_template_metadata("Default")
+        default_template_id = default_template["template_id"]
+
+        # Generate slides from Excel data only (no prefix/suffix PPTX slides)
+        slide_number = request.page_number
+        total_rows = excel_data.total_rows_processed
+
+        for index in range(total_rows):
+            marker = (excel_data.lst_types[index] or "").strip().upper()
+            category = (excel_data.lst_categories[index] or "").strip()
+            name = (excel_data.lst_names[index] or "").strip()
+            name_sub_group = (excel_data.lst_name_sub_groups[index] or "").strip()
+
+            is_group_marker = marker in GROUP_MARKERS
+            has_delimiter = "##" in name or "$$" in name
+            is_grouped_slide = bool(name_sub_group)
+
+            # Category header (category only, no other data)
+            if category and (not name and not excel_data.lst_rationales[index] and not excel_data.lst_notations[index]):
+                details.append(DetailItem(
+                    slide_number=slide_number,
+                    slide_type="Image",
+                    slide_bg_file_name="",
+                    slide_description=category,
+                    group_name=last_group_name,
+                    category=category,
+                    name=name,
+                    rationale=excel_data.lst_rationales[index],
+                    notation=excel_data.lst_notations[index],
+                    kana=excel_data.lst_kana[index],
+                    logo_filename=excel_data.lst_logos[index],
+                    template_id=0,
+                    name_sub_group=name_sub_group,
+                ))
+                slide_number += 1
+
+            # Group header slide
+            elif is_group_marker:
+                detail = self._create_group_slide(
+                    excel_data=excel_data,
+                    index=index,
+                    slide_number=slide_number,
+                    request=request,
+                    default_template_id=default_template_id,
+                )
+                last_group_name = detail.group_name or last_group_name
+                details.append(detail)
+                slide_number += 1
+
+            # Grouped or individual slide
+            elif is_grouped_slide or has_delimiter or name:
+                detail = self._create_individual_slide(
+                    excel_data=excel_data,
+                    index=index,
+                    slide_number=slide_number,
+                    request=request,
+                    current_group=last_group_name,
+                    default_template_id=default_template_id,
+                )
+                details.append(detail)
+                slide_number += 1
+
+        # Summary slide for NW/DW
+        if request.project_type.lower() in {"nw", "dw"}:
+            summary_slide = self._create_summary_slide(
+                slide_number=slide_number,
+                last_group=last_group_name,
+                request=request,
+                default_template_id=default_template_id,
+            )
+            details.append(summary_slide)
+
+        return details
 
     def _generate_physical_powerpoint(
         self,

@@ -667,6 +667,74 @@ class PresentationBuildResponse(BaseModel):
     )
 
 
+# --- Backup generation models ---
+class GenerateBackupRequest(BaseModel):
+    """Request model for generating a backup PowerPoint presentation."""
+
+    presentation_id: int = Field(
+        ...,
+        description="The ID of the presentation to generate a backup for",
+        gt=0
+    )
+
+
+class GenerateBackupResponse(BaseModel):
+    """Response model for backup presentation generation."""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "success": True,
+                "message": "Backup presentation generated successfully",
+                "presentation_id": 12345,
+                "printable_path": "C:/inetpub/wwwroot/nw2/nw_slides/TestProject/Presentations/backup_20250123_143022.pptx",
+                "file_name": "backup_20250123_143022.pptx",
+                "download_token": "eyJ0eXAiOiJKV1QiLCJhbGc...",
+                "total_slides": 24,
+                "warnings": "None",
+                "missing_files": []
+            }
+        }
+    )
+
+    success: bool = Field(
+        ...,
+        description="Indicates if the backup generation was successful"
+    )
+    message: str = Field(
+        ...,
+        description="Human-readable status message"
+    )
+    presentation_id: int = Field(
+        ...,
+        description="ID of the presentation for which backup was generated"
+    )
+    printable_path: Optional[str] = Field(
+        default=None,
+        description="Full file path to the generated PowerPoint backup (null if generation failed)"
+    )
+    file_name: Optional[str] = Field(
+        default=None,
+        description="Name of the generated backup file (null if generation failed)"
+    )
+    download_token: Optional[str] = Field(
+        default=None,
+        description="Secure download token for retrieving the file via API"
+    )
+    total_slides: Optional[str] = Field(
+        default=None,
+        description="Total number of slides in the generated presentation (null if generation failed)"
+    )
+    warnings: str = Field(
+        default="None",
+        description="Any warnings encountered during generation"
+    )
+    missing_files: List[Dict[str, str]] = Field(
+        default_factory=list,
+        description="List of missing files required for backup generation. Each entry contains 'file_type', 'expected_path', and 'instructions'."
+    )
+
+
 # --- Simplified DW metadata model ---
 class SimpleDWMetadata(BaseModel):
     """Minimal metadata for the simplified DW endpoint.

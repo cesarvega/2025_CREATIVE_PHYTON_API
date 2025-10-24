@@ -627,13 +627,21 @@ class PPTXBuilderService:
             slides = target_presentation.Slides
             dest_count = getattr(slides, "Count", 0)
             insert_index = dest_count if dest_count > 0 else 0
-            slide_range = slides.InsertFromFile(
+            result = slides.InsertFromFile(
                 str(template_path.resolve()),
                 insert_index,
                 1,
                 1,
             )
-            return slide_range.Item(1)
+
+            # InsertFromFile can return either a SlideRange object or an integer
+            # If it's an integer, it's the index of the inserted slide
+            if isinstance(result, int):
+                # Get the slide by index
+                return slides.Item(result)
+            else:
+                # It's a SlideRange, get the first item
+                return result.Item(1)
         except Exception as fallback_error:  # pylint: disable=broad-except
             logger.error(
                 "InsertFromFile fallback failed after copy error %s: %s",

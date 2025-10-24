@@ -526,6 +526,9 @@ class BIGuidelinesService:
                 "{CALL [BI_GUIDELINES].[dbo].[NW_UpdateMP3FilePath](?)}",
                 (display_name,)
             )
+            
+            # Commit the transaction
+            cursor.connection.commit()
 
             logger.info(
                 "BI_GUIDELINES - Successfully reloaded sounds for project: %s",
