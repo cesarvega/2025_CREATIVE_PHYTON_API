@@ -1,4 +1,4 @@
-"""Routes for presentation creation and assembly orchestration."""
+﻿"""Routes for presentation creation and assembly orchestration."""
 
 import base64
 import time
@@ -34,6 +34,11 @@ from app.models.nw_reports_models import (
     DownloadResultsRequest,
     DownloadResultsResponse,
 )
+from app.models.bsr_reports_models import (
+    BSRGenerateReportRequest,
+    BSRGenerateReportResponse,
+)
+from app.services.bsr_report_orchestrator_service import bsr_report_orchestrator_service as bsr_report_orchestrator
 from app.models.response_models import ReplaceProjectImagesResponse, CreateSimpleDWResponse
 from app.services.presentation_service import presentation_service
 from app.services.report_orchestrator_service import report_orchestrator_service
@@ -145,8 +150,8 @@ async def create_presentation(
     - `include_macro_version`: Generate .pptm file (default: false)
 
     The service then executes the full pipeline:
-    Excel processing → PPTX conversion → slide generation → template application →
-    database persistence → [optional] physical PowerPoint generation.
+    Excel processing â†’ PPTX conversion â†’ slide generation â†’ template application â†’
+    database persistence â†’ [optional] physical PowerPoint generation.
     """
     try:
         # Validate Excel file
@@ -1156,21 +1161,21 @@ async def test_table_layout(names: list[str]) -> dict:
 @router.post(
     "/download-results",
     response_model=DownloadResultsResponse,
-    summary="Descargar resultados NW (genera Excel y Word en ZIP)",
+    summary="Download NW results (generates Excel and Word in a ZIP)",
     description=(
-        "Genera siempre dos archivos para la presentación indicada y los empaqueta en un archivo ZIP:\n\n"
-        "- **Excel**: Workbook de resultados (retained, new names, explore/avoid, notes) y, si corresponde, hojas de votes y participants (lógica interna).\n"
-        "- **Word**: Reporte NW basado en plantilla, con tablas y gráfico.\n\n"
-        "**Salida**: Archivo ZIP que contiene ambos reportes (Excel y Word).\n\n"
-        "Entrada mínima: solo `presentation_id`. El endpoint resuelve internamente qué hojas incluir y devuelve un token de descarga para el archivo ZIP."
+        "Always generates two files for the specified presentation and packages them in a ZIP file:\n\n"
+        "- **Excel**: Results workbook (retained, new names, explore/avoid, notes) and, when applicable, votes and participants sheets (internal logic).\n"
+        "- **Word**: NW report based on a template, with tables and chart.\n\n"
+        "**Output**: ZIP file that contains both reports (Excel and Word).\n\n"
+        "Minimum input: only `presentation_id`. The endpoint resolves which sheets to include and returns a download token for the ZIP file."
     ),
     response_description=(
-        "Estado de generación con ruta, nombre de archivo y token de descarga para el archivo ZIP. "
-        "Usa `/presentations/files/{token}` para descargarlo. El ZIP contiene ambos archivos (Excel y Word)."
+        "Generation status with path, filename, and a download token for the ZIP. "
+        "Use `/presentations/files/{token}` to download it. The ZIP contains both files (Excel and Word)."
     ),
     responses={
         200: {
-            "description": "Reportes generados en archivo ZIP (Excel y Word).",
+            "description": "Reports generated in a ZIP file (Excel and Word).",
             "content": {
                 "application/json": {
                     "example": {
@@ -1245,10 +1250,10 @@ async def download_results(request: DownloadResultsRequest) -> DownloadResultsRe
       - NW_RegionSpecificAnalytics
 
     **Word Report (report_type: "word"):**
-    - Genera un documento Word basado en plantilla
-    - Reemplaza placeholders (portada, headers, footers, cuadros de texto)
+    - Generates a Word document from a template
+    - Replaces placeholders (cover, headers, footers, text boxes)
     - Tablas pobladas por tipo (Positive, Neutral, Reconsider, New Names, Explore)
-    - Inserta gráfico de torta (By The Numbers)
+    - Inserta grÃ¡fico de torta (By The Numbers)
     - Procedimientos utilizados:
       - nw_wdValuesToReplace (placeholders)
       - nw_wdGetResults_Phonetics / nw_CombineNewNames
@@ -1868,3 +1873,78 @@ async def download_presentation_file(presentation_id: int) -> FileResponse:
             status_code=500,
             detail=f"Failed to download presentation file: {str(e)}"
         ) from e
+
+@router.post(
+    "/generate-bsr-report",
+    response_model=BSRGenerateReportResponse,
+    summary="Generate BSR Excel and Word reports",
+    description=(
+        "Generate downloadable Excel and Word reports for a BSR presentation.\n\n"
+        "**Excel Report**: Contains name candidates with categories\n"
+        "**Word Report**: Contains slide notes, attributes, and key concepts\n\n"
+        "Files are saved to: C:\\inetpub\\wwwroot\\CreativePythonAPI\\NW_Files\\downloads\\{DisplayName}.{ext}"
+    ),
+)
+async def generate_bsr_report(
+    request: BSRGenerateReportRequest
+) -> BSRGenerateReportResponse:
+    """Generate BSR reports (Excel + Word)."""
+    try:
+        start_time = time.time()
+
+        # Generate reports
+        result = bsr_report_orchestrator.generate_bsr_reports(
+            presentation_id=request.presentation_id,
+            display_name=request.display_name
+        )
+
+        processing_time = time.time() - start_time
+        # Build download tokens and an optional ZIP for both files
+        from app.utils.download_utils import create_download_token
+        import zipfile
+        from datetime import datetime
+        
+        excel_token = None
+        word_token = None
+        zip_path = None
+        zip_token = None
+        
+        try:
+            from pathlib import Path as _Path
+            excel_path = _Path(result.excel_path)
+            word_path = _Path(result.word_path) if result.word_path else None
+            if excel_path.exists():
+                excel_token = create_download_token(excel_path)
+            if word_path and word_path.exists():
+                word_token = create_download_token(word_path)
+            # Create ZIP only if both files exist
+            if excel_path.exists() and word_path and word_path.exists():
+                downloads_dir = excel_path.parent
+                base_name = (request.display_name or excel_path.stem or f"BSR_{request.presentation_id}")
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                zip_path = downloads_dir / f"{base_name}_BSR_Reports_{timestamp}.zip"
+                with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    zf.write(excel_path, arcname=excel_path.name)
+                    zf.write(word_path, arcname=word_path.name)
+                zip_token = create_download_token(zip_path)
+        except Exception as zip_exc:
+            logger.warning("Could not create tokens/ZIP for BSR reports: %s", str(zip_exc))
+
+        return BSRGenerateReportResponse(
+            message="BSR reports generated successfully",
+            excel_file=str(result.excel_path),
+            word_file=str(result.word_path),
+            processing_time_seconds=processing_time,
+            warnings=result.warnings,
+            excel_download_token=excel_token,
+            word_download_token=word_token,
+            zip_file=(str(zip_path) if zip_path else None),
+            zip_download_token=zip_token,
+        )
+    except Exception as e:
+        logger.error("Error generating BSR reports: %s", str(e), exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to generate BSR reports: {str(e)}"
+        ) from e
+

@@ -482,6 +482,49 @@ class BIGuidelinesService:
             with get_connection_scope(timeout=30) as new_cursor:
                 return _fetch_categories(new_cursor)
 
+    def update_bsr_presentation(
+        self,
+        *,
+        presentation_id: int,
+        display_name: str,
+        status: str
+    ) -> None:
+        """Update BSR presentation master details.
+
+        Executes the BSR_UpdatePresentationMaster stored procedure to update
+        an existing BSR presentation's display name and status.
+
+        Args:
+            presentation_id: The presentation ID to update
+            display_name: New display name
+            status: New status (OPEN, CLOSED, etc.)
+
+        Raises:
+            DatabaseConnectionError: If connection to database fails.
+            DatabaseTransactionError: If update fails.
+        """
+        logger.debug(
+            "BI_GUIDELINES - Updating BSR presentation %d with display_name='%s', status='%s'",
+            presentation_id,
+            display_name,
+            status
+        )
+
+        with get_connection_scope(timeout=30) as cursor:
+            # Execute BSR_UpdatePresentationMaster stored procedure
+            cursor.execute(
+                "{CALL [BI_GUIDELINES].[dbo].[BSR_UpdatePresentationMaster](?, ?, ?)}",
+                (presentation_id, display_name, status)
+            )
+
+            # Commit the transaction
+            cursor.connection.commit()
+
+            logger.info(
+                "BI_GUIDELINES - Successfully updated BSR presentation %d",
+                presentation_id
+            )
+
     def get_template_groups(self) -> Tuple[List[TemplateGroup], int]:
         """Retrieve template groups from BI_GUIDELINES database.
 

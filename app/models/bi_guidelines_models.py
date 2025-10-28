@@ -70,3 +70,38 @@ class ProjectUpdateRequest(BaseModel):
                 "bsr_display_name": "SOLE_BSR_2024"
             }
         }
+
+
+class BSRProjectUpdateRequest(BaseModel):
+    """Request model for updating BSR project presentation master details.
+
+    Maps to the BSR_UpdatePresentationMaster stored procedure which updates:
+    - DisplayName
+    - PresentationStatus
+    """
+    presentation_id: int = Field(
+        ...,
+        gt=0,
+        description="ID of the BSR presentation to update"
+    )
+    display_name: str = Field(
+        ...,
+        min_length=1,
+        max_length=100,
+        description="The new display name for the BSR presentation"
+    )
+    status: str = Field(
+        ...,
+        min_length=1,
+        max_length=20,
+        description="The new presentation status (e.g., 'OPEN', 'CLOSED')"
+    )
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "presentation_id": 12345,
+                "display_name": "Test_Presentation_Updated",
+                "status": "CLOSED"
+            }
+        }

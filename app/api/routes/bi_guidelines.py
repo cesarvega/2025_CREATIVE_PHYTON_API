@@ -14,7 +14,20 @@ from app.config.db import (
     get_connection_scope,
     get_db_connection,
 )
-from app.models.bi_guidelines_models import NWMasterRequest, ReloadProjectSoundsRequest, ProjectUpdateRequest
+from app.models.bi_guidelines_models import (
+    NWMasterRequest,
+    ReloadProjectSoundsRequest,
+    ProjectUpdateRequest,
+    BSRProjectUpdateRequest,
+)
+from app.models.nsr_models import (
+    NSRProjectConfigResponse,
+    NSRUpdateRuleRequest,
+    NSRUpdateRuleResponse,
+    NSRProjectsListResponse,
+    NSRRuleExistsResponse,
+    NSRInitializeResponse,
+)
 from app.models.presentation_models import PresentationData
 from app.models.response_models import (
     ActivePresentationsResponse,
@@ -22,6 +35,7 @@ from app.models.response_models import (
     TemplateGroupsResponse,
 )
 from app.services.bi_guidelines_service import bi_guidelines_service
+from app.services.nsr_service import nsr_service
 from app.utils.logging_utils import get_logger
 
 router = APIRouter(prefix="/bi_guidelines", tags=["BI Guidelines"])
@@ -553,6 +567,342 @@ async def update_project_details(request: ProjectUpdateRequest):
         raise HTTPException(
             status_code=500,
             detail="An unexpected error occurred while updating project details."
+        ) from e
+
+
+@router.put(
+    "/update-bsr-project",
+    summary="Update BSR project presentation master details",
+    description=(
+        "Executes the BSR_UpdatePresentationMaster stored procedure to update "
+        "the master details of an existing BSR presentation. This endpoint allows you to modify:\n\n"
+        "- Display name\n"
+        "- Presentation status (OPEN/CLOSED)\n\n"
+        "The LastUpdateDate is automatically updated in the database.\n\n"
+        "**Use case**: When BSR project details change (e.g., renaming a presentation, "
+        "changing status to CLOSED), use this endpoint to keep the database synchronized.\n\n"
+        "**Note**: When status changes to CLOSED, the application may trigger additional "
+        "processing such as email notifications."
+    ),
+)
+async def update_bsr_project(request: BSRProjectUpdateRequest):
+    """Update BSR project presentation master details.
+
+    Executes the stored procedure [dbo].[BSR_UpdatePresentationMaster] to modify
+    an existing BSR presentation's master details.
+
+    Args:
+        request: Request body containing the fields to update.
+
+    Returns:
+        Success message confirming the update operation.
+
+    Raises:
+        HTTPException: 400 if input is invalid, 500 if database error occurs.
+
+    Example usage:
+        PUT /api/bi_guidelines/update-bsr-project
+        {
+            "presentation_id": 12345,
+            "display_name": "Test_Presentation_Updated",
+            "status": "CLOSED"
+        }
+    """
+    try:
+        bi_guidelines_service.update_bsr_presentation(
+            presentation_id=request.presentation_id,
+            display_name=request.display_name,
+            status=request.status,
+        )
+
+        return {
+            "message": f"Successfully updated BSR project with ID {request.presentation_id}",
+            "presentation_id": request.presentation_id,
+            "display_name": request.display_name,
+            "status": request.status
+        }
+
+    except ValueError as e:
+        logger.error("Invalid input for update_bsr_project: %s", str(e))
+        raise HTTPException(
+            status_code=400,
+            detail=str(e)
+        ) from e
+
+    except DatabaseConnectionError as exc:
+        logger.error("Database connection failed: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="Database service temporarily unavailable."
+        ) from exc
+
+    except DatabaseTransactionError as exc:
+        logger.error(
+            "Database query failed for BSR presentation_id %d: %s",
+            request.presentation_id,
+            exc
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to update BSR project details. Please verify the presentation ID and try again."
+        ) from exc
+
+    except Exception as e:
+        logger.error(
+            "Unexpected error updating BSR presentation_id %d: %s",
+            request.presentation_id,
+            str(e),
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="An unexpected error occurred while updating BSR project details."
+        ) from e
+
+
+# --- NSR Configuration Endpoints ---
+
+
+@router.get(
+    "/nsr-config/{project_name}",
+    response_model=NSRProjectConfigResponse,
+    summary="Get NSR project rule configuration",
+    description=(
+        "Retrieve all NSR validation rules for a specific project.\n\n"
+        "**NSR Rules:**\n"
+        "- **101-105**: Contains rules (Y, H, W, J, K)\n"
+        "- **106, 108, 116, 117**: USAN validation checks\n"
+        "- **109-115**: Prefix rules (AR, DEX, ES, STR, LEV, X, RAC)\n\n"
+        "Each rule has a state:\n"
+        "- **0**: OFF (rule not active)\n"
+        "- **1**: ON (rule active)\n\n"
+        "If no configuration exists, returns empty rules list (all OFF by default)."
+    ),
+)
+async def get_nsr_project_config(project_name: str) -> NSRProjectConfigResponse:
+    """Get NSR rule configuration for a project."""
+    try:
+        rules = nsr_service.get_project_config(project_name)
+
+        return NSRProjectConfigResponse(
+            project_name=project_name,
+            rules=rules
+        )
+
+    except Exception as e:
+        logger.error(
+            "Error fetching NSR config for project '%s': %s",
+            project_name,
+            str(e),
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch NSR configuration: {str(e)}"
+        ) from e
+
+
+@router.put(
+    "/nsr-config",
+    response_model=NSRUpdateRuleResponse,
+    summary="Update NSR rule configuration",
+    description=(
+        "Update (or insert) an NSR validation rule for a project.\n\n"
+        "This endpoint automatically determines whether to INSERT or UPDATE:\n"
+        "- If the rule doesn't exist for the project → **INSERT**\n"
+        "- If the rule already exists → **UPDATE**\n\n"
+        "**Request body:**\n"
+        "```json\n"
+        "{\n"
+        '  "project_name": "ATEST01",\n'
+        '  "rule_id": 101,\n'
+        '  "is_on": 1\n'
+        "}\n"
+        "```\n\n"
+        "**Rule IDs:**\n"
+        "- **101**: Contains Y\n"
+        "- **102**: Contains H\n"
+        "- **103**: Contains W\n"
+        "- **104**: Contains J\n"
+        "- **105**: Contains K\n"
+        "- **106**: Check USAN Violation\n"
+        "- **108**: Check USAN Nomenclature\n"
+        "- **109**: Prefix AR\n"
+        "- **110**: Prefix DEX\n"
+        "- **111**: Prefix ES\n"
+        "- **112**: Prefix STR\n"
+        "- **113**: Prefix LEV\n"
+        "- **114**: Prefix X\n"
+        "- **115**: Prefix RAC\n"
+        "- **116**: Check USAN Search\n"
+        "- **117**: Check USAN MedNet"
+    ),
+)
+async def update_nsr_rule(request: NSRUpdateRuleRequest) -> NSRUpdateRuleResponse:
+    """Update or insert an NSR rule configuration."""
+    try:
+        success, operation = nsr_service.upsert_rule(
+            project_name=request.project_name,
+            rule_id=request.rule_id,
+            is_on=request.is_on
+        )
+
+        if not success:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to {operation} NSR rule {request.rule_id}"
+            )
+
+        return NSRUpdateRuleResponse(
+            message=f"NSR rule {request.rule_id} successfully {operation}d",
+            project_name=request.project_name,
+            rule_id=request.rule_id,
+            is_on=request.is_on,
+            operation=operation
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            "Error updating NSR rule (project='%s', rule=%d, is_on=%d): %s",
+            request.project_name,
+            request.rule_id,
+            request.is_on,
+            str(e),
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update NSR rule: {str(e)}"
+        ) from e
+
+
+@router.get(
+    "/nsr-projects",
+    response_model=NSRProjectsListResponse,
+    summary="Get list of active NSR projects",
+    description=(
+        "Retrieve list of active NSR project display names.\n\n"
+        "This endpoint returns all active NSR projects (both 'NSR' and 'NSR-Japan' types) "
+        "to populate dropdowns or project selection lists.\n\n"
+        "**Uses stored procedure:** `nsr_ActivePresentations`\n\n"
+        "**Fallback query:** If SP doesn't exist, queries `bsr_Master` table directly."
+    ),
+)
+async def get_nsr_projects() -> NSRProjectsListResponse:
+    """Get list of active NSR projects."""
+    try:
+        projects = nsr_service.get_active_nsr_projects()
+
+        return NSRProjectsListResponse(
+            success=True,
+            data=projects
+        )
+
+    except Exception as e:
+        logger.error(
+            "Error fetching NSR projects: %s",
+            str(e),
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch NSR projects: {str(e)}"
+        ) from e
+
+
+@router.get(
+    "/nsr-config/{project_name}/{rule_id}/exists",
+    response_model=NSRRuleExistsResponse,
+    summary="Check if NSR rule exists for project",
+    description=(
+        "Verify if a specific NSR rule already exists for a project.\n\n"
+        "This endpoint is useful for determining whether to perform an INSERT or UPDATE operation.\n\n"
+        "**Returns:**\n"
+        "- `exists: true` → Rule exists (use UPDATE)\n"
+        "- `exists: false` → Rule doesn't exist (use INSERT)\n\n"
+        "**Uses stored procedure:** `nsr_CheckTableEntry`"
+    ),
+)
+async def check_nsr_rule_exists(project_name: str, rule_id: int) -> NSRRuleExistsResponse:
+    """Check if an NSR rule exists for a project."""
+    try:
+        # Validate rule_id
+        if rule_id < 101 or rule_id > 117 or rule_id == 107:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid rule_id: {rule_id}. Must be 101-117 (except 107)"
+            )
+
+        exists = nsr_service.check_rule_exists(project_name, rule_id)
+
+        return NSRRuleExistsResponse(
+            success=True,
+            exists=exists
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            "Error checking NSR rule existence (project='%s', rule=%d): %s",
+            project_name,
+            rule_id,
+            str(e),
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to check NSR rule existence: {str(e)}"
+        ) from e
+
+
+@router.post(
+    "/nsr-config/{project_name}/initialize",
+    response_model=NSRInitializeResponse,
+    summary="Initialize all NSR rules for a project",
+    description=(
+        "Create all NSR validation rules (101-117, except 107) for a new project.\n\n"
+        "All rules are initialized in **ON** state (is_on=1) by default.\n\n"
+        "**Rules created:**\n"
+        "- **Contains:** 101, 102, 103, 104, 105\n"
+        "- **USAN:** 106, 108, 116, 117\n"
+        "- **Prefix:** 109, 110, 111, 112, 113, 114, 115\n\n"
+        "**Total:** 16 rules (107 is skipped)\n\n"
+        "**Use case:** When a new NSR project is created and needs default rule configuration."
+    ),
+)
+async def initialize_nsr_rules(project_name: str) -> NSRInitializeResponse:
+    """Initialize all NSR rules for a project."""
+    try:
+        success, rules_created = nsr_service.initialize_all_rules(project_name)
+
+        if not success:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to initialize NSR rules for project '{project_name}'"
+            )
+
+        return NSRInitializeResponse(
+            success=True,
+            message="All rules initialized successfully",
+            displayName=project_name,
+            rulesCreated=rules_created
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            "Error initializing NSR rules for project '%s': %s",
+            project_name,
+            str(e),
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to initialize NSR rules: {str(e)}"
         ) from e
 
 
