@@ -112,6 +112,12 @@ class CreatePresentationMetadata(BaseModel):
         le=1,
         description="AWS email flag (0 or 1). Default: 0",
     )
+    amazon_link_required: int = Field(
+        0,
+        ge=0,
+        le=1,
+        description="Amazon link required flag (0 or 1). Default: 0",
+    )
 
     # ===== CONTROL FLAGS (FROM FRONTEND) =====
     has_groups: bool = Field(
@@ -168,6 +174,7 @@ class CreatePresentationMetadata(BaseModel):
             participant_vote=self.participant_vote,
             is_wide_ppt=self.is_wide_ppt,
             is_aws_email=self.is_aws_email,
+            amazon_link_required=self.amazon_link_required,
             background_type=self.background_type,
             background_name=self.background_name or "",
             page_number=self.page_number,
@@ -231,6 +238,12 @@ class CreatePresentationRequest(BaseModel):
         ge=0,
         le=1,
         description="Flag enabling downstream AWS email distribution workflows (0/1).",
+    )
+    amazon_link_required: int = Field(
+        0,
+        ge=0,
+        le=1,
+        description="Amazon link required flag (0 or 1). Indicates if Amazon product links are needed.",
     )
 
     background_type: str = Field(
@@ -386,6 +399,9 @@ class PresentationData(BaseModel):
     )
     is_aws_email: int = Field(
         ..., description="Flag indicating whether AWS email processes should run."
+    )
+    amazon_link_required: int = Field(
+        default=0, description="Flag indicating if Amazon product links are required."
     )
     details: List[DetailItem] = Field(
         ..., description="Collection of slide detail records persisted in nw_Details."

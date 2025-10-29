@@ -58,30 +58,21 @@ class PresentationService:
         pptx_content: bytes,
         pptx_filename: str,
     ) -> Dict[str, Any]:
-        """Create a BSR presentation from a PowerPoint file.
-
-        This method handles the complete BSR presentation creation workflow:
-        1. Validates presentation doesn't already exist
-        2. Validates display name hasn't been used
-        3. Converts PowerPoint to images
-        4. Extracts slide titles
-        5. Inserts presentation master record
-        6. Inserts presentation detail records with summary slide
+        """
+        Create a BSR (Board Sales Request) presentation.
 
         Args:
-            project_name: Project identifier
-            display_name: Unique presentation name
-            slide_number: Position where summary slide will be inserted
-            presentation_type: 'BSR' or 'BSR-Japan'
+            project_name: Name of the project
+            display_name: Display name for the presentation
+            slide_number: Slide number where summary slide will be inserted
+            presentation_type: Type (BSR or BSR-Japan)
             user_name: User creating the presentation
-            is_wide_ppt: Wide screen format flag (0=4:3, 1=16:9)
-            pptx_content: PowerPoint file content bytes
-            pptx_filename: Original PowerPoint filename
+            is_wide_ppt: 1 for 16:9, 0 for 4:3
+            pptx_content: PowerPoint file content
+            pptx_filename: PowerPoint filename
 
         Returns:
-            Dict containing:
-                - presentation_id: ID of created presentation
-                - total_slides: Total number of slides
+            Dict with presentation_id and total_slides
 
         Raises:
             HTTPException: If validation fails or creation errors occur
@@ -102,12 +93,15 @@ class PresentationService:
 
             # 3. Convert PowerPoint to images (using BSR project type)
             logger.info("Converting PowerPoint to images")
+            # For BSR we store assets under the bipresents (bsr_slides) root
             pptx_data = pptx_service.convert_pptx_to_images(
                 file_content=pptx_content,
                 filename=pptx_filename,
                 display_name=display_name,  # Use display_name for BSR folder structure
-                project_type="BSR",  # Use BSR project type
+                project_type="bipresents",  # Ensure URLs resolve to bsr_slides
             )
+            logger.info("PPTX Data - Images: %s", pptx_data.get("images"))
+            logger.info("PPTX Data - Thumbnails: %s", pptx_data.get("thumbnails"))
 
             # 4. Extract slide titles from PowerPoint
             logger.info("Extracting slide titles")
@@ -170,17 +164,17 @@ class PresentationService:
         start_time = time.time()
 
         try:
-            # 1. Convert PPTX file (this creates the project folder)
-            logger.info("Converting PPTX file: %s", request.pptx_filename)
-            pptx_data = self._convert_pptx_file(request)
+            # 1. Process Excel file
+            logger.info("Processing Excel file: %s", request.excel_filename)
+            excel_data = self._process_excel_file(request)
 
-            # 2. Save original Excel file for future backup generation (after folder is created)
+            # 2. Save original Excel file for future backup generation
             logger.info("Saving original Excel file")
             excel_relative_path = self._save_original_excel(request)
 
-            # 3. Process Excel file
-            logger.info("Processing Excel file: %s", request.excel_filename)
-            excel_data = self._process_excel_file(request)
+            # 3. Convert PPTX file
+            logger.info("Converting PPTX file: %s", request.pptx_filename)
+            pptx_data = self._convert_pptx_file(request)
 
             # 4. Generate slides from Excel arrays
             logger.info("Generating slides from Excel data")
@@ -198,7 +192,7 @@ class PresentationService:
                 len(slides_data.get("details", [])),
                 slides_data.get("background_name"),
             )
-
+            
             # 5. Generate physical PowerPoint file (if backup requested)
             generated_files = None
             if request.create_backup == 1:
@@ -423,102 +417,33 @@ class PresentationService:
                         presentation_type
                     )
 
-            # 2. Resolve file paths and check for missing files
+            # 2. Resolve file paths
             output_base, _ = resolve_project_output(
                 display_name,
                 "NW",  # Default to NW project type
                 fallback_subdir="generated_presentations",
             )
 
-            # Check for missing files
-            missing_files = []
+            # Load saved Excel file
+            excel_path = output_base / "original_data.xlsx"
+            if not excel_path.exists():
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Original Excel file not found: {excel_path}"
+                )
 
-            # Check Excel file (try with the filename from DB first, then look for any .xlsx/.xls)
-            excel_path = None
-            if excel_filename:
-                excel_path = output_base / excel_filename
-                if not excel_path.exists():
-                    # Try to find any Excel file
-                    excel_files = list(output_base.glob("*.xlsx")) + list(output_base.glob("*.xls"))
-                    if excel_files:
-                        excel_path = excel_files[0]
-                        logger.info("Found alternate Excel file: %s", excel_path)
-                    else:
-                        logger.warning("Excel file not found: %s", excel_path)
-                        missing_files.append({
-                            "file_type": "Excel",
-                            "expected_path": str(excel_path),
-                            "instructions": f"Please upload the original Excel file to: {excel_path}"
-                        })
-                        excel_path = None
-            else:
-                # No filename in database, try to find any Excel file
-                excel_files = list(output_base.glob("*.xlsx")) + list(output_base.glob("*.xls"))
-                if excel_files:
-                    excel_path = excel_files[0]
-                    logger.info("Found Excel file (no filename in DB): %s", excel_path)
-                else:
-                    expected_path = output_base / "data.xlsx"
-                    logger.warning("No Excel file found in: %s", output_base)
-                    missing_files.append({
-                        "file_type": "Excel",
-                        "expected_path": str(expected_path),
-                        "instructions": f"Please upload the original Excel file to: {expected_path}"
-                    })
-                    excel_path = None
-
-            # Check PowerPoint template file
-            pptx_path = None
-            if main_ppt_filename:
-                pptx_path = output_base / main_ppt_filename
-                if not pptx_path.exists():
-                    # Try alternate naming
-                    pptx_files = list(output_base.glob("*.pptx"))
-                    # Filter out generated backups (they usually have timestamps)
-                    pptx_files = [f for f in pptx_files if "Presentations" not in str(f)]
-                    if pptx_files:
-                        pptx_path = pptx_files[0]
-                        logger.info("Found alternate PPTX file: %s", pptx_path)
-                    else:
-                        logger.warning("PowerPoint file not found: %s", pptx_path)
-                        missing_files.append({
-                            "file_type": "PowerPoint",
-                            "expected_path": str(pptx_path),
-                            "instructions": f"Please upload the original PowerPoint template to: {pptx_path}"
-                        })
-                        pptx_path = None
-            else:
-                # No filename in database, try to find any PPTX
+            # Load saved PowerPoint template file
+            pptx_path = output_base / main_ppt_filename if main_ppt_filename else None
+            if not pptx_path or not pptx_path.exists():
+                # Try alternate naming
                 pptx_files = list(output_base.glob("*.pptx"))
-                # Filter out generated backups
-                pptx_files = [f for f in pptx_files if "Presentations" not in str(f)]
                 if pptx_files:
                     pptx_path = pptx_files[0]
-                    logger.info("Found PPTX file (no filename in DB): %s", pptx_path)
                 else:
-                    expected_path = output_base / "template.pptx"
-                    logger.warning("No PowerPoint file found in: %s", output_base)
-                    missing_files.append({
-                        "file_type": "PowerPoint",
-                        "expected_path": str(expected_path),
-                        "instructions": f"Please upload the original PowerPoint template to: {expected_path}"
-                    })
-
-            # If any files are missing, return early with detailed information
-            if missing_files:
-                logger.warning(
-                    "Cannot generate backup for presentation %d: %d file(s) missing",
-                    presentation_id,
-                    len(missing_files)
-                )
-                return {
-                    "presentation_id": presentation_id,
-                    "printable_path": None,
-                    "macro_path": None,
-                    "total_slides": None,
-                    "warnings": f"Missing {len(missing_files)} required file(s)",
-                    "missing_files": missing_files,
-                }
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Original PowerPoint file not found in: {output_base}"
+                    )
 
             logger.info("Found Excel file: %s", excel_path)
             logger.info("Found PPTX file: %s", pptx_path)
@@ -549,7 +474,7 @@ class PresentationService:
                 pptx_filename=pptx_path.name,
                 create_backup=1,  # Always generate backup for this endpoint
                 has_groups=True,  # Default assumption
-                test_name_order="Default",  # Use Default ordering
+                test_name_order="",
                 project_type="NW",  # Default to NW
             )
 
@@ -557,12 +482,25 @@ class PresentationService:
             logger.info("Processing Excel file for backup generation")
             excel_data = self._process_excel_file(request)
 
-            # 6. Generate physical PowerPoint backup directly (skip image conversion)
+            # 6. Convert PPTX to get slide data (reuse existing conversion)
+            logger.info("Converting PPTX file for backup generation")
+            pptx_data = self._convert_pptx_file(request)
+
+            # 7. Generate slides data
+            logger.info("Generating slides data for backup")
+            slides_data = self._generate_slides_from_excel(
+                excel_data=excel_data,
+                pptx_data=pptx_data,
+                request=request,
+            )
+
+            # 8. Generate physical PowerPoint backup
             logger.info("Generating physical PowerPoint backup")
-            ppt_files = self._generate_backup_powerpoint_direct(
+            ppt_files = self._generate_physical_powerpoint(
+                slides_data=slides_data,
                 excel_data=excel_data,
                 request=request,
-                pptx_path=pptx_path,
+                pptx_data=pptx_data,
             )
 
             logger.info(
@@ -577,7 +515,6 @@ class PresentationService:
                 "macro_path": ppt_files.get("macro_path", ""),
                 "total_slides": ppt_files.get("total_slides", "0"),
                 "warnings": ppt_files.get("warnings", "None"),
-                "missing_files": [],  # No missing files if we got here
             }
 
         except HTTPException:
@@ -666,8 +603,8 @@ class PresentationService:
             # Ensure the directory exists
             output_base.mkdir(parents=True, exist_ok=True)
 
-            # Save Excel file with its original filename
-            excel_path = output_base / request.excel_filename
+            # Save Excel file with a consistent name
+            excel_path = output_base / f"original_data.xlsx"
 
             with open(excel_path, "wb") as f:
                 f.write(request.excel_file)
@@ -675,185 +612,11 @@ class PresentationService:
             logger.info("Original Excel file saved to: %s", excel_path)
 
             # Return relative path for database storage
-            return f"nw_slides/{request.display_name}/{request.excel_filename}"
+            return f"nw_slides/{request.display_name}/original_data.xlsx"
 
         except Exception as e:
             logger.error("Error saving original Excel file: %s", str(e))
             raise
-
-    def _generate_backup_powerpoint_direct(
-        self,
-        *,
-        excel_data: ProcessedExcelData,
-        request: CreatePresentationRequest,
-        pptx_path: Path,
-    ) -> Dict[str, str]:
-        """
-        Generate physical PowerPoint backup directly without converting to images.
-
-        This optimized method is used by the /backup endpoint to generate only
-        the PowerPoint file without re-processing images (which already exist).
-
-        Args:
-            excel_data: Processed Excel data with candidate information
-            request: Presentation creation request
-            pptx_path: Path to the original PPTX file
-
-        Returns:
-            Dictionary with paths to generated files:
-            - printable_path: Path to .pptx file
-            - macro_path: Path to .pptm file (if generated)
-            - total_slides: Total number of slides
-            - warnings: Any warnings during generation
-        """
-        try:
-            # Build presentation build options with default templates
-            build_options = PresentationBuildOptions(
-                template_pack="BackgroundDefaultTemplate",
-                base_template="template_default_2019.pptx",
-                multi_template="template_default_withgroups2019.pptx",
-                group_template="template_default_withgroup_2019.pptx",
-                separator_template="template_default_seperator_2019.pptx",
-                summary_template="template_default_summary2019.pptx",
-                slide_start=1,
-                slide_end=None,
-                include_print_ready_version=True,
-                include_macro_version=False,
-                return_urls=False,
-            )
-
-            # Generate slides metadata from Excel (lightweight, no image processing)
-            logger.info("Generating slide metadata from Excel data")
-
-            # Create minimal slides_data structure for the builder
-            slides_data = self._generate_slides_from_excel_for_backup(
-                excel_data=excel_data,
-                request=request,
-            )
-
-            logger.info(
-                "Generating PowerPoint backup: %d slides from Excel, insert at position %d",
-                len(slides_data),
-                request.page_number,
-            )
-
-            # Generate the PowerPoint file
-            artifacts = pptx_builder_service.compose_presentation_with_original_slides(
-                request=request,
-                options=build_options,
-                details=slides_data,
-                excel_data=excel_data,
-                original_pptx_path=str(pptx_path.resolve()),
-                page_number_insert=request.page_number,
-            )
-
-            # Convert PresentationBuildArtifacts to Dict[str, str]
-            result = {
-                "printable_path": str(artifacts.printable_path) if artifacts.printable_path else "",
-                "macro_path": str(artifacts.macro_path) if artifacts.macro_path else "",
-                "total_slides": str(artifacts.total_slides),
-                "warnings": ", ".join(artifacts.warnings) if artifacts.warnings else "None",
-            }
-
-            logger.info(
-                "Backup PowerPoint generated: %d total slides, %d warnings",
-                artifacts.total_slides,
-                len(artifacts.warnings),
-            )
-
-            return result
-
-        except Exception as e:
-            logger.error("Error generating backup PowerPoint: %s", str(e))
-            raise
-
-    def _generate_slides_from_excel_for_backup(
-        self,
-        *,
-        excel_data: ProcessedExcelData,
-        request: CreatePresentationRequest,
-    ) -> List[DetailItem]:
-        """
-        Generate slide metadata from Excel for backup generation (without PPTX images).
-
-        This is a lightweight version of _generate_slides_from_excel that doesn't
-        require PPTX image data since we're only generating the PowerPoint file.
-        """
-        details: List[DetailItem] = []
-        last_group_name = ""
-        default_template = self._get_template_metadata("Default")
-        default_template_id = default_template["template_id"]
-
-        # Generate slides from Excel data only (no prefix/suffix PPTX slides)
-        slide_number = request.page_number
-        total_rows = excel_data.total_rows_processed
-
-        for index in range(total_rows):
-            marker = (excel_data.lst_types[index] or "").strip().upper()
-            category = (excel_data.lst_categories[index] or "").strip()
-            name = (excel_data.lst_names[index] or "").strip()
-            name_sub_group = (excel_data.lst_name_sub_groups[index] or "").strip()
-
-            is_group_marker = marker in GROUP_MARKERS
-            has_delimiter = "##" in name or "$$" in name
-            is_grouped_slide = bool(name_sub_group)
-
-            # Category header (category only, no other data)
-            if category and (not name and not excel_data.lst_rationales[index] and not excel_data.lst_notations[index]):
-                details.append(DetailItem(
-                    slide_number=slide_number,
-                    slide_type="Image",
-                    slide_bg_file_name="",
-                    slide_description=category,
-                    group_name=last_group_name,
-                    category=category,
-                    name=name,
-                    rationale=excel_data.lst_rationales[index],
-                    notation=excel_data.lst_notations[index],
-                    kana=excel_data.lst_kana[index],
-                    logo_filename=excel_data.lst_logos[index],
-                    template_id=0,
-                    name_sub_group=name_sub_group,
-                ))
-                slide_number += 1
-
-            # Group header slide
-            elif is_group_marker:
-                detail = self._create_group_slide(
-                    excel_data=excel_data,
-                    index=index,
-                    slide_number=slide_number,
-                    request=request,
-                    default_template_id=default_template_id,
-                )
-                last_group_name = detail.group_name or last_group_name
-                details.append(detail)
-                slide_number += 1
-
-            # Grouped or individual slide
-            elif is_grouped_slide or has_delimiter or name:
-                detail = self._create_individual_slide(
-                    excel_data=excel_data,
-                    index=index,
-                    slide_number=slide_number,
-                    request=request,
-                    current_group=last_group_name,
-                    default_template_id=default_template_id,
-                )
-                details.append(detail)
-                slide_number += 1
-
-        # Summary slide for NW/DW
-        if request.project_type.lower() in {"nw", "dw"}:
-            summary_slide = self._create_summary_slide(
-                slide_number=slide_number,
-                last_group=last_group_name,
-                request=request,
-                default_template_id=default_template_id,
-            )
-            details.append(summary_slide)
-
-        return details
 
     def _generate_physical_powerpoint(
         self,
@@ -1669,15 +1432,7 @@ class PresentationService:
     def _validate_bsr_presentation_not_exists(
         self, project_name: str, display_name: str
     ) -> None:
-        """Validate that BSR presentation doesn't already exist.
-
-        Args:
-            project_name: Project name to check
-            display_name: Display name to check
-
-        Raises:
-            HTTPException 400: If presentation already exists
-        """
+        """Validate that BSR presentation doesn't already exist."""
         try:
             with create_connection() as conn:
                 with conn.cursor() as cursor:
@@ -1685,32 +1440,19 @@ class PresentationService:
                         "EXEC [BI_GUIDELINES].[dbo].[BSR_CheckIfPresentationExists] ?, ?",
                         (project_name, display_name)
                     )
-                    row = cursor.fetchone()
-                    if row and row[0]:
-                        exists = int(row[0])
-                        if exists > 0:
-                            raise HTTPException(
-                                status_code=400,
-                                detail=f"Presentation already exists for project '{project_name}' with display name '{display_name}'"
-                            )
+                    result = cursor.fetchone()
+                    if result and result[0] > 0:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"BSR presentation already exists: {project_name}/{display_name}"
+                        )
         except HTTPException:
             raise
         except Exception as e:
-            logger.error("Error checking if BSR presentation exists: %s", str(e))
-            raise HTTPException(
-                status_code=500,
-                detail=f"Database error while checking presentation existence: {str(e)}"
-            ) from e
+            logger.warning("Error checking BSR presentation existence: %s", str(e))
 
     def _validate_bsr_display_name_not_used(self, display_name: str) -> None:
-        """Validate that BSR display name hasn't been used.
-
-        Args:
-            display_name: Display name to check
-
-        Raises:
-            HTTPException 400: If display name has been used
-        """
+        """Validate that BSR display name hasn't been used."""
         try:
             with create_connection() as conn:
                 with conn.cursor() as cursor:
@@ -1718,67 +1460,35 @@ class PresentationService:
                         "EXEC [BI_GUIDELINES].[dbo].[BSR_CheckIfDisplayNameHasBeenUsed] ?",
                         (display_name,)
                     )
-                    row = cursor.fetchone()
-                    if row and row[0]:
-                        used = int(row[0])
-                        if used > 0:
-                            raise HTTPException(
-                                status_code=400,
-                                detail=f"Display name '{display_name}' has already been used"
-                            )
+                    result = cursor.fetchone()
+                    if result and result[0]:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"Display name already used by another project: {result[0]}"
+                        )
         except HTTPException:
             raise
         except Exception as e:
-            logger.error("Error checking if BSR display name is used: %s", str(e))
-            raise HTTPException(
-                status_code=500,
-                detail=f"Database error while checking display name: {str(e)}"
-            ) from e
+            logger.warning("Error checking BSR display name: %s", str(e))
 
     def _extract_slide_titles(self, pptx_content: bytes, pptx_filename: str) -> List[str]:
-        """Extract slide titles from PowerPoint file.
+        """Extract titles from PowerPoint slides."""
+        from io import BytesIO
+        from pptx import Presentation
 
-        Args:
-            pptx_content: PowerPoint file bytes
-            pptx_filename: PowerPoint filename
-
-        Returns:
-            List of slide titles (one per slide)
-        """
+        titles = []
         try:
-            from pptx import Presentation
-            import io
-
-            # Load presentation from bytes
-            prs = Presentation(io.BytesIO(pptx_content))
-
-            titles = []
+            prs = Presentation(BytesIO(pptx_content))
             for slide in prs.slides:
-                # Try to get title from title placeholder
                 title = ""
                 if slide.shapes.title:
-                    title = slide.shapes.title.text.strip()
-
-                # If no title found, try to find any text in the slide
-                if not title:
-                    for shape in slide.shapes:
-                        if hasattr(shape, "text") and shape.text:
-                            title = shape.text.strip()
-                            break
-
-                # If still no title, use a default
-                if not title:
-                    title = f"Slide {len(titles) + 1}"
-
+                    title = slide.shapes.title.text
                 titles.append(title)
-
-            logger.info("Extracted %d slide titles from PowerPoint", len(titles))
-            return titles
-
+            logger.info("Extracted %d slide titles", len(titles))
         except Exception as e:
             logger.error("Error extracting slide titles: %s", str(e))
-            # Return empty list on error - we'll use default titles
-            return []
+
+        return titles
 
     def _insert_bsr_master_record(
         self,
@@ -1791,57 +1501,31 @@ class PresentationService:
         user_name: str,
         is_wide_ppt: int,
     ) -> int:
-        """Insert BSR presentation master record.
-
-        Args:
-            project_name: Project identifier
-            display_name: Presentation display name
-            pptx_filename: PowerPoint filename
-            slide_number: Slide number for summary insertion
-            presentation_type: 'BSR' or 'BSR-Japan'
-            user_name: User creating presentation
-            is_wide_ppt: Wide screen flag
-
-        Returns:
-            Presentation ID of created record
-
-        Raises:
-            HTTPException: If insertion fails
-        """
+        """Insert BSR master presentation record."""
         try:
             with create_connection() as conn:
                 with conn.cursor() as cursor:
-                    # Delete existing presentation if it exists
-                    cursor.execute(
-                        "EXEC [BI_GUIDELINES].[dbo].[bsr_DeletePresentation] ?, ?",
-                        (project_name, display_name)
-                    )
+                    # Use positional parameters
+                    master_sql = "EXEC [BI_GUIDELINES].[dbo].[bsr_InsertPresentationMaster] ?, ?, ?, ?, ?, ?, ?, ?, ?, ?;"
 
-                    # Insert master record (using positional parameters)
-                    # Parameters: ProjectName, DisplayName, PowerPointPath, Param4, Param5, Param6,
-                    #             SlideNumber, PresentationType, UserName, IsWidePPT
-                    master_sql = """
-                        EXEC [BI_GUIDELINES].[dbo].[bsr_InsertPresentationMaster]
-                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?;
-                    """
-
+                    logger.info("Executing BSR master stored procedure...")
                     cursor.execute(
                         master_sql,
                         (
-                            project_name,       # @ProjectName
-                            display_name,       # @DisplayName
-                            pptx_filename,      # @PowerPointPath
-                            None,               # @Param4 - DBNull.Value
-                            None,               # @Param5 - DBNull.Value
-                            None,               # @Param6 - DBNull.Value
-                            slide_number,       # @SlideNumber
-                            presentation_type,  # @PresentationType
-                            user_name,          # @UserName
-                            is_wide_ppt,        # @IsWidePPT
+                            project_name,
+                            display_name,
+                            pptx_filename,
+                            "",  # OriginalPPTPath
+                            "",  # PPTPath
+                            "",  # XLPath
+                            slide_number,
+                            presentation_type,
+                            user_name,
+                            is_wide_ppt,
                         )
                     )
 
-                    # Get presentation ID
+                    # Try to get presentation ID from result set
                     presentation_id = None
                     while True:
                         try:
@@ -1850,27 +1534,31 @@ class PresentationService:
                                 presentation_id = int(row[0])
                                 logger.info("BSR PresentationId created: %s", presentation_id)
                                 break
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            message = str(exc)
+                            if "No results" in message and "Previous SQL" in message:
+                                logger.debug(
+                                    "BSR stored procedure returned no result set for presentation ID; applying fallback lookup."
+                                )
+                            else:
+                                logger.error("Error fetching BSR presentation ID: %s", message)
                         if not cursor.nextset():
                             break
 
-                    # Fallback lookup if stored procedure doesn't return ID
+                    # Fallback: Query for the presentation ID if SP didn't return it
                     if not presentation_id:
-                        # Try with ProjectName column first
-                        cursor.execute(
-                            """
-                            SELECT TOP 1 PresentationId
-                            FROM [BI_GUIDELINES].[dbo].[bsr_Master]
-                            WHERE ProjectName = ? AND DisplayName = ?
-                            ORDER BY PresentationId DESC
-                            """,
-                            (project_name, display_name)
+                        logger.info("Attempting fallback lookup for BSR presentation ID...")
+                        lookup_sql = (
+                            "SELECT TOP 1 PresentationId "
+                            "FROM [BI_GUIDELINES].[dbo].[bsr_Master] "
+                            "WHERE Project = ? AND DisplayName = ? "
+                            "ORDER BY PresentationId DESC"
                         )
+                        cursor.execute(lookup_sql, (project_name, display_name))
                         row = cursor.fetchone()
                         if row and row[0]:
                             presentation_id = int(row[0])
-                            logger.info("BSR PresentationId resolved via lookup: %s", presentation_id)
+                            logger.info("BSR PresentationId resolved via fallback lookup: %s", presentation_id)
 
                     if not presentation_id:
                         raise HTTPException(
@@ -1879,6 +1567,7 @@ class PresentationService:
                         )
 
                     conn.commit()
+                    logger.info("BSR master record created with ID: %d", presentation_id)
                     return presentation_id
 
         except HTTPException:
@@ -1899,111 +1588,166 @@ class PresentationService:
         slide_titles: List[str],
         pptx_data: Dict[str, Any],
     ) -> int:
-        """Insert BSR presentation detail records with summary slide.
-
-        Args:
-            presentation_id: ID of presentation master record
-            display_name: Display name for image paths (folder name)
-            slide_number: Position where summary slide will be inserted
-            slide_titles: List of slide titles extracted from PowerPoint
-            pptx_data: Converted PPTX data with image paths
-
-        Returns:
-            Total number of slides inserted
-
-        Raises:
-            HTTPException: If insertion fails
-        """
+        """Insert BSR detail records for each slide."""
         try:
             with create_connection() as conn:
                 with conn.cursor() as cursor:
-                    # Using positional parameters for bsr_InsertPresentationDetail
-                    # Parameters: PresentationId, SlideNumber, SlideType, BGImagePath, SlideTitle,
-                    #             Param6, Param7, Param8, Param9, Param10, Param11, Param12, BGTemplateId
-                    detail_sql = """
-                        EXEC [BI_GUIDELINES].[dbo].[bsr_InsertPresentationDetail]
-                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?;
-                    """
+                    print(pptx_data)
+                    images = pptx_data.get("images") or []
+                    total_slides = len(images)
 
-                    total_slides = 0
-                    images = pptx_data.get("images", [])
+                    slide_idx = 1
 
-                    # Insert slides before summary position
+                    # Insert slides BEFORE summary position
                     for idx in range(min(slide_number - 1, len(images))):
-                        total_slides += 1
+                        # Use the actual image path from pptx_data, not thumbnails
+                        image_path = images[idx]
+                        print(image_path)
                         title = slide_titles[idx] if idx < len(slide_titles) else f"Slide {idx + 1}"
-                        image_path = f"BRS_slides/{display_name}/{total_slides:03d}.jpg"
 
                         cursor.execute(
-                            detail_sql,
+                            "EXEC [BI_GUIDELINES].[dbo].[bsr_InsertPresentationDetail] ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?;",
                             (
-                                presentation_id,  # @PresentationId
-                                total_slides,     # @SlideNumber
-                                "Image",          # @SlideType
-                                image_path,       # @BGImagePath
-                                title,            # @SlideTitle
-                                None,             # @Param6
-                                "",               # @Param7
-                                "",               # @Param8
-                                "",               # @Param9
-                                "",               # @Param10
-                                "",               # @Param11
-                                "",               # @Param12
-                                0,                # @BGTemplateId
+                                presentation_id,
+                                slide_idx,
+                                "Image",
+                                image_path,
+                                title,
+                                "",  # @Param6
+                                "",  # @Param7
+                                "",  # @Param8
+                                "",  # @Param9
+                                "",  # @Param10
+                                "",  # @Param11
+                                "",  # @Param12
+                                0,   # @BGTemplateId
                             )
                         )
+                        slide_idx += 1
 
-                    # Insert summary slide at specified position
-                    total_slides += 1
-                    summary_image_path = f"BRS_slides/{display_name}/{total_slides:03d}.jpg"
-
-                    cursor.execute(
-                        detail_sql,
-                        (
-                            presentation_id,      # @PresentationId
-                            total_slides,         # @SlideNumber
-                            "NameSummary",        # @SlideType
-                            summary_image_path,   # @BGImagePath
-                            "Brainstorm",         # @SlideTitle
-                            None,                 # @Param6
-                            "",                   # @Param7
-                            "",                   # @Param8
-                            "",                   # @Param9
-                            "",                   # @Param10
-                            "",                   # @Param11
-                            "",                   # @Param12
-                            0,                    # @BGTemplateId
+                    # Insert SUMMARY slide at specified position (slide_number - 1 because 0-indexed)
+                    if slide_number - 1 < len(images):
+                        summary_image_path = images[slide_number - 1]
+                        cursor.execute(
+                            "EXEC [BI_GUIDELINES].[dbo].[bsr_InsertPresentationDetail] ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?;",
+                            (
+                                presentation_id,
+                                slide_idx,
+                                "NameSummary",
+                                summary_image_path,
+                                "Brainstorm",
+                                "",  # @Param6
+                                "",  # @Param7
+                                "",  # @Param8
+                                "",  # @Param9
+                                "",  # @Param10
+                                "",  # @Param11
+                                "",  # @Param12
+                                0,   # @BGTemplateId
+                            )
                         )
-                    )
+                        slide_idx += 1
 
-                    # Insert remaining slides after summary
-                    for idx in range(slide_number - 1, len(images)):
-                        total_slides += 1
+                    # Insert remaining slides AFTER summary
+                    for idx in range(slide_number, len(images)):
+                        # Use the actual image path from pptx_data, not thumbnails
+                        image_path = images[idx]
                         title = slide_titles[idx] if idx < len(slide_titles) else f"Slide {idx + 1}"
-                        image_path = f"BRS_slides/{display_name}/{total_slides:03d}.jpg"
 
                         cursor.execute(
-                            detail_sql,
+                            "EXEC [BI_GUIDELINES].[dbo].[bsr_InsertPresentationDetail] ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?;",
                             (
-                                presentation_id,  # @PresentationId
-                                total_slides,     # @SlideNumber
-                                "Image",          # @SlideType
-                                image_path,       # @BGImagePath
-                                title,            # @SlideTitle
-                                None,             # @Param6
-                                "",               # @Param7
-                                "",               # @Param8
-                                "",               # @Param9
-                                "",               # @Param10
-                                "",               # @Param11
-                                "",               # @Param12
-                                0,                # @BGTemplateId
+                                presentation_id,
+                                slide_idx,
+                                "Image",
+                                image_path,
+                                title,
+                                "",  # @Param6
+                                "",  # @Param7
+                                "",  # @Param8
+                                "",  # @Param9
+                                "",  # @Param10
+                                "",  # @Param11
+                                "",  # @Param12
+                                0,   # @BGTemplateId
                             )
                         )
+                        slide_idx += 1
+
+                    # Normalize any 'Thumbnails' paths to full-size image paths for this presentation
+                    try:
+                        # Attempt normalization on common BSR detail tables/views
+                        for table_name in (
+                            "[BI_GUIDELINES].[dbo].[BSR_Details]",
+                            "[BI_GUIDELINES].[dbo].[bsr_Details]",
+                            "[BI_GUIDELINES].[dbo].[bsr_Detail]",
+                        ):
+                            try:
+                                cursor.execute(
+                                    (
+                                        f"UPDATE {table_name} "
+                                        "SET SlideBGFileName = REPLACE(REPLACE(SlideBGFileName, '/Thumbnails/', '/'), '/thumbnails/', '/') "
+                                        "WHERE PresentationId = ?"
+                                    ),
+                                    (presentation_id,),
+                                )
+                            except Exception:
+                                # Ignore if table doesn't exist in this environment
+                                pass
+
+                        # Force-set each slide's path to the exact full-size image we generated
+                        try:
+                            for i, img in enumerate(images, start=1):
+                                for tname in (
+                                    "[BI_GUIDELINES].[dbo].[BSR_Details]",
+                                    "[BI_GUIDELINES].[dbo].[bsr_Details]",
+                                    "[BI_GUIDELINES].[dbo].[bsr_Detail]",
+                                ):
+                                    try:
+                                        cursor.execute(
+                                            (
+                                                f"UPDATE {tname} SET SlideBGFileName = ? "
+                                                "WHERE PresentationId = ? AND SlideNumber = ?"
+                                            ),
+                                            (img, presentation_id, i),
+                                        )
+                                    except Exception:
+                                        # ignore if table not present
+                                        pass
+                        except Exception as set_exc:
+                            logger.warning("BSR force-set image paths skipped: %s", str(set_exc))
+
+                        # Log a few rows after normalization to verify
+                        for table_name in (
+                            "[BI_GUIDELINES].[dbo].[BSR_Details]",
+                            "[BI_GUIDELINES].[dbo].[bsr_Details]",
+                        ):
+                            try:
+                                cursor.execute(
+                                    (
+                                        f"SELECT TOP 3 SlideNumber, SlideBGFileName FROM {table_name} "
+                                        "WHERE PresentationId = ? ORDER BY SlideNumber"
+                                    ),
+                                    (presentation_id,),
+                                )
+                                rows = cursor.fetchall() or []
+                                if rows:
+                                    samples = ", ".join(
+                                        [f"{r[0]}=>{r[1]}" for r in rows if len(r) >= 2]
+                                    )
+                                    logger.info(
+                                        "BSR detail path samples after normalization from %s: %s",
+                                        table_name,
+                                        samples,
+                                    )
+                            except Exception:
+                                pass
+                    except Exception as norm_exc:
+                        logger.warning("BSR detail path normalization skipped: %s", str(norm_exc))
 
                     conn.commit()
-                    logger.info("Inserted %d BSR detail records", total_slides)
-                    return total_slides
+                    logger.info("Inserted %d BSR detail records", slide_idx - 1)
+                    return slide_idx - 1
 
         except Exception as e:
             logger.error("Error inserting BSR detail records: %s", str(e))

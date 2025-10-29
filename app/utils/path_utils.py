@@ -42,11 +42,16 @@ def get_project_base_dir(project_type: str) -> Path:
 
 
 def get_relative_slide_root(project_type: Optional[str]) -> str:
-    """Return the web-visible root folder for slide assets."""
+    """Return the web-visible root folder for slide assets.
+
+    Accepts both canonical project types (e.g., 'bipresents', 'nw', 'dw') and
+    common aliases such as 'bsr'.
+    """
     if not project_type:
         return ""
     normalized = project_type.lower()
-    if normalized == settings.PROJECT_TYPE_BIPRESENTS:
+    # Map BSR to the bipresents directory structure
+    if normalized in {settings.PROJECT_TYPE_BIPRESENTS, "bsr"}:
         return "bsr_slides"
     if normalized == settings.PROJECT_TYPE_NW or normalized == settings.PROJECT_TYPE_DW:
         return "nw_slides"

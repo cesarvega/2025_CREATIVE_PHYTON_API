@@ -54,6 +54,8 @@ class PPTXService:
             project_type,
         )
         thumbnails_folder = project_folder / "Thumbnails"
+        # Decide if thumbnails should be generated (re-enabled for all types to ensure UI images load)
+        generate_thumbnails = True
 
         if used_fallback:
             logger.warning(
@@ -73,7 +75,8 @@ class PPTXService:
 
         # Create directories
         project_folder.mkdir(parents=True, exist_ok=True)
-        thumbnails_folder.mkdir(parents=True, exist_ok=True)
+        if generate_thumbnails:
+            thumbnails_folder.mkdir(parents=True, exist_ok=True)
 
         try:
             # Save the uploaded PowerPoint file in the project folder
@@ -91,7 +94,7 @@ class PPTXService:
 
             # Convert PPTX to images and extract titles
             slide_results = self._pptx_to_images_with_titles(
-                pptx_file_path, project_folder, thumbnails_folder
+                pptx_file_path, project_folder, thumbnails_folder, generate_thumbnails=generate_thumbnails
             )
 
             # Create response data
@@ -104,30 +107,33 @@ class PPTXService:
 
             for result in slide_results:
                 image_path = result["image_path"]
-                thumbnail_path = result["thumbnail_path"]
+                thumbnail_path = result.get("thumbnail_path")
                 title = result["title"]
                 image_filename = Path(image_path).name
-                thumbnail_filename = Path(thumbnail_path).name
+                thumbnail_filename = Path(thumbnail_path).name if thumbnail_path else None
                 if url_root:
                     image_url = build_relative_slide_path(
                         project_type,
                         conversion_id,
                         image_filename,
                     )
-                    thumbnail_url = build_relative_slide_path(
-                        project_type,
-                        conversion_id,
-                        thumbnail_filename,
-                        subdir="Thumbnails",
-                    )
+                    if generate_thumbnails and thumbnail_filename:
+                        thumbnail_url = build_relative_slide_path(
+                            project_type,
+                            conversion_id,
+                            thumbnail_filename,
+                            subdir="Thumbnails",
+                        )
                 else:
                     image_url = f"files/download/{project_type}/{conversion_id}/{image_filename}"
-                    thumbnail_url = (
-                        f"files/download/{project_type}/{conversion_id}/"
-                        f"Thumbnails/{thumbnail_filename}"
-                    )
+                    if generate_thumbnails and thumbnail_filename:
+                        thumbnail_url = (
+                            f"files/download/{project_type}/{conversion_id}/"
+                            f"Thumbnails/{thumbnail_filename}"
+                        )
                 image_urls.append(image_url)
-                thumbnail_urls.append(thumbnail_url)
+                if generate_thumbnails and thumbnail_filename:
+                    thumbnail_urls.append(thumbnail_url)
                 titles.append(title)
 
             return {
@@ -178,14 +184,17 @@ class PPTXService:
         base_dir = get_project_base_dir(project_type)
         project_folder = base_dir / project_name
         thumbnails_folder = project_folder / "Thumbnails"
+        # Always generate thumbnails to ensure UI thumbnails exist
+        generate_thumbnails = True
 
         if not project_folder.exists():
             raise FileNotFoundError(
                 f"Project folder not found: {project_folder}"
             )
 
-        # Ensure thumbnails folder exists
-        thumbnails_folder.mkdir(parents=True, exist_ok=True)
+        # Ensure thumbnails folder exists only if generating thumbnails
+        if generate_thumbnails:
+            thumbnails_folder.mkdir(parents=True, exist_ok=True)
 
         # Remove existing JPGs to avoid stale files if slide count shrinks
         try:
@@ -194,11 +203,12 @@ class PPTXService:
                     f.unlink()
                 except Exception:
                     pass
-            for f in thumbnails_folder.glob("*.jpg"):
-                try:
-                    f.unlink()
-                except Exception:
-                    pass
+            if generate_thumbnails:
+                for f in thumbnails_folder.glob("*.jpg"):
+                    try:
+                        f.unlink()
+                    except Exception:
+                        pass
         except Exception as e:
             logger.warning("Failed to clean old images in %s: %s", project_folder, str(e))
 
@@ -209,7 +219,7 @@ class PPTXService:
 
         # Export slides using PowerPoint COM
         slide_results = self._pptx_to_images_with_titles(
-            pptx_file_path, project_folder, thumbnails_folder
+            pptx_file_path, project_folder, thumbnails_folder, generate_thumbnails=generate_thumbnails
         )
 
         # Build relative URLs similar to convert flow
@@ -221,13 +231,15 @@ class PPTXService:
         root = get_relative_slide_root(project_type)
         for result in slide_results:
             image_filename = Path(result["image_path"]).name
-            thumbnail_filename = Path(result["thumbnail_path"]).name
+            thumbnail_filename = Path(result["thumbnail_path"]).name if result.get("thumbnail_path") else None
             if root:
                 image_urls.append("/".join([root, project_name, image_filename]))
-                thumbnail_urls.append("/".join([root, project_name, "Thumbnails", thumbnail_filename]))
+                if generate_thumbnails and thumbnail_filename:
+                    thumbnail_urls.append("/".join([root, project_name, "Thumbnails", thumbnail_filename]))
             else:
                 image_urls.append(str(Path(result["image_path"])) )
-                thumbnail_urls.append(str(Path(result["thumbnail_path"])) )
+                if generate_thumbnails and thumbnail_filename:
+                    thumbnail_urls.append(str(Path(result["thumbnail_path"])) )
             titles.append(result.get("title", ""))
 
         return {
@@ -243,7 +255,7 @@ class PPTXService:
         }
 
     def _pptx_to_images_with_titles(
-        self, pptx_path: Path, project_folder: Path, thumbnails_folder: Path
+        self, pptx_path: Path, project_folder: Path, thumbnails_folder: Path, generate_thumbnails: bool = True
     ) -> List[Dict[str, Any]]:
         """
         Convert each slide of the PPTX to an image using Microsoft PowerPoint.
@@ -261,7 +273,7 @@ class PPTXService:
         # Convert to absolute paths
         pptx_path_abs = str(pptx_path.absolute())
         project_folder_abs = str(project_folder.absolute())
-        thumbnails_folder_abs = str(thumbnails_folder.absolute())
+        thumbnails_folder_abs = str(thumbnails_folder.absolute()) if generate_thumbnails else ""
 
         # Initialize COM in this thread
         pythoncom.CoInitialize()
@@ -285,37 +297,44 @@ class PPTXService:
 
                 # Full-size image path
                 img_path = os.path.join(project_folder_abs, img_filename)
-                # Thumbnail image path
-                thumbnail_path = os.path.join(thumbnails_folder_abs, img_filename)
+                # Thumbnail image path (optional)
+                thumbnail_path = os.path.join(thumbnails_folder_abs, img_filename) if generate_thumbnails else None
 
                 # Export slide as full-size image
                 slide = presentation.Slides(i)
                 slide.Export(img_path, self.image_format)
 
-                # Export slide as thumbnail (smaller size)
-                # Using a smaller resolution for thumbnails
-                slide.Export(
-                    thumbnail_path, self.image_format, 150, 113
-                )  # Smaller dimensions for thumbnails
+                # Export slide as thumbnail (optional)
+                if generate_thumbnails and thumbnail_path:
+                    # For BSR, thumbnails have same quality as full-size images
+                    slide.Export(thumbnail_path, self.image_format)
 
                 # Extract slide title
                 title = self._extract_slide_title(slide)
 
-                logger.info(
-                    "Slide %d exported as %s and %s with title: %s",
-                    i,
-                    img_path,
-                    thumbnail_path,
-                    title,
-                )
+                if generate_thumbnails and thumbnail_path:
+                    logger.info(
+                        "Slide %d exported as %s and %s with title: %s",
+                        i,
+                        img_path,
+                        thumbnail_path,
+                        title,
+                    )
+                else:
+                    logger.info(
+                        "Slide %d exported as %s with title: %s",
+                        i,
+                        img_path,
+                        title,
+                    )
 
-                results.append(
-                    {
-                        "image_path": str(Path(img_path)),
-                        "thumbnail_path": str(Path(thumbnail_path)),
-                        "title": title,
-                    }
-                )
+                result_item = {
+                    "image_path": str(Path(img_path)),
+                    "title": title,
+                }
+                if generate_thumbnails and thumbnail_path:
+                    result_item["thumbnail_path"] = str(Path(thumbnail_path))
+                results.append(result_item)
 
         except Exception as e:
             logger.error("Error processing PPTX with PowerPoint: %s", str(e))
