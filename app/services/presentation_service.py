@@ -530,9 +530,10 @@ class PresentationService:
             logger.info("Processing Excel file for backup generation")
             excel_data = self._process_excel_file(request)
 
-            # 6. Convert PPTX to get slide data (reuse existing conversion)
-            logger.info("Converting PPTX file for backup generation")
-            pptx_data = self._convert_pptx_file(request)
+            # 6. Load existing PPTX image data instead of reconverting
+            # (reconverting would delete the entire folder including the Excel file)
+            logger.info("Loading existing PPTX images for backup generation")
+            pptx_data = self._load_existing_pptx_images(output_base, pptx_path.name)
 
             # 7. Generate slides data
             logger.info("Generating slides data for backup")
@@ -707,6 +708,57 @@ class PresentationService:
             logger.error("❌ Error saving original Excel file: %s", str(e))
             import traceback
             logger.error("❌ Traceback: %s", traceback.format_exc())
+            raise
+
+    def _load_existing_pptx_images(
+        self, output_base: Path, pptx_filename: str
+    ) -> PPTXConversionResponse:
+        """Load existing PPTX image data from disk without reconverting.
+
+        This is used for backup generation to avoid deleting the folder.
+
+        Args:
+            output_base: Base directory where images are stored
+            pptx_filename: Name of the original PPTX file
+
+        Returns:
+            PPTXConversionResponse with existing image paths
+        """
+        from app.utils.path_utils import get_relative_slide_root
+
+        try:
+            # Get list of existing image files
+            image_files = sorted(output_base.glob("*.jpg"))
+
+            # Get relative URL root for proper URL construction
+            url_root = get_relative_slide_root("NW")
+
+            # Build image URLs
+            images = []
+            for img_file in image_files:
+                if url_root:
+                    # Create web-accessible URL
+                    image_url = f"{url_root}/{output_base.name}/{img_file.name}"
+                else:
+                    # Fallback to file path
+                    image_url = str(img_file.as_posix())
+                images.append(image_url)
+
+            logger.info("Loaded %d existing PPTX images from %s", len(images), output_base)
+
+            return PPTXConversionResponse(
+                message="Existing images loaded successfully",
+                conversion_id=output_base.name,  # Use folder name as conversion ID
+                project_type="NW",
+                images=images,
+                thumbnails=[],  # Not needed for backup
+                titles=[""] * len(images),  # Empty titles for existing images
+                total_images=len(images),
+                pptx_file=pptx_filename
+            )
+
+        except Exception as e:
+            logger.error("Error loading existing PPTX images: %s", str(e))
             raise
 
     def _generate_physical_powerpoint(
