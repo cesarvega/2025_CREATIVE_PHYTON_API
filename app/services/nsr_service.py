@@ -39,8 +39,8 @@ class NSRService:
                     row_dict = dict(zip(columns, row))
                     rules.append(
                         NSRRuleConfig(
-                            rule_id=row_dict.get("ruleid") or row_dict.get("rule_id") or 0,
-                            is_on=row_dict.get("ison") or row_dict.get("is_on") or 0,
+                            rule_id=row_dict.get("ruleid") or row_dict.get("rule_id") or row_dict.get("RuleId") or 0,
+                            is_on=row_dict.get("isOn") or row_dict.get("ison") or row_dict.get("is_on") or row_dict.get("IsOn") or 0,
                         )
                     )
 
@@ -62,7 +62,7 @@ class NSRService:
 
         Args:
             project_name: Display name of the NSR project
-            rule_id: Rule ID to check (101-117)
+            rule_id: Rule ID to check (101-120)
 
         Returns:
             True if rule exists (needs UPDATE), False if not (needs INSERT)
@@ -103,7 +103,7 @@ class NSRService:
 
         Args:
             project_name: Display name of the NSR project
-            rule_id: Rule ID (101-117)
+            rule_id: Rule ID (101-120)
             is_on: Rule state (0=OFF, 1=ON)
 
         Returns:
@@ -115,7 +115,7 @@ class NSRService:
                     "{CALL [BI_GUIDELINES].[dbo].[nsr_InsertPresentationDetail](?, ?, ?)}",
                     (project_name, rule_id, is_on)
                 )
-                cursor.commit()
+                # Commit is handled by the context manager in db.py
 
                 logger.info(
                     "Inserted NSR rule: project='%s', rule_id=%d, is_on=%d",
@@ -142,7 +142,7 @@ class NSRService:
 
         Args:
             project_name: Display name of the NSR project
-            rule_id: Rule ID (101-117)
+            rule_id: Rule ID (101-120)
             is_on: Rule state (0=OFF, 1=ON)
 
         Returns:
@@ -154,7 +154,7 @@ class NSRService:
                     "{CALL [BI_GUIDELINES].[dbo].[nsr_UpdatePresentationDetail](?, ?, ?)}",
                     (project_name, rule_id, is_on)
                 )
-                cursor.commit()
+                # Commit is handled by the context manager in db.py
 
                 logger.info(
                     "Updated NSR rule: project='%s', rule_id=%d, is_on=%d",
@@ -181,7 +181,7 @@ class NSRService:
 
         Args:
             project_name: Display name of the NSR project
-            rule_id: Rule ID (101-117)
+            rule_id: Rule ID (101-120)
             is_on: Rule state (0=OFF, 1=ON)
 
         Returns:
@@ -239,7 +239,7 @@ class NSRService:
 
     def initialize_all_rules(self, project_name: str) -> tuple[bool, int]:
         """
-        Initialize all NSR rules (101-117, except 107) for a project in ON state.
+        Initialize all NSR rules (101-120, except 107) for a project in ON state.
 
         Args:
             project_name: Display name of the NSR project
@@ -248,7 +248,7 @@ class NSRService:
             Tuple of (success: bool, rules_created: int)
         """
         # All rule IDs except 107 (which doesn't exist)
-        all_rule_ids = [101, 102, 103, 104, 105, 106, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117]
+        all_rule_ids = [101, 102, 103, 104, 105, 106, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120]
         rules_created = 0
 
         try:

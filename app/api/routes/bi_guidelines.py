@@ -829,10 +829,10 @@ async def check_nsr_rule_exists(project_name: str, rule_id: int) -> NSRRuleExist
     """Check if an NSR rule exists for a project."""
     try:
         # Validate rule_id
-        if rule_id < 101 or rule_id > 117 or rule_id == 107:
+        if rule_id < 101 or rule_id > 120 or rule_id == 107:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid rule_id: {rule_id}. Must be 101-117 (except 107)"
+                detail=f"Invalid rule_id: {rule_id}. Must be 101-120 (except 107)"
             )
 
         exists = nsr_service.check_rule_exists(project_name, rule_id)
@@ -863,13 +863,14 @@ async def check_nsr_rule_exists(project_name: str, rule_id: int) -> NSRRuleExist
     response_model=NSRInitializeResponse,
     summary="Initialize all NSR rules for a project",
     description=(
-        "Create all NSR validation rules (101-117, except 107) for a new project.\n\n"
+        "Create all NSR validation rules (101-120, except 107) for a new project.\n\n"
         "All rules are initialized in **ON** state (is_on=1) by default.\n\n"
         "**Rules created:**\n"
         "- **Contains:** 101, 102, 103, 104, 105\n"
         "- **USAN:** 106, 108, 116, 117\n"
-        "- **Prefix:** 109, 110, 111, 112, 113, 114, 115\n\n"
-        "**Total:** 16 rules (107 is skipped)\n\n"
+        "- **Prefix:** 109, 110, 111, 112, 113, 114, 115, 120\n"
+        "- **Double:** 118, 119\n\n"
+        "**Total:** 19 rules (107 is skipped)\n\n"
         "**Use case:** When a new NSR project is created and needs default rule configuration."
     ),
 )

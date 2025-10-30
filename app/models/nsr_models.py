@@ -19,7 +19,7 @@ class NSRRuleConfig(BaseModel):
         }
     )
 
-    rule_id: int = Field(..., ge=101, le=117, description="Rule ID (101-117)")
+    rule_id: int = Field(..., ge=101, le=120, description="Rule ID (101-120)")
     is_on: int = Field(..., ge=0, le=1, description="Rule state: 0=OFF, 1=ON")
 
 
@@ -56,7 +56,7 @@ class NSRUpdateRuleRequest(BaseModel):
     )
 
     project_name: str = Field(..., min_length=1, description="Project display name")
-    rule_id: int = Field(..., ge=101, le=117, description="Rule ID (101-117)")
+    rule_id: int = Field(..., ge=101, le=120, description="Rule ID (101-120)")
     is_on: int = Field(..., ge=0, le=1, description="Rule state: 0=OFF, 1=ON")
 
 
@@ -111,7 +111,7 @@ class NSRInitializeResponse(BaseModel):
                 "success": True,
                 "message": "All rules initialized successfully",
                 "displayName": "NewProject_NSR",
-                "rulesCreated": 16
+                "rulesCreated": 19
             }
         }
     )
@@ -145,4 +145,9 @@ NSR_RULES = {
     113: {"name": "Prefix LEV", "type": "prefix", "value": "LEV"},
     114: {"name": "Prefix X", "type": "prefix", "value": "X"},
     115: {"name": "Prefix RAC", "type": "prefix", "value": "RAC"},
+    120: {"name": "Prefix ZU", "type": "prefix", "value": "ZU"},
+
+    # Panel4 - Double
+    118: {"name": "Double Letter", "type": "double", "value": "letter"},
+    119: {"name": "Double Vowel", "type": "double", "value": "vowel"},
 }

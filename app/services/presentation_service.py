@@ -949,7 +949,7 @@ class PresentationService:
             slide_number=slide_number,
             slide_type=slide_type,
             slide_bg_file_name="",  # Will be assigned with template rotation
-            slide_description=f"{excel_data.lst_names[index]} - Name Evaluation",
+            slide_description=excel_data.lst_names[index],
             group_name=group_name,
             category=excel_data.lst_categories[index],
             name=excel_data.lst_names[index],
