@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"from pathlib import Path; test = ''C:/Users/test/MyData.xlsx''; print(''Input:'', test); print(''Safe:'', Path(test).name)\")",
+      "Read(//c/inetpub/wwwroot/nw2/nw_slides/NW_TEST_10_30_2025_V2/**)",
+      "Read(//c/inetpub/wwwroot/nw2/nw_slides/NW_TEST_10_30_2025/Presentations/**)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

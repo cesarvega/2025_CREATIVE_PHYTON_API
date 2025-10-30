@@ -1,10 +1,19 @@
 # Creative Python API
 
 A comprehensive FastAPI-based API for professional PowerPoint presentation creation, conversion, and management with SQL Server database integration.
+Un API integral basado en FastAPI para la creación, conversión y gestión profesional de presentaciones de PowerPoint, con una arquitectura modular por proyecto y una profunda integración con SQL Server.
 
 ## 🚀 Key Features
 
 ### 📊 Complete Presentation Orchestration
+### 🏗️ Arquitectura Modular por Proyecto
+- **Separación de Responsabilidades**: Lógica de negocio aislada por tipo de proyecto (`NW`, `DW`, `BSR`, `NSR`).
+- **Servicios y Modelos Específicos**: Cada proyecto tiene sus propios servicios (`nw_presentation_service.py`), modelos (`nw_models.py`) y rutas (`nw_presentation_routes.py`).
+- **Lógica Común Centralizada**: Clases base (`BasePresentationService`, `BaseCreatePresentationRequest`) para reutilizar código y mantener consistencia.
+- **Escalabilidad**: Añadir un nuevo tipo de proyecto es tan simple como crear una nueva carpeta de proyecto sin impactar los existentes.
+- **Mantenibilidad y Pruebas**: Los cambios y las pruebas se pueden realizar de forma aislada para cada tipo de proyecto, reduciendo riesgos.
+
+### 📊 Orquestación Completa de Presentaciones
 - **Unified API endpoint**: Single endpoint for complete presentation creation workflow
 - **Excel processing**: Advanced Excel file processing with phonetic and grouping support
 - **PowerPoint conversion**: Transforms PPTX files to high-quality PNG images
@@ -13,6 +22,7 @@ A comprehensive FastAPI-based API for professional PowerPoint presentation creat
 - **Multi-project support**: Separate management for "bipresents" and "nw" projects
 
 ### 📈 Excel Processing & Analysis
+### 📈 Procesamiento y Análisis de Excel
 - **Advanced slide generation**: Processes Excel files to create presentation slides
 - **Multiple slide types**: Supports group slides (A-Z) and individual name evaluation slides
 - **Phonetic support**: Japanese kana and notation processing
@@ -21,12 +31,14 @@ A comprehensive FastAPI-based API for professional PowerPoint presentation creat
 
 ### 🎨 PowerPoint Processing
 - **Complete conversion**: Transforms PPTX files to high-quality PNG images
+- **Conversión Completa**: Transforma archivos PPTX a imágenes de alta calidad.
 - **Title extraction**: Automatically extracts titles from each slide
 - **Thumbnail generation**: Creates optimized thumbnails for preview
 - **Template rotation**: Dynamic template assignment for slides
 - **Background management**: Configurable background types and names
 
 ### 🗄️ Database Integration
+### 🗄️ Integración con Base de Datos
 - **SQL Server connection**: Secure integration with BI_GUIDELINES database via environment variables
 - **Presentation management**: Full CRUD for master and detail records
 - **Stored procedures**: Direct integration with `nw_InsertPresentationMaster_sep2025` and `nw_InsertPresentationDetail_copy`
@@ -35,6 +47,7 @@ A comprehensive FastAPI-based API for professional PowerPoint presentation creat
 
 ### 🌐 Modern RESTful API
 - **Automatic documentation**: Multiple documentation interfaces available
+- **Documentación Automática**: Múltiples interfaces de documentación disponibles:
   - **Swagger UI** at `/docs` (traditional OpenAPI interface)
   - **Scalar UI** at `/scalar` (modern, enhanced documentation)
 - **CORS configured**: Environment-based CORS configuration for front-end applications
@@ -43,6 +56,7 @@ A comprehensive FastAPI-based API for professional PowerPoint presentation creat
 - **Environment-based configuration**: Flexible configuration via `.env` files
 
 ## 📦 Installation
+## 📦 Instalación
 
 ### 1. Clone the repository
 ```bash

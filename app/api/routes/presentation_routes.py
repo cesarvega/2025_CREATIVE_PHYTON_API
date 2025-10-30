@@ -1816,20 +1816,75 @@ async def download_presentation_file(presentation_id: int) -> FileResponse:
                            f"The file was not generated (create_backup=0)."
                 )
 
-        # Construct file path
-        # Files are typically stored in: nw_slides/{DisplayName}/Presentations/{filename}
-        file_path = settings.nw_files_dir / display_name / "Presentations" / main_ppt_filename
+        # Construct file path using resolve_project_output (same as backup generation)
+        from pathlib import Path as PathLib
+        from app.utils.path_utils import resolve_project_output
+
+        # Clean display_name if it contains path separators
+        clean_display_name = PathLib(display_name).name if "/" in display_name or "\\" in display_name else display_name
+
+        # Clean main_ppt_filename if it contains path separators (extract just the filename)
+        # Some old records may have full paths like "files/download/NW/Project/file.pptx"
+        clean_ppt_filename = PathLib(main_ppt_filename).name
+
+        # Resolve the output base directory
+        output_base, _ = resolve_project_output(
+            clean_display_name,
+            "NW",  # Default to NW project type
+            fallback_subdir="generated_presentations",
+        )
+
+        # The file is in the Presentations subdirectory
+        file_path = output_base / "Presentations" / clean_ppt_filename
+
+        logger.info(
+            "Looking for PowerPoint file: display_name=%s, clean_display_name=%s, output_base=%s, filename_from_db=%s, clean_filename=%s, full_path=%s",
+            display_name,
+            clean_display_name,
+            output_base,
+            main_ppt_filename,
+            clean_ppt_filename,
+            file_path
+        )
 
         if not file_path.exists():
-            logger.error(
-                "PowerPoint file not found on disk: %s (presentation_id=%d)",
-                file_path,
-                presentation_id
-            )
-            raise HTTPException(
-                status_code=404,
-                detail=f"PowerPoint file not found on server. Expected path: {main_ppt_filename}"
-            )
+            # List all files in Presentations directory to help diagnose
+            presentations_dir = output_base / "Presentations"
+            available_files = []
+            if presentations_dir.exists():
+                available_pptx = list(presentations_dir.glob("*.pptx"))
+                available_files = [f.name for f in available_pptx]
+
+                # Fallback: If there's exactly one PPTX file, use it
+                if len(available_pptx) == 1:
+                    file_path = available_pptx[0]
+                    logger.warning(
+                        "File mismatch detected. Expected: %s, but using: %s (presentation_id=%d)",
+                        clean_ppt_filename,
+                        file_path.name,
+                        presentation_id
+                    )
+                else:
+                    logger.error(
+                        "PowerPoint file not found on disk: %s (presentation_id=%d), available files: %s",
+                        file_path,
+                        presentation_id,
+                        available_files
+                    )
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"PowerPoint file not found on server. Expected: {clean_ppt_filename}. Available files: {available_files}"
+                    )
+            else:
+                logger.error(
+                    "Presentations directory not found: %s (presentation_id=%d)",
+                    presentations_dir,
+                    presentation_id
+                )
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"PowerPoint file not found on server. Presentations directory does not exist."
+                )
 
         # Get file info
         file_size = file_path.stat().st_size

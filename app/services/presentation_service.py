@@ -78,18 +78,23 @@ class PresentationService:
             HTTPException: If validation fails or creation errors occur
         """
         try:
+            # Extract just the folder name if display_name contains path separators
+            # This prevents path duplication issues when constructing full paths
+            from pathlib import Path as PathLib
+            clean_display_name = PathLib(display_name).name if "/" in display_name or "\\" in display_name else display_name
+
             logger.info(
                 "Creating BSR presentation: project=%s, display=%s, slide_number=%d",
                 project_name,
-                display_name,
+                clean_display_name,
                 slide_number,
             )
 
             # 1. Validate presentation doesn't exist
-            self._validate_bsr_presentation_not_exists(project_name, display_name)
+            self._validate_bsr_presentation_not_exists(project_name, clean_display_name)
 
             # 2. Validate display name hasn't been used
-            self._validate_bsr_display_name_not_used(display_name)
+            self._validate_bsr_display_name_not_used(clean_display_name)
 
             # 3. Convert PowerPoint to images (using BSR project type)
             logger.info("Converting PowerPoint to images")
@@ -97,7 +102,7 @@ class PresentationService:
             pptx_data = pptx_service.convert_pptx_to_images(
                 file_content=pptx_content,
                 filename=pptx_filename,
-                display_name=display_name,  # Use display_name for BSR folder structure
+                display_name=clean_display_name,  # Use display_name for BSR folder structure
                 project_type="bipresents",  # Ensure URLs resolve to bsr_slides
             )
             logger.info("PPTX Data - Images: %s", pptx_data.get("images"))
@@ -111,7 +116,7 @@ class PresentationService:
             logger.info("Inserting presentation master record")
             presentation_id = self._insert_bsr_master_record(
                 project_name=project_name,
-                display_name=display_name,
+                display_name=clean_display_name,
                 pptx_filename=pptx_filename,
                 slide_number=slide_number,
                 presentation_type=presentation_type,
@@ -123,7 +128,7 @@ class PresentationService:
             logger.info("Inserting presentation detail records")
             total_slides = self._insert_bsr_detail_records(
                 presentation_id=presentation_id,
-                display_name=display_name,  # Use display_name for image paths
+                display_name=clean_display_name,  # Use display_name for image paths
                 slide_number=slide_number,
                 slide_titles=slide_titles,
                 pptx_data=pptx_data,
@@ -164,17 +169,30 @@ class PresentationService:
         start_time = time.time()
 
         try:
+            # Clean display_name if it contains path separators
+            # This prevents path duplication when the frontend sends full paths
+            from pathlib import Path as PathLib
+            if "/" in request.display_name or "\\" in request.display_name:
+                original_display_name = request.display_name
+                request.display_name = PathLib(request.display_name).name
+                logger.info(
+                    "Cleaned display_name: '%s' -> '%s'",
+                    original_display_name,
+                    request.display_name
+                )
+
             # 1. Process Excel file
             logger.info("Processing Excel file: %s", request.excel_filename)
             excel_data = self._process_excel_file(request)
 
-            # 2. Save original Excel file for future backup generation
-            logger.info("Saving original Excel file")
-            excel_relative_path = self._save_original_excel(request)
-
-            # 3. Convert PPTX file
+            # 2. Convert PPTX file (MUST be done before saving Excel because it deletes the folder)
             logger.info("Converting PPTX file: %s", request.pptx_filename)
             pptx_data = self._convert_pptx_file(request)
+
+            # 3. Save original Excel file for future backup generation
+            # This MUST be done AFTER converting PPTX because pptx_service deletes the entire folder
+            logger.info("Saving original Excel file")
+            excel_relative_path = self._save_original_excel(request)
 
             # 4. Generate slides from Excel arrays
             logger.info("Generating slides from Excel data")
@@ -188,9 +206,10 @@ class PresentationService:
             slides_data["excel_file"] = excel_relative_path
 
             logger.info(
-                "Slides data generated: %d detail items, background=%s",
+                "Slides data generated: %d detail items, background=%s, excel_file=%s",
                 len(slides_data.get("details", [])),
                 slides_data.get("background_name"),
+                slides_data.get("excel_file"),
             )
             
             # 5. Generate physical PowerPoint file (if backup requested)
@@ -411,26 +430,55 @@ class PresentationService:
                     is_aws_email = row[12] or 0
 
                     logger.info(
-                        "Retrieved presentation info: project=%s, display=%s, type=%s",
+                        "Retrieved presentation info: project=%s, display=%s, type=%s, excel_file=%s, ppt_file=%s",
                         project,
                         display_name,
-                        presentation_type
+                        presentation_type,
+                        excel_filename,
+                        main_ppt_filename
                     )
 
             # 2. Resolve file paths
+            # Extract just the folder name if display_name contains path separators
+            # This prevents path duplication issues when the display_name was stored with a path
+            from pathlib import Path as PathLib
+            clean_display_name = PathLib(display_name).name if "/" in display_name or "\\" in display_name else display_name
+
             output_base, _ = resolve_project_output(
-                display_name,
+                clean_display_name,
                 "NW",  # Default to NW project type
                 fallback_subdir="generated_presentations",
             )
 
             # Load saved Excel file
-            excel_path = output_base / "original_data.xlsx"
+            # Use the filename from database, or fallback to original_data.xlsx for backwards compatibility
+            excel_filename_to_use = excel_filename if excel_filename else "original_data.xlsx"
+            excel_path = output_base / excel_filename_to_use
+
+            logger.info(
+                "Looking for Excel file: excel_filename_from_db=%s, path=%s",
+                excel_filename,
+                excel_path
+            )
+
             if not excel_path.exists():
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Original Excel file not found: {excel_path}"
-                )
+                # Try fallback for old presentations
+                excel_path_fallback = output_base / "original_data.xlsx"
+                if excel_path_fallback.exists():
+                    excel_path = excel_path_fallback
+                    logger.info("Using fallback Excel filename: original_data.xlsx")
+                else:
+                    # List all Excel files in the directory to help diagnose the issue
+                    excel_files = list(output_base.glob("*.xlsx"))
+                    logger.error(
+                        "Excel file not found. Expected: %s, Available files: %s",
+                        excel_path,
+                        [f.name for f in excel_files]
+                    )
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Original Excel file not found: {excel_path}. Available files: {[f.name for f in excel_files]}"
+                    )
 
             # Load saved PowerPoint template file
             pptx_path = output_base / main_ppt_filename if main_ppt_filename else None
@@ -474,7 +522,7 @@ class PresentationService:
                 pptx_filename=pptx_path.name,
                 create_backup=1,  # Always generate backup for this endpoint
                 has_groups=True,  # Default assumption
-                test_name_order="",
+                test_name_order="Default",  # Use Default for backup generation
                 project_type="NW",  # Default to NW
             )
 
@@ -508,6 +556,30 @@ class PresentationService:
                 ppt_files.get("printable_path", "N/A"),
                 ppt_files.get("total_slides", "0"),
             )
+
+            # 9. Update the database with the generated PowerPoint filename
+            printable_path = ppt_files.get("printable_path", "")
+            if printable_path:
+                from pathlib import Path as PathLib
+                generated_filename = PathLib(printable_path).name
+
+                logger.info(
+                    "Updating database with generated PowerPoint filename: %s",
+                    generated_filename
+                )
+
+                with create_connection() as conn:
+                    with conn.cursor() as cursor:
+                        cursor.execute(
+                            """
+                            UPDATE [BI_GUIDELINES].[dbo].[nw_Master]
+                            SET MainPptFileName = ?
+                            WHERE PresentationId = ?
+                            """,
+                            (generated_filename, presentation_id)
+                        )
+                        conn.commit()
+                        logger.info("Database updated successfully with new PowerPoint filename")
 
             return {
                 "presentation_id": presentation_id,
@@ -603,19 +675,38 @@ class PresentationService:
             # Ensure the directory exists
             output_base.mkdir(parents=True, exist_ok=True)
 
-            # Save Excel file with a consistent name
-            excel_path = output_base / f"original_data.xlsx"
+            # Save Excel file with original filename (for backup generation)
+            # Use sanitized filename to prevent path traversal
+            safe_filename = Path(request.excel_filename).name  # Get just the filename, no path
+            excel_path = output_base / safe_filename
+
+            logger.info(
+                "🔵 Saving Excel file: display_name=%s, output_base=%s, filename=%s, full_path=%s",
+                request.display_name,
+                output_base,
+                safe_filename,
+                excel_path
+            )
+            logger.info("🔵 Excel file size: %d bytes", len(request.excel_file))
+            logger.info("🔵 Directory exists: %s", output_base.exists())
+            logger.info("🔵 Directory is writable: %s", output_base.is_dir())
 
             with open(excel_path, "wb") as f:
-                f.write(request.excel_file)
+                bytes_written = f.write(request.excel_file)
+                logger.info("🔵 Bytes written to file: %d", bytes_written)
 
-            logger.info("Original Excel file saved to: %s", excel_path)
+            logger.info("✅ Original Excel file saved successfully to: %s", excel_path)
+            logger.info("✅ File exists after save: %s", excel_path.exists())
+            if excel_path.exists():
+                logger.info("✅ File size on disk: %d bytes", excel_path.stat().st_size)
 
-            # Return relative path for database storage
-            return f"nw_slides/{request.display_name}/original_data.xlsx"
+            # Return relative path for database storage (just the filename)
+            return safe_filename
 
         except Exception as e:
-            logger.error("Error saving original Excel file: %s", str(e))
+            logger.error("❌ Error saving original Excel file: %s", str(e))
+            import traceback
+            logger.error("❌ Traceback: %s", traceback.format_exc())
             raise
 
     def _generate_physical_powerpoint(
@@ -1247,6 +1338,12 @@ class PresentationService:
 
     def _insert_master_record(self, cursor, slides_data: Dict[str, Any]) -> int:
         """Insert the master presentation record with improved handling."""
+        logger.info(
+            "Inserting master record with excel_file=%s, powerpoint_file=%s",
+            slides_data.get("excel_file"),
+            slides_data.get("powerpoint_file")
+        )
+
         master_sql = """
             EXEC [dbo].[nw_InsertPresentationMaster_sep2025]
                 @Project=?, @DisplayName=?, @MainPptFileName=?, @NameCandidateFileName=?,

@@ -158,6 +158,11 @@ class CreatePresentationMetadata(BaseModel):
         pptx_filename: str,
     ) -> "CreatePresentationRequest":
         """Convert metadata into a CreatePresentationRequest with uploaded files."""
+        from pathlib import Path
+
+        # Extract just the folder name if display_name contains path separators
+        # This prevents path duplication issues when constructing full paths
+        clean_display_name = Path(self.display_name).name if "/" in self.display_name or "\\" in self.display_name else self.display_name
 
         return CreatePresentationRequest(
             excel_file=excel_content,
@@ -167,7 +172,7 @@ class CreatePresentationMetadata(BaseModel):
             has_groups=self.has_groups,
             test_name_order=self.test_name_order,
             project=self.project,
-            display_name=self.display_name,
+            display_name=clean_display_name,
             presentation_type=self.presentation_type,
             user_name=self.user_name,
             mobile_link_bsr=self.mobile_link_bsr,
