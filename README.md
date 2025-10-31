@@ -192,6 +192,28 @@ C:/inetpub/wwwroot/
   - Transactional operations for data integrity
 - `GET /api/bi_guidelines/presentations/{id}` - Retrieve presentation details
 
+### 📈 Analytics Statistics (NEW)
+- ⭐ `GET /api/analytics/generate/{project_type}` - **RECOMMENDED: One-call report generation**
+  - Generates complete Excel report with single API call
+  - Parameters:
+    - `project_type` (required) = "NW" or "BSR"
+    - `start_date` (optional) = Filter from date (YYYY-MM-DD)
+    - `end_date` (optional) = Filter to date (YYYY-MM-DD)
+  - Returns: Excel file with 2 sheets (Project-Specific and Region-Specific)
+  - Examples:
+    - `GET /api/analytics/generate/NW` → All NW projects
+    - `GET /api/analytics/generate/NW?start_date=2025-01-01&end_date=2025-12-31` → NW projects in 2025
+- `GET /api/analytics/nw/projects` - Get analytics for ALL NW projects (individual endpoint)
+  - Retrieves vote statistics, percentages, and new names created
+- `GET /api/analytics/nw/regions` - Get aggregated NW analytics by region
+  - Aggregates data across all projects grouped by lead/region
+- `GET /api/analytics/bsr/projects` - Get analytics for ALL BSR projects (individual endpoint)
+  - Retrieves PC count, mobile count, and totals for all BSR projects
+- `GET /api/analytics/bsr/regions` - Get aggregated BSR analytics by region
+  - Aggregates BSR data by lead/region
+- `POST /api/analytics/download` - Generate Excel report (LEGACY - use /generate instead)
+  - Requires pre-fetched data from projects and regions endpoints
+
 ### 🔍 System Endpoints
 - `GET /` - API root with basic information
 - `GET /health` - Health check endpoint

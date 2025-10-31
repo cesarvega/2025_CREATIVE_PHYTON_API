@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from scalar_fastapi import get_scalar_api_reference
 
 from app.api.routes import (
+    analytics_routes,
     bi_guidelines,
     excel_processing,
     pptx_conversion,
@@ -52,6 +53,9 @@ app.include_router(bi_guidelines.router, prefix="/api", tags=["BI Guidelines"])
 app.include_router(day_master.router, prefix="/api")
 app.include_router(
     presentation_routes.router, prefix="/api", tags=["Presentation Creation"]
+)
+app.include_router(
+    analytics_routes.router, prefix="/api", tags=["Analytics Statistics"]
 )
 
 
