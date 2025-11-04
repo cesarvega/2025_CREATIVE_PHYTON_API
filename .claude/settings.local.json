@@ -1,9 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -c \"from pathlib import Path; test = ''C:/Users/test/MyData.xlsx''; print(''Input:'', test); print(''Safe:'', Path(test).name)\")",
-      "Read(//c/inetpub/wwwroot/nw2/nw_slides/NW_TEST_10_30_2025_V2/**)",
-      "Read(//c/inetpub/wwwroot/nw2/nw_slides/NW_TEST_10_30_2025/Presentations/**)"
+      "Bash(python -m py_compile app/models/presentation_models.py)",
+      "Bash(python -m py_compile app/services/presentation_service.py)",
+      "Bash(python -m py_compile app/api/routes/presentation_routes.py)"
     ],
     "deny": [],
     "ask": []

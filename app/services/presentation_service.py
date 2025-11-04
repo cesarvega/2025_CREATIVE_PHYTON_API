@@ -57,6 +57,7 @@ class PresentationService:
         is_wide_ppt: int,
         pptx_content: bytes,
         pptx_filename: str,
+        categories: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Create a BSR (Board Sales Request) presentation.
@@ -70,9 +71,10 @@ class PresentationService:
             is_wide_ppt: 1 for 16:9, 0 for 4:3
             pptx_content: PowerPoint file content
             pptx_filename: PowerPoint filename
+            categories: Optional categories configuration with add_categories flag
 
         Returns:
-            Dict with presentation_id and total_slides
+            Dict with presentation_id, total_slides, and categories_added
 
         Raises:
             HTTPException: If validation fails or creation errors occur
@@ -134,15 +136,38 @@ class PresentationService:
                 pptx_data=pptx_data,
             )
 
+            # 7. Process categories if provided
+            categories_created = []
+            if categories and categories.get("add_categories", False):
+                try:
+                    logger.info("Processing BSR categories for presentation ID=%d", presentation_id)
+                    categories_created = self._process_bsr_categories(
+                        presentation_id=presentation_id,
+                        categories_data=categories
+                    )
+                    logger.info("Successfully added %d categories", len(categories_created))
+                except Exception as e:
+                    # Log error but don't fail the entire process since presentation is already created
+                    logger.error(
+                        "Error processing categories for presentation %d: %s",
+                        presentation_id,
+                        str(e),
+                        exc_info=True
+                    )
+                    # Optionally re-raise if you want categories to be mandatory
+                    # raise HTTPException(status_code=500, detail=f"Categories error: {str(e)}")
+
             logger.info(
-                "BSR presentation created successfully: ID=%d, Total Slides=%d",
+                "BSR presentation created successfully: ID=%d, Total Slides=%d, Categories=%d",
                 presentation_id,
                 total_slides,
+                len(categories_created),
             )
 
             return {
                 "presentation_id": presentation_id,
                 "total_slides": total_slides,
+                "categories_added": len(categories_created),
             }
 
         except HTTPException:
@@ -1904,6 +1929,404 @@ class PresentationService:
                 status_code=500,
                 detail=f"Failed to insert BSR detail records: {str(e)}"
             ) from e
+
+    def _process_bsr_categories(
+        self,
+        presentation_id: int,
+        categories_data: Dict[str, Any]
+    ) -> List[Dict[str, Any]]:
+        """
+        Process and save additional categories for a BSR project.
+
+        Args:
+            presentation_id: ID of the newly created BSR project
+            categories_data: Object with categories structure
+
+        Returns:
+            List of created categories with their IDs
+
+        Process:
+            1. Validate no duplicate categories exist
+            2. Insert category1 (always)
+            3. Insert category2 (only if mode='both')
+            4. For each category:
+               a. Insert into BSR_CATEGORY
+               b. Get generated category_id
+               c. Insert each element into BSR_CATEGORY_ELEMENTS
+        """
+        created_categories = []
+        mode = categories_data.get("mode")
+
+        # Validate that no categories exist for this project
+        existing_count = self._check_existing_categories(presentation_id)
+        if existing_count > 0:
+            raise ValueError(
+                f"Project {presentation_id} already has {existing_count} categories"
+            )
+
+        # Process Category 1 (always present)
+        cat1_data = categories_data.get("category1")
+        if cat1_data:
+            # Validate that category name doesn't exist
+            if self._check_category_name_exists(presentation_id, cat1_data["name"]):
+                raise ValueError(f"Category '{cat1_data['name']}' already exists")
+
+            cat1_result = self._insert_category_with_elements(
+                presentation_id=presentation_id,
+                category_name=cat1_data["name"],
+                elements=cat1_data["elements"]
+            )
+            created_categories.append(cat1_result)
+
+        # Process Category 2 (only if mode='both')
+        if mode == "both":
+            cat2_data = categories_data.get("category2")
+            if cat2_data:
+                # Validate that category name doesn't exist
+                if self._check_category_name_exists(presentation_id, cat2_data["name"]):
+                    raise ValueError(f"Category '{cat2_data['name']}' already exists")
+
+                cat2_result = self._insert_category_with_elements(
+                    presentation_id=presentation_id,
+                    category_name=cat2_data["name"],
+                    elements=cat2_data["elements"]
+                )
+                created_categories.append(cat2_result)
+
+        return created_categories
+
+    def _check_existing_categories(self, presentation_id: int) -> int:
+        """
+        Count how many categories exist for a project.
+
+        Returns:
+            Number of existing categories
+        """
+        try:
+            with create_connection() as conn:
+                with conn.cursor() as cursor:
+                    query = """
+                        SELECT COUNT(*) as count
+                        FROM [BI_GUIDELINES].[dbo].[BSR_CATEGORY]
+                        WHERE BSRPROJECTID = ?
+                    """
+                    cursor.execute(query, (presentation_id,))
+                    result = cursor.fetchone()
+                    return result[0] if result else 0
+        except Exception as e:
+            logger.error("Error checking existing categories: %s", str(e))
+            return 0
+
+    def _check_category_name_exists(
+        self,
+        presentation_id: int,
+        category_name: str
+    ) -> bool:
+        """
+        Check if a category with that name already exists in the project.
+
+        Returns:
+            True if exists, False if not
+        """
+        try:
+            with create_connection() as conn:
+                with conn.cursor() as cursor:
+                    query = """
+                        SELECT COUNT(*) as count
+                        FROM [BI_GUIDELINES].[dbo].[BSR_CATEGORY]
+                        WHERE BSRPROJECTID = ? AND CATEGORY = ?
+                    """
+                    cursor.execute(query, (presentation_id, category_name))
+                    result = cursor.fetchone()
+                    return (result[0] if result else 0) > 0
+        except Exception as e:
+            logger.error("Error checking category name exists: %s", str(e))
+            return False
+
+    def _insert_category_with_elements(
+        self,
+        presentation_id: int,
+        category_name: str,
+        elements: List[str]
+    ) -> Dict[str, Any]:
+        """
+        Insert a category and its elements into the database.
+
+        Args:
+            presentation_id: BSR project ID
+            category_name: Category name (e.g., "Region")
+            elements: List of elements (e.g., ["North", "South", "East"])
+
+        Returns:
+            Dict with category_id and elements count
+
+        Process:
+            1. INSERT into BSR_CATEGORY
+            2. Get generated category_id
+            3. Multiple INSERTs into BSR_CATEGORY_ELEMENTS
+        """
+        try:
+            with create_connection() as conn:
+                with conn.cursor() as cursor:
+                    # Step 1: Insert category
+                    insert_category_query = """
+                        INSERT INTO [BI_GUIDELINES].[dbo].[BSR_CATEGORY]
+                        (BSRPROJECTID, CATEGORY)
+                        VALUES (?, ?)
+                    """
+                    cursor.execute(insert_category_query, (presentation_id, category_name))
+
+                    # Step 2: Get generated ID
+                    get_id_query = """
+                        SELECT id
+                        FROM [BI_GUIDELINES].[dbo].[BSR_CATEGORY]
+                        WHERE BSRPROJECTID = ? AND CATEGORY = ?
+                    """
+                    cursor.execute(get_id_query, (presentation_id, category_name))
+                    result = cursor.fetchone()
+
+                    if not result:
+                        raise ValueError(f"Failed to retrieve category ID for '{category_name}'")
+
+                    category_id = result[0]
+
+                    # Step 3: Insert elements one by one
+                    insert_element_query = """
+                        INSERT INTO [BI_GUIDELINES].[dbo].[BSR_CATEGORY_ELEMENTS]
+                        (CATEGORY_ID, CATEGORY_MEMBERS)
+                        VALUES (?, ?)
+                    """
+
+                    elements_inserted = 0
+                    for element in elements:
+                        element_clean = element.strip()
+                        if element_clean:  # Only insert if not empty
+                            cursor.execute(insert_element_query, (category_id, element_clean))
+                            elements_inserted += 1
+
+                    conn.commit()
+
+                    logger.info(
+                        "Inserted category '%s' (ID=%d) with %d elements for project %d",
+                        category_name,
+                        category_id,
+                        elements_inserted,
+                        presentation_id
+                    )
+
+                    return {
+                        "category_id": category_id,
+                        "name": category_name,
+                        "elements_count": elements_inserted
+                    }
+        except Exception as e:
+            logger.error("Error inserting category with elements: %s", str(e))
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to insert category '{category_name}': {str(e)}"
+            ) from e
+
+    def update_project_categories(
+        self,
+        presentation_id: int,
+        categories_data: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Update categories for an existing BSR project.
+
+        Equivalente VB.NET: FnInsertCategory_FromUpdate (línea 3419)
+
+        Process:
+            1. Delete existing categories (CASCADE will delete elements)
+            2. If mode="none", only delete and return
+            3. If mode="single", insert only category1
+            4. If mode="both", insert category1 and category2
+
+        Args:
+            presentation_id: BSR project ID
+            categories_data: Dict with mode, category1, category2
+
+        Returns:
+            Dict with message, categories_updated, deleted_count
+        """
+        try:
+            # STEP 1: Delete existing categories
+            deleted_count = self._delete_project_categories(presentation_id)
+
+            # If mode is "none", only delete
+            if categories_data.get("mode") == "none":
+                return {
+                    "message": "Categories deleted successfully",
+                    "categories_updated": 0,
+                    "deleted_count": deleted_count
+                }
+
+            # STEP 2: Insert new categories
+            created_categories = []
+
+            # Insert Category 1
+            cat1_data = categories_data.get("category1")
+            if cat1_data:
+                # Validate that category name doesn't exist
+                if self._check_category_name_exists(presentation_id, cat1_data["name"]):
+                    raise ValueError(f"Category '{cat1_data['name']}' already exists")
+
+                cat1_result = self._insert_category_with_elements(
+                    presentation_id=presentation_id,
+                    category_name=cat1_data["name"],
+                    elements=cat1_data["elements"]
+                )
+                created_categories.append(cat1_result)
+
+            # Insert Category 2 if mode is "both"
+            if categories_data.get("mode") == "both":
+                cat2_data = categories_data.get("category2")
+                if cat2_data:
+                    # Validate that category name doesn't exist
+                    if self._check_category_name_exists(presentation_id, cat2_data["name"]):
+                        raise ValueError(f"Category '{cat2_data['name']}' already exists")
+
+                    cat2_result = self._insert_category_with_elements(
+                        presentation_id=presentation_id,
+                        category_name=cat2_data["name"],
+                        elements=cat2_data["elements"]
+                    )
+                    created_categories.append(cat2_result)
+
+            logger.info(
+                "Updated categories for project %d: deleted=%d, created=%d",
+                presentation_id,
+                deleted_count,
+                len(created_categories)
+            )
+
+            return {
+                "message": "Categories updated successfully",
+                "categories_updated": len(created_categories),
+                "deleted_count": deleted_count
+            }
+
+        except ValueError as e:
+            logger.error("Validation error updating categories: %s", str(e))
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except Exception as e:
+            logger.error("Error updating categories for project %d: %s", presentation_id, str(e))
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to update categories: {str(e)}"
+            ) from e
+
+    def _delete_project_categories(self, presentation_id: int) -> int:
+        """
+        Delete all categories and their elements for a project.
+
+        Equivalente VB.NET:
+        - fnDeleteCategoryfromUpdate() (línea 3018)
+        - fnDeleteCategoryElements_fromUpdate() (línea 3131)
+
+        Process:
+            1. Get category IDs to delete
+            2. Delete elements from BSR_CATEGORY_ELEMENTS
+            3. Delete categories from BSR_CATEGORY
+
+        Returns:
+            Number of categories deleted
+        """
+        try:
+            with create_connection() as conn:
+                with conn.cursor() as cursor:
+                    # Step 1: Get category IDs to delete
+                    get_category_ids_query = """
+                        SELECT id
+                        FROM [BI_GUIDELINES].[dbo].[BSR_CATEGORY]
+                        WHERE BSRPROJECTID = ?
+                    """
+                    cursor.execute(get_category_ids_query, (presentation_id,))
+                    category_ids = cursor.fetchall()
+
+                    if not category_ids or len(category_ids) == 0:
+                        logger.info("No categories to delete for project %d", presentation_id)
+                        return 0
+
+                    # Step 2: Delete elements for each category
+                    delete_elements_query = """
+                        DELETE FROM [BI_GUIDELINES].[dbo].[BSR_CATEGORY_ELEMENTS]
+                        WHERE category_id = ?
+                    """
+
+                    for cat_id_row in category_ids:
+                        cat_id = cat_id_row[0]
+                        cursor.execute(delete_elements_query, (cat_id,))
+
+                    # Step 3: Delete categories
+                    delete_categories_query = """
+                        DELETE FROM [BI_GUIDELINES].[dbo].[BSR_CATEGORY]
+                        WHERE BSRPROJECTID = ?
+                    """
+                    cursor.execute(delete_categories_query, (presentation_id,))
+
+                    conn.commit()
+
+                    logger.info(
+                        "Deleted %d categories for project %d",
+                        len(category_ids),
+                        presentation_id
+                    )
+
+                    return len(category_ids)
+
+        except Exception as e:
+            logger.error("Error deleting categories for project %d: %s", presentation_id, str(e))
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to delete categories: {str(e)}"
+            ) from e
+
+    def count_project_categories(self, presentation_id: int) -> int:
+        """
+        Count how many categories a project has.
+
+        Equivalente VB.NET: fnCheckCategory_fromUpdate() (línea 3195)
+
+        Returns:
+            Number of categories
+        """
+        try:
+            with create_connection() as conn:
+                with conn.cursor() as cursor:
+                    query = """
+                        SELECT COUNT(*) as count
+                        FROM [BI_GUIDELINES].[dbo].[BSR_CATEGORY]
+                        WHERE BSRPROJECTID = ?
+                    """
+                    cursor.execute(query, (presentation_id,))
+                    result = cursor.fetchone()
+                    return result[0] if result else 0
+        except Exception as e:
+            logger.error("Error counting categories for project %d: %s", presentation_id, str(e))
+            return 0
+
+    def check_bsr_project_exists(self, presentation_id: int) -> bool:
+        """
+        Verify if a BSR project exists.
+
+        Returns:
+            True if project exists, False otherwise
+        """
+        try:
+            with create_connection() as conn:
+                with conn.cursor() as cursor:
+                    query = """
+                        SELECT COUNT(*) as count
+                        FROM [BI_GUIDELINES].[dbo].[bsr_Master]
+                        WHERE PresentationId = ?
+                    """
+                    cursor.execute(query, (presentation_id,))
+                    result = cursor.fetchone()
+                    return (result[0] if result else 0) > 0
+        except Exception as e:
+            logger.error("Error checking if BSR project %d exists: %s", presentation_id, str(e))
+            return False
 
 
 # Global presentation service instance

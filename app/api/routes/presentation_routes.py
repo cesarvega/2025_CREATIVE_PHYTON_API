@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, Form
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, Form, Query
 from fastapi.responses import FileResponse
 from urllib.parse import quote
 
@@ -27,6 +27,8 @@ from app.models.presentation_models import (
     GenerateBackupResponse,
     BSRCreatePresentationMetadata,
     BSRCreatePresentationResponse,
+    ProjectCategoriesUpdate,
+    UpdateCategoriesResponse,
 )
 from app.models.nw_reports_models import (
     CreateFeedbackTemplateRequest,
@@ -477,7 +479,8 @@ async def create_simple_dw_presentation(
         "3. Converts PowerPoint slides to images\n"
         "4. Reads slide titles from the PowerPoint\n"
         "5. Creates presentation record in database\n"
-        "6. Inserts slide details including summary slide at specified position\n\n"
+        "6. Inserts slide details including summary slide at specified position\n"
+        "7. **(Optional)** Processes and inserts additional categories\n\n"
         "**Slide Insertion Logic:**\n"
         "If the PowerPoint has 5 slides and slide_number=3:\n"
         "- Slide 1 (Image) -> Slide #1\n"
@@ -487,9 +490,31 @@ async def create_simple_dw_presentation(
         "- Slide 4 (Image) -> Slide #5\n"
         "- Slide 5 (Image) -> Slide #6\n"
         "Total: 6 slides (5 original + 1 summary)\n\n"
+        "**Categories (Optional):**\n"
+        "You can optionally add categories to the BSR project by including a `categories` object in metadata:\n"
+        "- `add_categories`: Set to `true` to enable category processing\n"
+        "- `mode`: Either `'single'` (1 category) or `'both'` (2 categories)\n"
+        "- `category1`: Always required when `add_categories=true` (name + elements array)\n"
+        "- `category2`: Required only when `mode='both'` (name + elements array)\n\n"
+        "Example categories payload:\n"
+        "```json\n"
+        '{\n'
+        '  "add_categories": true,\n'
+        '  "mode": "both",\n'
+        '  "category1": {\n'
+        '    "name": "Region",\n'
+        '    "elements": ["North America", "Europe", "Asia"]\n'
+        '  },\n'
+        '  "category2": {\n'
+        '    "name": "Channel",\n'
+        '    "elements": ["Retail", "Online", "Corporate"]\n'
+        '  }\n'
+        '}\n'
+        "```\n\n"
         "**Data Storage:**\n"
         "- Master record: bsr_InsertPresentationMaster\n"
         "- Detail records: bsr_InsertPresentationDetail (one per slide)\n"
+        "- Categories: BSR_CATEGORY and BSR_CATEGORY_ELEMENTS tables\n"
         "- Images stored in: BRS_slides/{ProjectName}/\n"
     ),
     responses={
@@ -502,6 +527,7 @@ async def create_simple_dw_presentation(
                         "presentation_id": 12345,
                         "total_slides": 6,
                         "processing_time_seconds": 8.45,
+                        "categories_added": 2,
                     }
                 }
             },
@@ -611,14 +637,16 @@ async def create_bsr_presentation(
             is_wide_ppt=metadata.is_wide_ppt,
             pptx_content=pptx_content,
             pptx_filename=pptx_file.filename,
+            categories=metadata.categories,  # Pass categories to service
         )
 
         processing_time = time.time() - start_time
 
         logger.info(
-            "BSR presentation created successfully. ID: %s, Slides: %d, Time: %.2fs",
+            "BSR presentation created successfully. ID: %s, Slides: %d, Categories: %d, Time: %.2fs",
             result.get("presentation_id"),
             result.get("total_slides", 0),
+            result.get("categories_added", 0),
             processing_time,
         )
 
@@ -627,6 +655,7 @@ async def create_bsr_presentation(
             presentation_id=result.get("presentation_id"),
             total_slides=result.get("total_slides", 0),
             processing_time_seconds=processing_time,
+            categories_added=result.get("categories_added", 0),
         )
 
     except HTTPException:
@@ -2001,5 +2030,199 @@ async def generate_bsr_report(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to generate BSR reports: {str(e)}"
+        ) from e
+
+
+@router.put(
+    "/{presentation_id}/categories",
+    summary="Update categories for a BSR project",
+    response_model=UpdateCategoriesResponse,
+    description=(
+        "Update or delete categories for an existing BSR/NSR project.\n\n"
+        "**Equivalente VB.NET:** FnInsertCategory_FromUpdate()\n\n"
+        "**Process:**\n"
+        "1. Check if project exists\n"
+        "2. Check if categories already exist\n"
+        "3. If categories exist and force_update=false, return 409 (confirmation required)\n"
+        "4. Delete existing categories and elements\n"
+        "5. Insert new categories based on mode\n\n"
+        "**Modes:**\n"
+        "- `single`: Insert only category1\n"
+        "- `both`: Insert category1 and category2\n"
+        "- `none`: Delete all categories (no insertion)\n\n"
+        "**Query Parameters:**\n"
+        "- `force_update`: If false, requires user confirmation when categories exist\n\n"
+        "**Example Payloads:**\n\n"
+        "Update to 2 categories:\n"
+        "```json\n"
+        '{\n'
+        '  "mode": "both",\n'
+        '  "category1": {\n'
+        '    "name": "Sales Region",\n'
+        '    "elements": ["Americas", "EMEA", "APAC"]\n'
+        '  },\n'
+        '  "category2": {\n'
+        '    "name": "Product Type",\n'
+        '    "elements": ["Software", "Hardware", "Services"]\n'
+        '  }\n'
+        '}\n'
+        "```\n\n"
+        "Delete all categories:\n"
+        "```json\n"
+        '{\n'
+        '  "mode": "none"\n'
+        '}\n'
+        "```\n"
+    ),
+    responses={
+        200: {
+            "description": "Categories updated successfully",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "message": "Categories updated successfully",
+                        "categories_updated": 2,
+                        "deleted_count": 2
+                    }
+                }
+            },
+        },
+        404: {
+            "description": "Project not found",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": "Project 12345 not found"
+                    }
+                }
+            },
+        },
+        409: {
+            "description": "Categories exist - confirmation required",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": {
+                            "message": "Categories already exist for this project",
+                            "existing_count": 2,
+                            "action_required": "Add ?force_update=true to update categories"
+                        }
+                    }
+                }
+            },
+        },
+        422: {
+            "description": "Validation error",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": [
+                            {
+                                "loc": ["body", "mode"],
+                                "msg": "mode must be 'single', 'both', or 'none'",
+                                "type": "value_error"
+                            }
+                        ]
+                    }
+                }
+            },
+        },
+    },
+)
+async def update_project_categories(
+    presentation_id: int,
+    categories_data: ProjectCategoriesUpdate,
+    force_update: bool = Query(
+        False,
+        description="Force update without confirmation when categories exist"
+    ),
+) -> UpdateCategoriesResponse:
+    """
+    Update categories for an existing BSR/NSR project.
+
+    Equivalente VB.NET: FnInsertCategory_FromUpdate() en clsData.vb
+
+    Args:
+        presentation_id: ID of the BSR project
+        categories_data: Category update payload (mode, category1, category2)
+        force_update: If true, bypasses confirmation when categories exist
+
+    Returns:
+        UpdateCategoriesResponse with message, categories_updated, deleted_count
+
+    Raises:
+        HTTPException 404: If project doesn't exist
+        HTTPException 409: If categories exist and force_update=false
+        HTTPException 422: If validation fails
+        HTTPException 500: If update operation fails
+    """
+    try:
+        # Step 1: Verify project exists
+        logger.info("Checking if BSR project %d exists", presentation_id)
+        project_exists = presentation_service.check_bsr_project_exists(presentation_id)
+
+        if not project_exists:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Project {presentation_id} not found"
+            )
+
+        # Step 2: Check if categories already exist
+        existing_count = presentation_service.count_project_categories(presentation_id)
+
+        logger.info(
+            "Project %d has %d existing categories (force_update=%s)",
+            presentation_id,
+            existing_count,
+            force_update
+        )
+
+        # Step 3: If categories exist and no force_update, require confirmation
+        if existing_count > 0 and not force_update:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "Categories already exist for this project",
+                    "existing_count": existing_count,
+                    "action_required": "Add ?force_update=true to update categories"
+                }
+            )
+
+        # Step 4: Update categories
+        logger.info(
+            "Updating categories for project %d with mode='%s'",
+            presentation_id,
+            categories_data.mode
+        )
+
+        result = presentation_service.update_project_categories(
+            presentation_id=presentation_id,
+            categories_data=categories_data.model_dump()
+        )
+
+        logger.info(
+            "Categories update completed for project %d: %s",
+            presentation_id,
+            result
+        )
+
+        return UpdateCategoriesResponse(
+            message=result["message"],
+            categories_updated=result["categories_updated"],
+            deleted_count=result["deleted_count"]
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(
+            "Error updating categories for project %d: %s",
+            presentation_id,
+            str(e),
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update categories: {str(e)}"
         ) from e
 

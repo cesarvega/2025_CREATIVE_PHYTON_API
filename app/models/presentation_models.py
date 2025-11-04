@@ -787,6 +787,18 @@ class BSRCreatePresentationMetadata(BaseModel):
                 "presentation_type": "BSR",
                 "user_name": "analyst",
                 "is_wide_ppt": 0,
+                "categories": {
+                    "add_categories": True,
+                    "mode": "both",
+                    "category1": {
+                        "name": "Region",
+                        "elements": ["North America", "Europe", "Asia", "Latin America"]
+                    },
+                    "category2": {
+                        "name": "Channel",
+                        "elements": ["Retail", "Online", "Corporate"]
+                    }
+                }
             }
         }
     )
@@ -818,6 +830,50 @@ class BSRCreatePresentationMetadata(BaseModel):
         le=1,
         description="Wide screen format flag: 0=4:3, 1=16:9"
     )
+    categories: Optional[dict] = Field(
+        default=None,
+        description="Optional categories configuration with add_categories flag, mode, and category definitions"
+    )
+
+    @model_validator(mode="after")
+    def validate_categories(self) -> "BSRCreatePresentationMetadata":
+        """Validate categories structure if provided."""
+        if not self.categories or not self.categories.get("add_categories", False):
+            return self
+
+        categories = self.categories
+        mode = categories.get("mode")
+
+        # Validate mode
+        if mode not in ["single", "both"]:
+            raise ValueError("categories.mode must be 'single' or 'both'")
+
+        # Validate category1 (always required if add_categories=true)
+        cat1 = categories.get("category1")
+        if not cat1:
+            raise ValueError("category1 is required when add_categories is true")
+
+        if not cat1.get("name") or not isinstance(cat1.get("name"), str):
+            raise ValueError("category1.name must be a non-empty string")
+
+        elements1 = cat1.get("elements")
+        if not elements1 or not isinstance(elements1, list) or len(elements1) == 0:
+            raise ValueError("category1.elements must be a non-empty list")
+
+        # Validate category2 (only if mode=both)
+        if mode == "both":
+            cat2 = categories.get("category2")
+            if not cat2:
+                raise ValueError("category2 is required when mode is 'both'")
+
+            if not cat2.get("name") or not isinstance(cat2.get("name"), str):
+                raise ValueError("category2.name must be a non-empty string")
+
+            elements2 = cat2.get("elements")
+            if not elements2 or not isinstance(elements2, list) or len(elements2) == 0:
+                raise ValueError("category2.elements must be a non-empty list")
+
+        return self
 
 
 class BSRCreatePresentationRequest(BaseModel):
@@ -860,6 +916,7 @@ class BSRCreatePresentationResponse(BaseModel):
                 "presentation_id": 12345,
                 "total_slides": 6,
                 "processing_time_seconds": 8.45,
+                "categories_added": 2,
             }
         }
     )
@@ -876,4 +933,126 @@ class BSRCreatePresentationResponse(BaseModel):
     )
     processing_time_seconds: float = Field(
         ..., description="Total processing time"
+    )
+    categories_added: int = Field(
+        0, description="Number of categories added (0, 1, or 2)"
+    )
+
+
+# ========== Models for Category Update Operations ==========
+
+
+class CategoryUpdate(BaseModel):
+    """Model for updating a single category."""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "name": "Sales Region",
+                "elements": ["Americas", "EMEA", "APAC"]
+            }
+        }
+    )
+
+    name: str = Field(
+        ...,
+        min_length=1,
+        description="Category name"
+    )
+    elements: List[str] = Field(
+        ...,
+        min_length=1,
+        description="List of category elements"
+    )
+
+    @model_validator(mode="after")
+    def validate_elements(self) -> "CategoryUpdate":
+        """Validate and clean elements."""
+        if not self.elements or len(self.elements) == 0:
+            raise ValueError("Category must have at least one element")
+
+        # Clean and filter empty elements
+        cleaned = [elem.strip() for elem in self.elements if elem and elem.strip()]
+
+        if len(cleaned) == 0:
+            raise ValueError("Category must have at least one non-empty element")
+
+        self.elements = cleaned
+        return self
+
+
+class ProjectCategoriesUpdate(BaseModel):
+    """Model for updating all categories of a project."""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "mode": "both",
+                "category1": {
+                    "name": "Sales Region",
+                    "elements": ["Americas", "EMEA", "APAC"]
+                },
+                "category2": {
+                    "name": "Product Type",
+                    "elements": ["Software", "Hardware", "Services"]
+                }
+            }
+        }
+    )
+
+    mode: str = Field(
+        ...,
+        description="Category mode: 'single', 'both', or 'none' (to delete all)"
+    )
+    category1: Optional[CategoryUpdate] = Field(
+        None,
+        description="First category (required for single/both modes)"
+    )
+    category2: Optional[CategoryUpdate] = Field(
+        None,
+        description="Second category (required only for both mode)"
+    )
+
+    @model_validator(mode="after")
+    def validate_categories(self) -> "ProjectCategoriesUpdate":
+        """Validate category requirements based on mode."""
+        if self.mode not in ["single", "both", "none"]:
+            raise ValueError("mode must be 'single', 'both', or 'none'")
+
+        if self.mode in ["single", "both"] and not self.category1:
+            raise ValueError("category1 is required for single/both mode")
+
+        if self.mode == "both" and not self.category2:
+            raise ValueError("category2 is required for both mode")
+
+        if self.mode == "single" and self.category2:
+            raise ValueError("category2 should not be provided in single mode")
+
+        if self.mode == "none" and (self.category1 or self.category2):
+            raise ValueError("categories should not be provided when mode is 'none'")
+
+        return self
+
+
+class UpdateCategoriesResponse(BaseModel):
+    """Response model for category update operation."""
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "message": "Categories updated successfully",
+                "categories_updated": 2,
+                "deleted_count": 2
+            }
+        }
+    )
+
+    message: str = Field(..., description="Status message")
+    categories_updated: int = Field(
+        0,
+        description="Number of categories created/updated"
+    )
+    deleted_count: int = Field(
+        0,
+        description="Number of categories deleted"
     )
