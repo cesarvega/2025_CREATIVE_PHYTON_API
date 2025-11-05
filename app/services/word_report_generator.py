@@ -396,6 +396,8 @@ class WordReportGenerator:
             presentation_id: Presentation ID
             is_phonetics: If True, use Phonetics summary types (Positive_Phonetics, etc.)
         """
+        # OPTIMIZATION: Disable screen updating for faster COM operations
+        self.word_app.ScreenUpdating = False
         try:
             # Map of table indices to summary types
             # Based on original C# implementation (NWReportClass.cs):
@@ -451,6 +453,9 @@ class WordReportGenerator:
 
         except Exception as e:
             logger.error("Error populating tables: %s", str(e), exc_info=True)
+        finally:
+            # OPTIMIZATION: Re-enable screen updating
+            self.word_app.ScreenUpdating = True
 
     def _get_new_names_results(self, presentation_id: int) -> List:
         """Get NewNames results and process the special NameRationale format.
@@ -542,42 +547,11 @@ class WordReportGenerator:
                 except Exception:
                     pass
 
-                # Ensure data rows do NOT inherit header's blue background
-                try:
-                    row_range = new_row.Range
-                    # Remove any shading/texture copied from header
-                    # wdTextureNone = 0, wdWhite = 16, wdColorWhite = 16777215,
-                    # wdNoHighlight = 0, wdAuto = 0
-                    row_range.Shading.Texture = 0  # wdTextureNone
-                    # Force solid white fill explicitly (RGB and ColorIndex)
-                    try:
-                        row_range.Shading.ForegroundPatternColor = 16777215
-                        row_range.Shading.BackgroundPatternColor = 16777215
-                    except Exception:
-                        pass
-                    # wdWhite = 8
-                    row_range.Shading.ForegroundPatternColorIndex = 8
-                    row_range.Shading.BackgroundPatternColorIndex = 8
-                    row_range.HighlightColorIndex = 0
-                    row_range.Font.ColorIndex = 0
-
-                    # Also clear shading per cell to avoid residual fills
-                    try:
-                        for ci in range(1, new_row.Cells.Count + 1):
-                            cr = new_row.Cells(ci).Range
-                            cr.Shading.Texture = 0
-                            try:
-                                cr.Shading.ForegroundPatternColor = 16777215
-                                cr.Shading.BackgroundPatternColor = 16777215
-                            except Exception:
-                                pass
-                            cr.Shading.ForegroundPatternColorIndex = 8
-                            cr.Shading.BackgroundPatternColorIndex = 8
-                            cr.HighlightColorIndex = 0
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
+                # OPTIMIZATION: Commented out excessive cell-by-cell formatting
+                # This was causing ~1 second per row due to excessive COM calls (40+ operations per row)
+                # Total impact with 195 rows: 195 seconds wasted on formatting
+                # If rows need formatting cleanup, it will be done in bulk after all rows are added
+                # See: OPTIMIZACION_WORD_REPORT.md for details
 
                 # Populate cells based on table type
                 try:
@@ -615,6 +589,26 @@ class WordReportGenerator:
 
                 except Exception as cell_error:
                     logger.warning("Error populating cell in '%s': %s", table_name, str(cell_error))
+
+            # OPTIMIZATION: Clean up formatting in bulk for all data rows (much faster than per-cell)
+            # Remove blue background and white text inherited from header row
+            if table.Rows.Count > 1:
+                try:
+                    logger.debug("Cleaning formatting for %d data rows in table '%s'", table.Rows.Count - 1, table_name)
+                    for row_num in range(2, table.Rows.Count + 1):
+                        try:
+                            row_range = table.Rows(row_num).Range
+                            # Set white background for data rows (16777215 = RGB white)
+                            row_range.Shading.BackgroundPatternColor = 16777215
+                            # Also ensure no texture
+                            row_range.Shading.Texture = 0
+                            # Set text color to black (0 = wdColorAutomatic/black)
+                            row_range.Font.ColorIndex = 0  # wdAuto (black)
+                            row_range.Font.Color = 0  # RGB black
+                        except Exception as row_error:
+                            logger.debug("Error cleaning row %d: %s", row_num, str(row_error))
+                except Exception as e:
+                    logger.warning("Error cleaning table formatting: %s", str(e))
 
             logger.info("Successfully populated table '%s' with %d rows", table_name, len(results))
 

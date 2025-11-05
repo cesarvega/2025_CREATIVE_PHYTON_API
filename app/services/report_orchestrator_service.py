@@ -14,7 +14,9 @@ from app.models.nw_reports_models import (
 )
 from app.services.analytics_report_generator import analytics_report_generator
 from app.services.bi_guidelines_service import bi_guidelines_service
-from app.services.excel_report_generator import excel_report_generator
+# OPTIMIZATION: Using optimized Excel generator for better performance
+# Original: from app.services.excel_report_generator import excel_report_generator
+from app.services.excel_report_generator_optimized import excel_report_generator_optimized as excel_report_generator
 from app.services.word_report_generator import word_report_generator
 from app.utils.download_utils import create_download_token
 from app.utils.logging_utils import get_logger

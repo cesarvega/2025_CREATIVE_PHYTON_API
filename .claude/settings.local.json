@@ -3,7 +3,10 @@
     "allow": [
       "Bash(python -m py_compile app/models/presentation_models.py)",
       "Bash(python -m py_compile app/services/presentation_service.py)",
-      "Bash(python -m py_compile app/api/routes/presentation_routes.py)"
+      "Bash(python -m py_compile app/api/routes/presentation_routes.py)",
+      "Bash(python -m py_compile \"c:\\inetpub\\wwwroot\\CreativePythonAPI\\app\\services\\excel_report_generator.py\")",
+      "Bash(python -m py_compile \"c:\\inetpub\\wwwroot\\CreativePythonAPI\\app\\services\\excel_report_generator_optimized.py\")",
+      "Bash(python -m py_compile \"c:\\inetpub\\wwwroot\\CreativePythonAPI\\app\\services\\word_report_generator.py\")"
     ],
     "deny": [],
     "ask": []

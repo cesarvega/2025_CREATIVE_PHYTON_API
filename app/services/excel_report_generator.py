@@ -249,12 +249,13 @@ class ExcelReportGenerator:
         self._create_sheet_from_sp("Roots Or Concepts To Avoid", "nw_dlRootsOrConceptsToAvoid", presentation_id)
         self._create_sheet_from_sp("Notes", "nw_dlOpenNotes", presentation_id)
 
-        # Sheets 6-7: Only if participant voting is enabled
+        # Sheets 6-8: Only if participant voting is enabled
         if include_votes:
             self._create_sheet_from_sp("NW_Votes", "nw_Votesbygroups", presentation_id)
 
         if include_participants:
             self._create_sheet_from_sp("Participants", "nw_VotedParticipants", presentation_id)
+            self._create_participant_votes_sheet(presentation_id)
 
         # Save workbook to NW downloads directory
         # Format: [DisplayName]_[Timestamp].xlsx
@@ -270,6 +271,216 @@ class ExcelReportGenerator:
         logger.info("Excel report saved to: %s", output_path)
 
         return output_path
+
+    def _create_participant_votes_sheet(self, presentation_id: int) -> None:
+        """Create Participant Votes sheet showing how each participant voted for each name.
+
+        This creates a matrix with:
+        - Rows: Participants
+        - Columns: Names
+        - Values: Positive, Neutral, Negative (or blank if no vote)
+
+        Args:
+            presentation_id: Presentation ID to generate votes for
+        """
+        logger.debug("Creating Participant Votes sheet for presentation_id=%d", presentation_id)
+
+        ws = self.workbook.create_sheet("Participant Votes")
+
+        try:
+            from app.config.db import get_connection_scope
+
+            with get_connection_scope(timeout=30) as cursor:
+                # Try to call a stored procedure that returns participant votes
+                # If it doesn't exist, we'll catch the error and create an informative message
+                try:
+                    cursor.execute(
+                        "{CALL [BI_GUIDELINES].[dbo].[nw_ParticipantVotesByName](?)}",
+                        (presentation_id,)
+                    )
+
+                    # Fetch results
+                    if cursor.description is None:
+                        logger.warning("No results from nw_ParticipantVotesByName SP")
+                        self._write_header_row(ws, ["Participant", "Name", "Vote"])
+                        ws.cell(row=2, column=1, value="No data available")
+                        return
+
+                    columns = [column[0] for column in cursor.description]
+                    rows = cursor.fetchall()
+
+                    if not rows:
+                        logger.warning("nw_ParticipantVotesByName returned no rows")
+                        self._write_header_row(ws, ["Participant", "Name", "Vote"])
+                        ws.cell(row=2, column=1, value="No data available")
+                        return
+
+                    # Convert rows to dictionary format
+                    data = []
+                    for row in rows:
+                        data.append(dict(zip(columns, row)))
+
+                    # Get unique participants and names
+                    participants = []
+                    participant_ids = set()
+                    for item in data:
+                        pid = item.get('ParticipantId') or item.get('participant_id')
+                        if pid and pid not in participant_ids:
+                            participant_ids.add(pid)
+                            participants.append({
+                                'id': pid,
+                                'name': item.get('ParticipantName') or item.get('participant_name') or f"Participant {pid}"
+                            })
+
+                    names = list(set(item.get('Name') or item.get('name') or '' for item in data if item.get('Name') or item.get('name')))
+                    names.sort()
+
+                    # Create header row with participant name in first column and all names
+                    headers = ['Participant'] + names
+                    self._write_header_row(ws, headers)
+
+                    # Create a lookup dictionary for quick access
+                    vote_lookup = {}
+                    for item in data:
+                        pid = item.get('ParticipantId') or item.get('participant_id')
+                        name = item.get('Name') or item.get('name')
+                        vote = item.get('Vote') or item.get('vote')
+
+                        # Convert vote value to text if numeric
+                        if vote is not None:
+                            if isinstance(vote, (int, float)):
+                                if vote == 1:
+                                    vote = 'Positive'
+                                elif vote == 0:
+                                    vote = 'Neutral'
+                                elif vote == -1:
+                                    vote = 'Negative'
+
+                        if pid and name:
+                            vote_lookup[(pid, name)] = vote
+
+                    # Write data rows
+                    current_row = 2
+                    for participant in participants:
+                        ws.cell(row=current_row, column=1, value=participant['name'])
+
+                        for col_idx, name in enumerate(names, start=2):
+                            vote = vote_lookup.get((participant['id'], name), '')
+                            ws.cell(row=current_row, column=col_idx, value=vote if vote else '')
+
+                        current_row += 1
+
+                    # Auto-size columns
+                    self._auto_size_columns(ws)
+
+                    logger.info("Participant Votes sheet created with %d participants and %d names",
+                               len(participants), len(names))
+
+                except Exception as sp_error:
+                    # If stored procedure doesn't exist, log and create a message
+                    logger.warning("Stored procedure nw_ParticipantVotesByName not found or error: %s", str(sp_error))
+
+                    # Try alternative: query the database directly for vote data
+                    # This query structure is a best guess - may need adjustment based on actual schema
+                    try:
+                        query = """
+                            SELECT
+                                p.ParticipantId,
+                                p.ParticipantName,
+                                n.Name,
+                                v.Vote
+                            FROM [BI_GUIDELINES].[dbo].[NW_Participants] p
+                            INNER JOIN [BI_GUIDELINES].[dbo].[NW_ParticipantVotes] v
+                                ON p.ParticipantId = v.ParticipantId
+                            INNER JOIN [BI_GUIDELINES].[dbo].[NW_Names] n
+                                ON v.NameId = n.NameId
+                            WHERE p.PresentationId = ?
+                            ORDER BY p.ParticipantName, n.Name
+                        """
+                        cursor.execute(query, (presentation_id,))
+
+                        if cursor.description is None:
+                            raise Exception("Query returned no results")
+
+                        columns = [column[0] for column in cursor.description]
+                        rows = cursor.fetchall()
+
+                        if not rows:
+                            self._write_header_row(ws, ["Participant", "Name", "Vote"])
+                            ws.cell(row=2, column=1, value="No participant votes found for this presentation")
+                            return
+
+                        # Process the query results similar to SP results above
+                        data = []
+                        for row in rows:
+                            data.append(dict(zip(columns, row)))
+
+                        # Get unique participants and names
+                        participants = []
+                        participant_ids = set()
+                        for item in data:
+                            pid = item.get('ParticipantId')
+                            if pid and pid not in participant_ids:
+                                participant_ids.add(pid)
+                                participants.append({
+                                    'id': pid,
+                                    'name': item.get('ParticipantName') or f"Participant {pid}"
+                                })
+
+                        names = list(set(item.get('Name') or '' for item in data if item.get('Name')))
+                        names.sort()
+
+                        # Create header row
+                        headers = ['Participant'] + names
+                        self._write_header_row(ws, headers)
+
+                        # Create vote lookup
+                        vote_lookup = {}
+                        for item in data:
+                            pid = item.get('ParticipantId')
+                            name = item.get('Name')
+                            vote = item.get('Vote')
+
+                            # Convert vote value to text if numeric
+                            if vote is not None:
+                                if isinstance(vote, (int, float)):
+                                    if vote == 1:
+                                        vote = 'Positive'
+                                    elif vote == 0:
+                                        vote = 'Neutral'
+                                    elif vote == -1:
+                                        vote = 'Negative'
+
+                            if pid and name:
+                                vote_lookup[(pid, name)] = vote
+
+                        # Write data rows
+                        current_row = 2
+                        for participant in participants:
+                            ws.cell(row=current_row, column=1, value=participant['name'])
+
+                            for col_idx, name in enumerate(names, start=2):
+                                vote = vote_lookup.get((participant['id'], name), '')
+                                ws.cell(row=current_row, column=col_idx, value=vote if vote else '')
+
+                            current_row += 1
+
+                        # Auto-size columns
+                        self._auto_size_columns(ws)
+
+                        logger.info("Participant Votes sheet created with %d participants and %d names",
+                                   len(participants), len(names))
+
+                    except Exception as query_error:
+                        logger.error("Error querying participant votes directly: %s", str(query_error))
+                        self._write_header_row(ws, ["Message"])
+                        ws.cell(row=2, column=1, value="Unable to retrieve participant votes. Please contact your database administrator to create the nw_ParticipantVotesByName stored procedure.")
+                        ws.cell(row=3, column=1, value=f"Technical details: {str(sp_error)}")
+
+        except Exception as e:
+            logger.error("Error creating Participant Votes sheet: %s", str(e), exc_info=True)
+            self._write_header_row(ws, ["Error"])
+            ws.cell(row=2, column=1, value=f"Error: {str(e)}")
 
     def _write_header_row(self, ws, headers: list) -> None:
         """Write and format header row.
