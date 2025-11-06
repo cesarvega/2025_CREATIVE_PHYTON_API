@@ -19,6 +19,8 @@ from app.models.nw_reports_models import (
     WordReportResult,
 )
 from app.utils.logging_utils import get_logger
+# OPTIMIZATION: Use centralized db_utils to reduce code duplication
+from app.utils.db_utils import execute_sp_single_result, execute_sp_multiple_results, rows_to_dicts
 
 logger = get_logger(__name__)
 
@@ -62,6 +64,8 @@ class NWReportsService:
     def check_has_participants(self, presentation_id: int) -> int:
         """Check if presentation has participant voting enabled.
 
+        OPTIMIZED: Now uses execute_sp_single_result from db_utils.
+
         Args:
             presentation_id: The presentation ID.
 
@@ -73,34 +77,19 @@ class NWReportsService:
             presentation_id,
         )
 
-        try:
-            with get_connection_scope(timeout=30) as cursor:
-                cursor.execute(
-                    "{CALL [BI_GUIDELINES].[dbo].[nw_IsParticipantVoted](?)}",
-                    (presentation_id,)
-                )
+        # OPTIMIZATION: Single line replaces 20+ lines of boilerplate code
+        result = execute_sp_single_result(
+            "[BI_GUIDELINES].[dbo].[nw_IsParticipantVoted]",
+            (presentation_id,),
+            timeout=30
+        )
 
-                row = cursor.fetchone()
-                if row:
-                    # SP returns 1 or 0
-                    result = int(row[0]) if row[0] is not None else 0
-                    logger.info(
-                        "Presentation %d has participant voting: %s",
-                        presentation_id,
-                        result,
-                    )
-                    return result
+        if result:
+            value = int(result.get("HasVoted", 0)) if "HasVoted" in result else int(list(result.values())[0] if result.values() else 0)
+            logger.info("Presentation %d has participant voting: %s", presentation_id, value)
+            return value
 
-                return 0
-
-        except Exception as e:
-            logger.error(
-                "Error checking participant voting for presentation_id=%d: %s",
-                presentation_id,
-                str(e),
-                exc_info=True
-            )
-            return 0
+        return 0
 
     def is_participant_voted(
         self, presentation_id: int, participant_id: int

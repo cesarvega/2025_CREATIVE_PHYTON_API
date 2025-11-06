@@ -7,13 +7,14 @@ from pathlib import Path
 from typing import Optional
 
 from openpyxl import Workbook
-from openpyxl.styles import Alignment, Font, PatternFill
-from openpyxl.utils import get_column_letter
 
 from app.services.nw_reports_service import nw_reports_service
 from app.utils.logging_utils import get_logger
 from app.utils.nw_data_utils import sanitize_filename
 from app.utils.path_utils import get_nw_downloads_dir
+# OPTIMIZATION: Use centralized utilities to reduce code duplication
+from app.utils.db_utils import execute_sp_multiple_results
+from app.utils.excel_utils import write_header_row, auto_size_columns, write_data_rows
 
 logger = get_logger(__name__)
 
@@ -34,6 +35,8 @@ class ExcelReportGenerator:
     ) -> None:
         """Create a sheet directly from stored procedure results.
 
+        OPTIMIZED: Now uses db_utils and excel_utils for cleaner, reusable code.
+
         Args:
             sheet_name: Name for the worksheet
             sp_name: Name of the stored procedure
@@ -45,152 +48,39 @@ class ExcelReportGenerator:
         ws = self.workbook.create_sheet(sheet_name)
 
         try:
-            from app.config.db import get_connection_scope
+            # OPTIMIZATION: Use centralized db_utils instead of manual SP execution
+            columns, rows = execute_sp_multiple_results(
+                f"[BI_GUIDELINES].[dbo].[{sp_name}]",
+                (presentation_id,),
+                timeout=30,
+                return_all_resultsets=True
+            )
 
-            with get_connection_scope(timeout=30) as cursor:
-                # Execute stored procedure
-                cursor.execute(
-                    f"{{CALL [BI_GUIDELINES].[dbo].[{sp_name}](?)}}",
-                    (presentation_id,)
-                )
+            # Check if we have results
+            if columns is None:
+                logger.warning("No results from SP %s", sp_name)
+                write_header_row(ws, ["No Data"])
+                return
 
-                # Some SPs return multiple result sets (e.g., nw_CombineNewNames)
-                # We need to iterate through all result sets and use the last one with data
-                columns = None
-                rows = None
-                result_set_num = 0
+            if not rows:
+                logger.warning("SP %s returned no rows for presentation_id=%d", sp_name, presentation_id)
+                write_header_row(ws, columns)
+                ws.cell(row=2, column=1, value="No data available")
+                return
 
-                while True:
-                    if cursor.description is not None:
-                        # This result set has columns, save it
-                        result_set_num += 1
-                        temp_columns = [column[0] for column in cursor.description]
-                        temp_rows = cursor.fetchall()
+            logger.info("SP %s returned %d rows", sp_name, len(rows))
 
-                        # Only use result sets that have data OR if we have no data yet
-                        if temp_rows or columns is None:
-                            columns = temp_columns
-                            rows = temp_rows
-                            logger.debug("SP %s result set %d: %d columns, %d rows",
-                                       sp_name, result_set_num, len(columns), len(rows))
+            # OPTIMIZATION: Use excel_utils for headers, data writing, and auto-sizing
+            write_header_row(ws, columns)
+            rows_written = write_data_rows(ws, columns, rows, expand_grouped=expand_grouped_names)
+            auto_size_columns(ws)
 
-                    # Try to move to next result set
-                    if not cursor.nextset():
-                        break
-
-                # Check if we have results
-                if columns is None or cursor.description is None and result_set_num == 0:
-                    logger.warning("No results from SP %s", sp_name)
-                    headers = ["No Data"]
-                    self._write_header_row(ws, headers)
-                    return
-
-                if not rows:
-                    logger.warning("SP %s returned no rows for presentation_id=%d", sp_name, presentation_id)
-                    self._write_header_row(ws, columns)
-                    # Write a note that no data was found
-                    ws.cell(row=2, column=1, value="No data available")
-                    return
-
-                logger.info("SP %s returned %d rows", sp_name, len(rows))
-
-                # Write headers
-                self._write_header_row(ws, columns)
-
-                # Find columns that might contain delimited data
-                # We'll look for the primary "Name" column first
-                name_col_idx = None
-                for idx, col in enumerate(columns):
-                    col_lower = col.lower() if col else ''
-                    if col_lower in ['name', 'newname', 'namestoexplore', 'namestoavoid']:
-                        name_col_idx = idx
-                        logger.debug("Found name column '%s' at index %d", col, idx)
-                        break
-
-                if name_col_idx is None:
-                    logger.warning("No name column found in columns: %s", columns)
-
-                # Write data rows with expansion if needed
-                current_row = 2
-                for row in rows:
-                    # Convert row to list for easier manipulation
-                    row_list = list(row)
-
-                    # Check if we need to expand this row
-                    if expand_grouped_names and name_col_idx is not None:
-                        name_value = row_list[name_col_idx]
-
-                        # Check if name contains group delimiters
-                        if name_value and isinstance(name_value, str) and ('##' in name_value or '$$' in name_value):
-                            # Determine delimiter
-                            delimiter = '##' if '##' in name_value else '$$'
-
-                            # Split the primary name column and filter out empty values
-                            names = [n.strip() for n in name_value.split(delimiter)]
-
-                            # Count how many names we have (including empty strings for positioning)
-                            num_items = len(names)
-
-                            logger.debug("Expanding row with delimiter '%s' into %d items", delimiter, num_items)
-
-                            # Now split ALL columns that contain the same delimiter
-                            split_columns = []
-                            for col_idx, col_value in enumerate(row_list):
-                                if col_value and isinstance(col_value, str) and delimiter in col_value:
-                                    # Split this column
-                                    parts = [p.strip() for p in col_value.split(delimiter)]
-                                    # Pad with empty strings if needed to match num_items
-                                    while len(parts) < num_items:
-                                        parts.append('')
-                                    split_columns.append((col_idx, parts))
-                                else:
-                                    # This column doesn't have delimiter, will be repeated
-                                    split_columns.append((col_idx, [col_value] * num_items))
-
-                            # Write a row for each expanded item, but SKIP completely empty rows
-                            for item_idx in range(num_items):
-                                expanded_row = row_list.copy()
-
-                                # Update all split columns with their respective values
-                                for col_idx, parts in split_columns:
-                                    value = parts[item_idx] if item_idx < len(parts) else ''
-                                    # Clean up the value (strip whitespace)
-                                    if isinstance(value, str):
-                                        value = value.strip()
-                                    expanded_row[col_idx] = value
-
-                                # Check if the primary name column is empty
-                                # If the name is empty, skip this entire row
-                                if not expanded_row[name_col_idx]:
-                                    logger.debug("Skipping empty row at item_idx=%d", item_idx)
-                                    continue
-
-                                # Write the expanded row
-                                for col_num, value in enumerate(expanded_row, start=1):
-                                    ws.cell(row=current_row, column=col_num, value=value)
-
-                                current_row += 1
-                        else:
-                            # No grouping, write normally
-                            for col_num, value in enumerate(row_list, start=1):
-                                ws.cell(row=current_row, column=col_num, value=value)
-                            current_row += 1
-                    else:
-                        # No expansion needed, write normally
-                        for col_num, value in enumerate(row_list, start=1):
-                            ws.cell(row=current_row, column=col_num, value=value)
-                        current_row += 1
-
-                # Auto-size columns
-                self._auto_size_columns(ws)
-
-                logger.info("Sheet '%s' created with %d rows (expanded)", sheet_name, current_row - 2)
+            logger.info("Sheet '%s' created with %d rows (expanded)", sheet_name, rows_written)
 
         except Exception as e:
             logger.error("Error creating sheet '%s' from SP '%s': %s", sheet_name, sp_name, e, exc_info=True)
             # Create empty sheet on error
-            headers = ["Error"]
-            self._write_header_row(ws, headers)
+            write_header_row(ws, ["Error"])
             ws.cell(row=2, column=1, value=f"Error: {str(e)}")
 
     def generate_excel_report(
@@ -302,7 +192,7 @@ class ExcelReportGenerator:
                     # Fetch results
                     if cursor.description is None:
                         logger.warning("No results from nw_ParticipantVotesByName SP")
-                        self._write_header_row(ws, ["Participant", "Name", "Vote"])
+                        write_header_row(ws, ["Participant", "Name", "Vote"])
                         ws.cell(row=2, column=1, value="No data available")
                         return
 
@@ -311,7 +201,7 @@ class ExcelReportGenerator:
 
                     if not rows:
                         logger.warning("nw_ParticipantVotesByName returned no rows")
-                        self._write_header_row(ws, ["Participant", "Name", "Vote"])
+                        write_header_row(ws, ["Participant", "Name", "Vote"])
                         ws.cell(row=2, column=1, value="No data available")
                         return
 
@@ -337,7 +227,7 @@ class ExcelReportGenerator:
 
                     # Create header row with participant name in first column and all names
                     headers = ['Participant'] + names
-                    self._write_header_row(ws, headers)
+                    write_header_row(ws, headers)
 
                     # Create a lookup dictionary for quick access
                     vote_lookup = {}
@@ -371,7 +261,7 @@ class ExcelReportGenerator:
                         current_row += 1
 
                     # Auto-size columns
-                    self._auto_size_columns(ws)
+                    auto_size_columns(ws)
 
                     logger.info("Participant Votes sheet created with %d participants and %d names",
                                len(participants), len(names))
@@ -406,7 +296,7 @@ class ExcelReportGenerator:
                         rows = cursor.fetchall()
 
                         if not rows:
-                            self._write_header_row(ws, ["Participant", "Name", "Vote"])
+                            write_header_row(ws, ["Participant", "Name", "Vote"])
                             ws.cell(row=2, column=1, value="No participant votes found for this presentation")
                             return
 
@@ -432,7 +322,7 @@ class ExcelReportGenerator:
 
                         # Create header row
                         headers = ['Participant'] + names
-                        self._write_header_row(ws, headers)
+                        write_header_row(ws, headers)
 
                         # Create vote lookup
                         vote_lookup = {}
@@ -466,62 +356,25 @@ class ExcelReportGenerator:
                             current_row += 1
 
                         # Auto-size columns
-                        self._auto_size_columns(ws)
+                        auto_size_columns(ws)
 
                         logger.info("Participant Votes sheet created with %d participants and %d names",
                                    len(participants), len(names))
 
                     except Exception as query_error:
                         logger.error("Error querying participant votes directly: %s", str(query_error))
-                        self._write_header_row(ws, ["Message"])
+                        write_header_row(ws, ["Message"])
                         ws.cell(row=2, column=1, value="Unable to retrieve participant votes. Please contact your database administrator to create the nw_ParticipantVotesByName stored procedure.")
                         ws.cell(row=3, column=1, value=f"Technical details: {str(sp_error)}")
 
         except Exception as e:
             logger.error("Error creating Participant Votes sheet: %s", str(e), exc_info=True)
-            self._write_header_row(ws, ["Error"])
+            write_header_row(ws, ["Error"])
             ws.cell(row=2, column=1, value=f"Error: {str(e)}")
 
-    def _write_header_row(self, ws, headers: list) -> None:
-        """Write and format header row.
-
-        Args:
-            ws: Worksheet object
-            headers: List of header strings
-        """
-        # Header styling
-        header_font = Font(bold=True, color="FFFFFF")
-        header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
-        header_alignment = Alignment(horizontal="center", vertical="center")
-
-        for col_num, header in enumerate(headers, start=1):
-            cell = ws.cell(row=1, column=col_num, value=header)
-            cell.font = header_font
-            cell.fill = header_fill
-            cell.alignment = header_alignment
-
-    def _auto_size_columns(self, ws, max_width: int = 100) -> None:
-        """Auto-size columns based on content.
-
-        Args:
-            ws: Worksheet object
-            max_width: Maximum column width
-        """
-        for column in ws.columns:
-            max_length = 0
-            column_letter = get_column_letter(column[0].column)
-
-            for cell in column:
-                try:
-                    if cell.value:
-                        cell_length = len(str(cell.value))
-                        if cell_length > max_length:
-                            max_length = cell_length
-                except:
-                    pass
-
-            adjusted_width = min(max_length + 2, max_width)
-            ws.column_dimensions[column_letter].width = adjusted_width
+    # OPTIMIZATION: Removed _write_header_row and _auto_size_columns methods
+    # Now using centralized excel_utils.write_header_row() and excel_utils.auto_size_columns()
+    # This eliminates ~40 lines of duplicated code
 
 
 # Global service instance

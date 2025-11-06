@@ -1,12 +1,27 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -m py_compile app/models/presentation_models.py)",
-      "Bash(python -m py_compile app/services/presentation_service.py)",
-      "Bash(python -m py_compile app/api/routes/presentation_routes.py)",
-      "Bash(python -m py_compile \"c:\\inetpub\\wwwroot\\CreativePythonAPI\\app\\services\\excel_report_generator.py\")",
-      "Bash(python -m py_compile \"c:\\inetpub\\wwwroot\\CreativePythonAPI\\app\\services\\excel_report_generator_optimized.py\")",
-      "Bash(python -m py_compile \"c:\\inetpub\\wwwroot\\CreativePythonAPI\\app\\services\\word_report_generator.py\")"
+      "Bash(cat \"/c/inetpub/wwwroot/CreativePythonAPI/app/services/presentation_service.py\")",
+      "Bash(cat \"/c/inetpub/wwwroot/CreativePythonAPI/app/services/bsr_excel_report_generator.py\")",
+      "Bash(for file in /c/inetpub/wwwroot/CreativePythonAPI/app/services/*.py)",
+      "Bash(done)",
+      "Bash(paste - -)",
+      "Bash(sort -k3 -rn)",
+      "Bash(find /c/inetpub/wwwroot/CreativePythonAPI/app/services -name \"*.py\" -type f -exec sh -c 'echo \"\"\"\"$(basename \"\"\"\"$1\"\"\"\"): $(grep -c \"\"\"\"if \\|for \\|while \\|elif \"\"\"\" \"\"\"\"$1\"\"\"\")\"\"\"\"' _ {})",
+      "Bash(sort -t: -k2 -rn)",
+      "Bash(for method in \"_cleanup_bookmarks\" \"_replace_text_in_doc\" \"_get_template_path\")",
+      "Bash(do)",
+      "Bash(echo \"=== Method: $method ===\")",
+      "Bash(find ./app/services -name \"*.py\" -exec wc -l {} +)",
+      "Bash(python -m py_compile app/utils/db_utils.py)",
+      "Bash(python -m py_compile app/utils/excel_utils.py)",
+      "Bash(python -m py_compile app/utils/word_com_utils.py)",
+      "Bash(python -m py_compile app/utils/error_handlers.py)",
+      "Bash(python -m py_compile app/config/db.py)",
+      "Bash(python -m py_compile app/config/settings.py)",
+      "Bash(python -m py_compile app/services/excel_report_generator.py)",
+      "Bash(python -m py_compile app/services/nw_reports_service.py)",
+      "Bash(python -m py_compile app/services/word_report_generator.py)"
     ],
     "deny": [],
     "ask": []

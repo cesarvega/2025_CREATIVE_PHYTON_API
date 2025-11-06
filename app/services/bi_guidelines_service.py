@@ -106,8 +106,8 @@ class BIGuidelinesService:
 
             presentations = []
             for row in rows:
-                # Build link from display name
-                link = f"https://tools.brandinstitute.com/nw/#/main/{row.DisplayName}"
+                # FIXED: Build correct link - NW presentations use nw.bipresents.com
+                link = f"https://nw.bipresents.com/{row.DisplayName}"
 
                 presentations.append(
                     ActivePresentation(
@@ -210,9 +210,35 @@ class BIGuidelinesService:
             presentation_status = self._get_ci(d, "PresentationStatus", "Status", "status") or "OPEN"
             last_update_date = self._get_ci(d, "LastUpdateDate", "lastupdatedate", "Last_Update_Date")
 
-            # Use the Link column from the SP which already contains the BSR link
-            # Format: https://tools.brandinstitute.com/bsr/#/main/{DisplayName}
-            link = self._get_ci(d, "Link", "link") or f"https://tools.brandinstitute.com/bsr/#/main/{display_name}"
+            # FIXED: Always generate correct link - ignore old Link from SP
+            # This endpoint is specifically for BSR/NSR presentations
+            # Check for PresentationType field from SP (BSR, NSR, BSR-Japan, NSR-Japan, NW, DW)
+            presentation_type = self._get_ci(d, "PresentationType", "presentationtype", "Type")
+
+            # Generate link with first 2 letters of project + presentation_id
+            project_prefix = project[:2].lower() if project and len(project) >= 2 else ""
+            link_id = f"{project_prefix}{presentation_id}" if project_prefix else str(presentation_id)
+            
+            # Generate appropriate link based on type
+            if presentation_type:
+                ptype = str(presentation_type).upper()
+                
+                if "NSR" in ptype:
+                    # NSR or NSR-Japan -> https://bipresents.com/{project_prefix}{presentation_id}
+                    link = f"https://bipresents.com/{link_id}"
+                elif "BSR" in ptype:
+                    # BSR or BSR-Japan -> https://bipresents.com/{project_prefix}{presentation_id}
+                    link = f"https://bipresents.com/{link_id}"
+                elif ptype in ["NW", "DM"]:
+                    # NW or DayMaster -> https://nw.bipresents.com/{display_name}
+                    link = f"https://nw.bipresents.com/{display_name}"
+                else:
+                    # Unknown type: default to bipresents
+                    link = f"https://bipresents.com/{link_id}"
+            else:
+                # CRITICAL FIX: SP doesn't provide PresentationType, but this endpoint is for BSR/NSR
+                # Always use project_prefix + presentation_id format
+                link = f"https://bipresents.com/{link_id}"
 
             presentations.append(
                 ActivePresentation(

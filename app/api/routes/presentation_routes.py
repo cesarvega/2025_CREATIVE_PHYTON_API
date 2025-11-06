@@ -56,6 +56,8 @@ from app.utils.download_utils import (
 )
 from pathlib import Path
 from app.utils.logging_utils import get_logger
+# OPTIMIZATION: Centralized error handling
+from app.utils.error_handlers import handle_service_errors, ValidationError, validate_positive_integer
 from app.api.dependencies import (
     validate_project_type,
     validate_pptx_file,
@@ -127,6 +129,7 @@ logger = get_logger(__name__)
         },
     },
 )
+@handle_service_errors  # OPTIMIZATION: Centralized error handling
 async def create_presentation(
     metadata: CreatePresentationMetadata = Depends(parse_presentation_metadata),
     excel_file: UploadFile = File(..., description="Excel file (.xlsx or .xls)"),
@@ -1066,6 +1069,7 @@ async def test_slide_generation(
     summary="Test table layout with simple list of names",
     description="Simple endpoint to test dynamic table layout with just a list of names",
 )
+@handle_service_errors  # OPTIMIZATION: Centralized error handling
 async def test_table_layout(names: list[str]) -> dict:
     """Test table layout with a simple list of names.
 
@@ -1253,6 +1257,7 @@ async def test_table_layout(names: list[str]) -> dict:
         },
     },
 )
+@handle_service_errors  # OPTIMIZATION: Centralized error handling
 async def download_results(request: DownloadResultsRequest) -> DownloadResultsResponse:
     """Generate and download NW presentation results.
 

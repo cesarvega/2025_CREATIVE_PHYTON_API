@@ -28,37 +28,51 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 50100
 
+    def _get_path_for_env(self, prod_path: str, dev_path: str) -> Path:
+        """OPTIMIZATION: Helper method to reduce duplication in path properties.
+
+        Args:
+            prod_path: Path to use in production environment
+            dev_path: Path to use in development environment
+
+        Returns:
+            Path object for the current environment
+        """
+        if self.is_production:
+            return Path(prod_path)
+        return Path(dev_path)
+
     @property
     def base_dir_bipresents(self) -> Path:
         """Get base directory for bipresents based on environment"""
-        if self.environment.lower() == "production":
-            return Path("C:/inetpub/wwwroot/bipresents/bsr_slides")
-        else:
-            return Path("NW_Files") / "bipresents" / "bsr_slides"
+        return self._get_path_for_env(
+            "C:/inetpub/wwwroot/bipresents/bsr_slides",
+            "NW_Files/bipresents/bsr_slides"
+        )
 
     @property
     def base_dir_nw(self) -> Path:
         """Get base directory for nw based on environment"""
-        if self.environment.lower() == "production":
-            return Path("C:/inetpub/wwwroot/nw2/nw_slides")
-        else:
-            return Path("NW_Files") / "nw2" / "nw_slides"
+        return self._get_path_for_env(
+            "C:/inetpub/wwwroot/nw2/nw_slides",
+            "NW_Files/nw2/nw_slides"
+        )
 
     @property
     def base_dir(self) -> Path:
         """Get base directory based on environment"""
-        if self.environment.lower() == "production":
-            return Path("C:/inetpub/wwwroot/CreativePythonAPI")
-        else:
-            return Path("NW_Files") / "CreativePythonAPI"
+        return self._get_path_for_env(
+            "C:/inetpub/wwwroot/CreativePythonAPI",
+            "NW_Files/CreativePythonAPI"
+        )
 
     @property
     def nw_files_dir(self) -> Path:
         """Get NW files directory based on environment"""
-        if self.environment.lower() == "production":
-            return Path("C:/inetpub/wwwroot/CreativePythonAPI/NW_Files")
-        else:
-            return Path("NW_Files")
+        return self._get_path_for_env(
+            "C:/inetpub/wwwroot/CreativePythonAPI/NW_Files",
+            "NW_Files"
+        )
 
     # Application paths
     app_dir: Path = Path(__file__).parent.parent.parent.resolve()
