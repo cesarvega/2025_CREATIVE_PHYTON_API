@@ -61,9 +61,11 @@ class BSRExcelReportGenerator:
         categories = self._collect_categories(data)
         logger.info("Categories detected: %s", ", ".join(categories) if categories else "<none>")
 
-        self.excel = win32com.client.Dispatch("Excel.Application")
-        self.excel.Visible = False
-        self.excel.DisplayAlerts = False
+        from app.utils.com_manager import com_manager
+        with com_manager.acquire("Excel.Application Dispatch"):
+            self.excel = win32com.client.Dispatch("Excel.Application")
+            self.excel.Visible = False
+            self.excel.DisplayAlerts = False
 
         workbook = None
         try:

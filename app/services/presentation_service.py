@@ -58,6 +58,7 @@ class PresentationService:
         pptx_content: bytes,
         pptx_filename: str,
         categories: Optional[Dict[str, Any]] = None,
+        progress_callback=None,
     ) -> Dict[str, Any]:
         """
         Create a BSR (Board Sales Request) presentation.
@@ -72,6 +73,7 @@ class PresentationService:
             pptx_content: PowerPoint file content
             pptx_filename: PowerPoint filename
             categories: Optional categories configuration with add_categories flag
+            progress_callback: Optional callback function to report progress (int 0-100)
 
         Returns:
             Dict with presentation_id, total_slides, and categories_added
@@ -92,13 +94,19 @@ class PresentationService:
                 slide_number,
             )
 
-            # 1. Validate presentation doesn't exist
+            # 1. Validate presentation doesn't exist (30%)
+            if progress_callback:
+                progress_callback(30)
             self._validate_bsr_presentation_not_exists(project_name, clean_display_name)
 
-            # 2. Validate display name hasn't been used
+            # 2. Validate display name hasn't been used (35%)
+            if progress_callback:
+                progress_callback(35)
             self._validate_bsr_display_name_not_used(clean_display_name)
 
-            # 3. Convert PowerPoint to images (using BSR project type)
+            # 3. Convert PowerPoint to images (40-55%)
+            if progress_callback:
+                progress_callback(40)
             logger.info("Converting PowerPoint to images")
             # For BSR we store assets under the bipresents (bsr_slides) root
             pptx_data = pptx_service.convert_pptx_to_images(
@@ -110,11 +118,15 @@ class PresentationService:
             logger.info("PPTX Data - Images: %s", pptx_data.get("images"))
             logger.info("PPTX Data - Thumbnails: %s", pptx_data.get("thumbnails"))
 
-            # 4. Extract slide titles from PowerPoint
+            # 4. Extract slide titles from PowerPoint (55-60%)
+            if progress_callback:
+                progress_callback(55)
             logger.info("Extracting slide titles")
             slide_titles = self._extract_slide_titles(pptx_content, pptx_filename)
 
-            # 5. Insert presentation master record
+            # 5. Insert presentation master record (60-70%)
+            if progress_callback:
+                progress_callback(60)
             logger.info("Inserting presentation master record")
             presentation_id = self._insert_bsr_master_record(
                 project_name=project_name,
@@ -126,7 +138,9 @@ class PresentationService:
                 is_wide_ppt=is_wide_ppt,
             )
 
-            # 6. Insert presentation detail records
+            # 6. Insert presentation detail records (70-80%)
+            if progress_callback:
+                progress_callback(70)
             logger.info("Inserting presentation detail records")
             total_slides = self._insert_bsr_detail_records(
                 presentation_id=presentation_id,
@@ -136,7 +150,9 @@ class PresentationService:
                 pptx_data=pptx_data,
             )
 
-            # 7. Process categories if provided
+            # 7. Process categories if provided (80-90%)
+            if progress_callback:
+                progress_callback(80)
             categories_created = []
             if categories and categories.get("add_categories", False):
                 try:
@@ -156,6 +172,9 @@ class PresentationService:
                     )
                     # Optionally re-raise if you want categories to be mandatory
                     # raise HTTPException(status_code=500, detail=f"Categories error: {str(e)}")
+
+            if progress_callback:
+                progress_callback(90)
 
             logger.info(
                 "BSR presentation created successfully: ID=%d, Total Slides=%d, Categories=%d",
@@ -180,13 +199,14 @@ class PresentationService:
             ) from e
 
     def create_presentation(
-        self, request: CreatePresentationRequest
+        self, request: CreatePresentationRequest, progress_callback=None
     ) -> CreatePresentationResponse:
         """
         Orchestrate the complete presentation creation process.
 
         Args:
             request: Complete presentation creation request
+            progress_callback: Optional callback function to report progress (int 0-100)
 
         Returns:
             CreatePresentationResponse: Result of the presentation creation
@@ -206,20 +226,27 @@ class PresentationService:
                     request.display_name
                 )
 
-            # 1. Process Excel file
+            # 1. Process Excel file (30-40%)
+            if progress_callback:
+                progress_callback(30)
             logger.info("Processing Excel file: %s", request.excel_filename)
             excel_data = self._process_excel_file(request)
 
-            # 2. Convert PPTX file (MUST be done before saving Excel because it deletes the folder)
+            # 2. Convert PPTX file (40-50%)
+            if progress_callback:
+                progress_callback(40)
             logger.info("Converting PPTX file: %s", request.pptx_filename)
             pptx_data = self._convert_pptx_file(request)
 
-            # 3. Save original Excel file for future backup generation
-            # This MUST be done AFTER converting PPTX because pptx_service deletes the entire folder
+            # 3. Save original Excel file (50-55%)
+            if progress_callback:
+                progress_callback(50)
             logger.info("Saving original Excel file")
             excel_relative_path = self._save_original_excel(request)
 
-            # 4. Generate slides from Excel arrays
+            # 4. Generate slides from Excel arrays (55-70%)
+            if progress_callback:
+                progress_callback(55)
             logger.info("Generating slides from Excel data")
             slides_data = self._generate_slides_from_excel(
                 excel_data=excel_data,
@@ -237,7 +264,9 @@ class PresentationService:
                 slides_data.get("excel_file"),
             )
             
-            # 5. Generate physical PowerPoint file (if backup requested)
+            # 5. Generate physical PowerPoint file (70-85%)
+            if progress_callback:
+                progress_callback(70)
             generated_files = None
             if request.create_backup == 1:
                 logger.info("Generating physical PowerPoint backup file")
@@ -273,7 +302,9 @@ class PresentationService:
             else:
                 logger.info("Physical PowerPoint backup generation skipped (create_backup=0)")
 
-            # 6. Create presentation in DB
+            # 6. Create presentation in DB (85-95%)
+            if progress_callback:
+                progress_callback(85)
             logger.info("Creating presentation in database")
             presentation_result = self._create_presentation_in_db(slides_data, request)
 
@@ -286,6 +317,9 @@ class PresentationService:
             #         logger.info("Feedback document generated: %s", feedback_path)
 
             #     self._send_notification_emails(presentation_id, request)
+
+            if progress_callback:
+                progress_callback(95)
 
             processing_time = time.time() - start_time
 
@@ -307,8 +341,15 @@ class PresentationService:
         *,
         build_request: CreatePresentationRequest,
         options: PresentationBuildOptions,
+        progress_callback=None,
     ):
-        """Generate PowerPoint deliverables directly from Excel data."""
+        """Generate PowerPoint deliverables directly from Excel data.
+        
+        Args:
+            build_request: Complete presentation creation request
+            options: Build options for the presentation
+            progress_callback: Optional callback function to report progress (int 0-100)
+        """
 
         logger.info(
             "Assembling PPT files for project=%s display=%s slide_range=%s-%s",
@@ -318,7 +359,13 @@ class PresentationService:
             options.slide_end,
         )
 
+        # Process Excel (30-50%)
+        if progress_callback:
+            progress_callback(30)
         excel_data = self._process_excel_file(build_request)
+
+        if progress_callback:
+            progress_callback(50)
 
         stub_conversion = PPTXConversionResponse(
             message="Generated for PPT assembly",
@@ -331,6 +378,9 @@ class PresentationService:
             pptx_file=options.base_template,
         )
 
+        # Generate slides (50-70%)
+        if progress_callback:
+            progress_callback(60)
         slides_dict = self._generate_slides_from_excel(
             excel_data=excel_data,
             pptx_data=stub_conversion,
@@ -339,11 +389,16 @@ class PresentationService:
 
         details = slides_dict.get("details", [])
 
+        if progress_callback:
+            progress_callback(70)
+
+        # Compose presentation (70-90%)
         return pptx_builder_service.compose_presentation(
             request=build_request,
             options=options,
             details=details,
             excel_data=excel_data,
+            progress_callback=progress_callback,
         )
 
     def presentation_exists(
@@ -380,7 +435,7 @@ class PresentationService:
             raise HTTPException(status_code=500, detail="Database error while checking for presentation.") from e
 
     def generate_backup_presentation(
-        self, presentation_id: int
+        self, presentation_id: int, progress_callback=None
     ) -> Dict[str, Any]:
         """
         Generate a backup PowerPoint presentation from saved Excel and PPTX files.
@@ -391,6 +446,7 @@ class PresentationService:
 
         Args:
             presentation_id: The ID of the presentation to generate backup for
+            progress_callback: Optional callback function to report progress (int 0-100)
 
         Returns:
             Dict containing:
@@ -406,7 +462,9 @@ class PresentationService:
         try:
             logger.info("Generating backup for presentation ID: %d", presentation_id)
 
-            # 1. Retrieve presentation information from database
+            # 1. Retrieve presentation information from database (30-40%)
+            if progress_callback:
+                progress_callback(30)
             with create_connection() as conn:
                 with conn.cursor() as cursor:
                     cursor.execute(
@@ -521,14 +579,18 @@ class PresentationService:
             logger.info("Found Excel file: %s", excel_path)
             logger.info("Found PPTX file: %s", pptx_path)
 
-            # 3. Read file contents
+            # 3. Read file contents (40-50%)
+            if progress_callback:
+                progress_callback(40)
             with open(excel_path, "rb") as f:
                 excel_content = f.read()
 
             with open(pptx_path, "rb") as f:
                 pptx_content = f.read()
 
-            # 4. Create request object from database metadata
+            # 4. Create request object from database metadata (50-55%)
+            if progress_callback:
+                progress_callback(50)
             request = CreatePresentationRequest(
                 project=project,
                 display_name=display_name,
@@ -551,16 +613,22 @@ class PresentationService:
                 project_type="NW",  # Default to NW
             )
 
-            # 5. Process Excel file
+            # 5. Process Excel file (55-65%)
+            if progress_callback:
+                progress_callback(55)
             logger.info("Processing Excel file for backup generation")
             excel_data = self._process_excel_file(request)
 
-            # 6. Load existing PPTX image data instead of reconverting
+            # 6. Load existing PPTX image data (65-70%)
+            if progress_callback:
+                progress_callback(65)
             # (reconverting would delete the entire folder including the Excel file)
             logger.info("Loading existing PPTX images for backup generation")
             pptx_data = self._load_existing_pptx_images(output_base, pptx_path.name)
 
-            # 7. Generate slides data
+            # 7. Generate slides data (70-75%)
+            if progress_callback:
+                progress_callback(70)
             logger.info("Generating slides data for backup")
             slides_data = self._generate_slides_from_excel(
                 excel_data=excel_data,
@@ -568,7 +636,9 @@ class PresentationService:
                 request=request,
             )
 
-            # 8. Generate physical PowerPoint backup
+            # 8. Generate physical PowerPoint backup (75-90%)
+            if progress_callback:
+                progress_callback(75)
             logger.info("Generating physical PowerPoint backup")
             ppt_files = self._generate_physical_powerpoint(
                 slides_data=slides_data,
@@ -583,7 +653,9 @@ class PresentationService:
                 ppt_files.get("total_slides", "0"),
             )
 
-            # 9. Update the database with the generated PowerPoint filename
+            # 9. Update the database with the generated PowerPoint filename (90-95%)
+            if progress_callback:
+                progress_callback(90)
             printable_path = ppt_files.get("printable_path", "")
             if printable_path:
                 from pathlib import Path as PathLib

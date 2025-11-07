@@ -3,6 +3,8 @@
 from __future__ import annotations
 import html
 import re
+import time
+import pythoncom
 import win32com.client
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +29,42 @@ WD_CELL = 12  # wdCell
 WD_FORMAT_HTML = 8  # wdFormatHTML
 
 
+def retry_com_operation(operation, max_retries=3, delay=0.5):
+    """Retry COM operation if it fails due to busy application.
+    
+    Args:
+        operation: Callable to execute
+        max_retries: Maximum number of retry attempts
+        delay: Delay in seconds between retries
+        
+    Returns:
+        Result of the operation
+        
+    Raises:
+        Last exception if all retries fail
+    """
+    last_exception = None
+    for attempt in range(max_retries):
+        try:
+            return operation()
+        except pythoncom.com_error as e:
+            # Check if it's a "busy" error (-2147417846)
+            if e.args[0] == -2147417846:
+                last_exception = e
+                if attempt < max_retries - 1:
+                    logger.debug("COM busy (attempt %d/%d), retrying in %.1fs...", attempt + 1, max_retries, delay)
+                    time.sleep(delay)
+                else:
+                    logger.error("COM operation failed after %d attempts", max_retries)
+                    raise
+            else:
+                # Different error, don't retry
+                raise
+    
+    if last_exception:
+        raise last_exception
+
+
 class FeedbackTemplateGenerator:
     """Generate NW Feedback Template documents from InputDocumentRationales templates."""
 
@@ -40,6 +78,7 @@ class FeedbackTemplateGenerator:
         self,
         presentation_id: int,
         display_name: str,
+        progress_callback=None,
     ) -> Path:
         """Generate complete Feedback Template document for NW presentation.
 
@@ -57,6 +96,7 @@ class FeedbackTemplateGenerator:
         Args:
             presentation_id: Presentation ID to generate template for
             display_name: Display name for the presentation
+            progress_callback: Optional callback function to report progress (int 0-100)
 
         Returns:
             Path to generated Word file
@@ -66,7 +106,9 @@ class FeedbackTemplateGenerator:
             presentation_id,
         )
 
-        # Get presentation info to determine type
+        # Get presentation info to determine type (30-40%)
+        if progress_callback:
+            progress_callback(30)
         presentation_info = bi_guidelines_service.get_project_info(presentation_id)
         if not presentation_info:
             raise ValueError(f"Presentation with ID {presentation_id} not found")
@@ -74,23 +116,75 @@ class FeedbackTemplateGenerator:
         presentation_type = presentation_info.get("PresentationType", "Normal")
         logger.info("Presentation type: %s", presentation_type)
 
-        # Determine template path based on presentation type
+        # Determine template path based on presentation type (40-45%)
+        if progress_callback:
+            progress_callback(40)
         self.template_path = self._get_template_path(presentation_type)
         if not self.template_path.exists():
             raise FileNotFoundError(f"Feedback template not found: {self.template_path}")
 
         logger.info("Using template: %s", self.template_path)
 
-        # Initialize Word application
+        # Initialize COM for this thread
+        pythoncom.CoInitialize()
+
+        # Initialize Word application (45-50%)
+        if progress_callback:
+            progress_callback(45)
+        
+        doc = None
         try:
-            self.word_app = win32com.client.Dispatch("Word.Application")
-            self.word_app.Visible = False
-            self.word_app.DisplayAlerts = 0  # wdAlertsNone
+            # Initialize Word with proper COM handling
+            logger.info("Initializing Word application...")
+            from app.utils.com_manager import com_manager
+            with com_manager.acquire("Word.Application Dispatch"):
+                try:
+                    self.word_app = win32com.client.gencache.EnsureDispatch("Word.Application")
+                except Exception as e:
+                    logger.warning("EnsureDispatch failed, trying Dispatch: %s", str(e))
+                    self.word_app = win32com.client.Dispatch("Word.Application")
 
-            # Open template
-            doc = self.word_app.Documents.Open(str(self.template_path.absolute()))
+                self.word_app.Visible = False
+                self.word_app.DisplayAlerts = 0  # wdAlertsNone
+                logger.info("Word application initialized successfully")
 
-            # PHASE 1: Replace placeholders in document
+            # Open template - ensure proper COM object handling
+            template_path_str = str(self.template_path.absolute())
+            logger.info("Opening template file: %s", template_path_str)
+            
+            # Use positional parameters to ensure proper COM dispatch
+            # Parameters: FileName, ConfirmConversions, ReadOnly, AddToRecentFiles, etc.
+            doc = self.word_app.Documents.Open(
+                FileName=template_path_str,
+                ConfirmConversions=False,
+                ReadOnly=False,
+                AddToRecentFiles=False
+            )
+            
+            # Give Word time to fully load the document
+            time.sleep(0.5)
+            
+            # Verify document opened successfully
+            if not doc:
+                raise RuntimeError("Documents.Open returned None")
+            
+            # Check if we got the actual document object (with retry for busy COM object)
+            def verify_doc():
+                doc_name = doc.Name
+                logger.info("Template opened successfully: %s", doc_name)
+                return doc_name
+            
+            try:
+                retry_com_operation(verify_doc, max_retries=5, delay=1.0)
+            except AttributeError as attr_err:
+                logger.error("Failed to access document properties: %s", str(attr_err))
+                logger.error("Object type: %s", type(doc))
+                raise RuntimeError(f"Document object invalid. Got: {type(doc)}")
+
+
+            # PHASE 1: Replace placeholders in document (50-70%)
+            if progress_callback:
+                progress_callback(50)
             logger.info("Phase 1: Replacing placeholders")
             replacements = nw_reports_service.get_word_report_replacements(presentation_id)
             logger.info("Retrieved %d replacement values", len(replacements))
@@ -103,12 +197,16 @@ class FeedbackTemplateGenerator:
                         replacement.value
                     )
 
-            # PHASE 2: Populate tables with results
+            # PHASE 2: Populate tables with results (70-80%)
+            if progress_callback:
+                progress_callback(70)
             logger.info("Phase 2: Populating tables")
             is_phonetics = presentation_type.lower() == "phonetics"
             self._populate_feedback_tables(doc, presentation_id, is_phonetics)
 
-            # PHASE 3: Get "By The Numbers" data for pie chart
+            # PHASE 3: Get "By The Numbers" data for pie chart (80-85%)
+            if progress_callback:
+                progress_callback(80)
             logger.info("Phase 3: Generating pie chart")
             by_the_numbers_data = nw_reports_service.get_word_report_results_phonetics(
                 presentation_id,
@@ -118,11 +216,15 @@ class FeedbackTemplateGenerator:
             # Generate and insert Pie Chart
             self._generate_and_insert_pie_chart(doc, by_the_numbers_data)
 
-            # PHASE 4: Clean up bookmarks
+            # PHASE 4: Clean up bookmarks (85-90%)
+            if progress_callback:
+                progress_callback(85)
             logger.info("Phase 4: Cleaning up bookmarks")
             self._cleanup_bookmarks(doc)
 
-            # Save document to output directory
+            # Save document to output directory (90-95%)
+            if progress_callback:
+                progress_callback(90)
             output_dir = get_nw_downloads_dir()
             output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -131,9 +233,20 @@ class FeedbackTemplateGenerator:
             filename = f"Feedback_Template_{safe_display_name}_{timestamp}.doc"
             output_path = output_dir / filename
 
-            # Save as Word 97-2003 format (.doc)
-            doc.SaveAs2(str(output_path.absolute()), FileFormat=WD_FORMAT_DOCUMENT)
-            doc.Close()
+            # Save as Word 97-2003 format (.doc) with retry logic
+            def save_document():
+                doc.SaveAs2(str(output_path.absolute()), FileFormat=WD_FORMAT_DOCUMENT)
+                logger.info("Document saved successfully")
+            
+            retry_com_operation(save_document, max_retries=5, delay=1.0)
+            
+            # Close document with retry
+            def close_document():
+                doc.Close(SaveChanges=False)
+                logger.debug("Document closed after saving")
+            
+            retry_com_operation(close_document, max_retries=3, delay=0.5)
+            doc = None  # Mark as closed
 
             logger.info("Feedback template saved to: %s", output_path)
 
@@ -144,7 +257,14 @@ class FeedbackTemplateGenerator:
             raise
 
         finally:
-            # Cleanup applications
+            # Cleanup document and applications
+            if doc is not None:
+                try:
+                    doc.Close(SaveChanges=False)
+                    logger.debug("Document closed")
+                except Exception as e:
+                    logger.warning("Error closing document: %s", str(e))
+            
             if self.excel_app:
                 try:
                     self.excel_app.Quit()
@@ -156,6 +276,12 @@ class FeedbackTemplateGenerator:
                     self.word_app.Quit()
                 except Exception as e:
                     logger.warning("Error closing Word application: %s", str(e))
+            
+            # Uninitialize COM
+            try:
+                pythoncom.CoUninitialize()
+            except Exception as e:
+                logger.warning("Error uninitializing COM: %s", str(e))
 
     def _get_template_path(self, presentation_type: str) -> Path:
         """Get the path to the InputDocumentRationales template based on presentation type.
@@ -345,7 +471,11 @@ class FeedbackTemplateGenerator:
             is_phonetics: If True, use Phonetics summary types (Positive_Phonetics, etc.)
         """
         try:
-            total_tables = doc.Tables.Count
+            # Access tables with retry logic
+            def get_table_count():
+                return doc.Tables.Count
+            
+            total_tables = retry_com_operation(get_table_count, max_retries=5, delay=1.0)
             logger.info("Document has %d tables total", total_tables)
 
             if total_tables < 1:
@@ -353,7 +483,10 @@ class FeedbackTemplateGenerator:
                 return
 
             # Get the main feedback table (should be table 1)
-            main_table = doc.Tables(1)
+            def get_main_table():
+                return doc.Tables(1)
+            
+            main_table = retry_com_operation(get_main_table, max_retries=5, delay=1.0)
             logger.info("Found main table - Rows: %d, Columns: %d", main_table.Rows.Count, main_table.Columns.Count)
 
             # Gather ALL results from all summary types
@@ -726,9 +859,11 @@ class FeedbackTemplateGenerator:
             logger.info("Pie chart data: Positive=%d, Neutral=%d, Reconsider=%d", positive, neutral, reconsider)
 
             # Create Excel instance
-            self.excel_app = win32com.client.Dispatch("Excel.Application")
-            self.excel_app.Visible = False
-            self.excel_app.DisplayAlerts = False
+            from app.utils.com_manager import com_manager
+            with com_manager.acquire("Excel.Application Dispatch"):
+                self.excel_app = win32com.client.Dispatch("Excel.Application")
+                self.excel_app.Visible = False
+                self.excel_app.DisplayAlerts = False
 
             try:
                 # Create workbook
@@ -769,12 +904,17 @@ class FeedbackTemplateGenerator:
                 chart.Copy()
 
                 # Paste into Word at PieChart bookmark
-                if doc.Bookmarks.Exists("PieChart"):
-                    bookmark = doc.Bookmarks("PieChart")
-                    bookmark.Range.Paste()
-                    logger.info("Pie chart inserted successfully")
-                else:
-                    logger.warning("PieChart bookmark not found in document")
+                def check_and_paste_chart():
+                    if doc.Bookmarks.Exists("PieChart"):
+                        bookmark = doc.Bookmarks("PieChart")
+                        bookmark.Range.Paste()
+                        logger.info("Pie chart inserted successfully")
+                        return True
+                    else:
+                        logger.warning("PieChart bookmark not found in document")
+                        return False
+                
+                retry_com_operation(check_and_paste_chart, max_retries=5, delay=1.0)
 
                 workbook.Close(False)
 
@@ -795,12 +935,17 @@ class FeedbackTemplateGenerator:
             doc: Word Document object
         """
         try:
-            bookmark_count = doc.Bookmarks.Count
+            def get_bookmark_count():
+                return doc.Bookmarks.Count
+            
+            bookmark_count = retry_com_operation(get_bookmark_count, max_retries=5, delay=1.0)
 
             # Delete bookmarks in reverse order to avoid index issues
             for i in range(bookmark_count, 0, -1):
                 try:
-                    doc.Bookmarks(i).Delete()
+                    def delete_bookmark():
+                        doc.Bookmarks(i).Delete()
+                    retry_com_operation(delete_bookmark, max_retries=3, delay=0.5)
                 except:
                     pass
 

@@ -61,9 +61,11 @@ class WordReportGenerator:
 
         # Initialize Word application
         try:
-            self.word_app = win32com.client.Dispatch("Word.Application")
-            self.word_app.Visible = False
-            self.word_app.DisplayAlerts = 0  # wdAlertsNone
+            from app.utils.com_manager import com_manager
+            with com_manager.acquire("Word.Application Dispatch"):
+                self.word_app = win32com.client.Dispatch("Word.Application")
+                self.word_app.Visible = False
+                self.word_app.DisplayAlerts = 0  # wdAlertsNone
 
             # Open template
             doc = self.word_app.Documents.Open(str(self.template_path.absolute()))
@@ -551,9 +553,11 @@ class WordReportGenerator:
             reconsider = getattr(counts, 'reconsider_count', 0)
 
             # Create Excel instance
-            self.excel_app = win32com.client.Dispatch("Excel.Application")
-            self.excel_app.Visible = False
-            self.excel_app.DisplayAlerts = False
+            from app.utils.com_manager import com_manager
+            with com_manager.acquire("Excel.Application Dispatch"):
+                self.excel_app = win32com.client.Dispatch("Excel.Application")
+                self.excel_app.Visible = False
+                self.excel_app.DisplayAlerts = False
 
             try:
                 # Create workbook

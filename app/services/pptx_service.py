@@ -346,16 +346,19 @@ class PPTXService:
                 if presentation:
                     presentation.Close()
                     logger.info("Presentation closed")
+            except Exception as close_error:
+                logger.debug(
+                    "Presentation already closed or error closing: %s", str(close_error)
+                )
 
+            try:
                 if powerpoint:
                     powerpoint.Quit()
                     logger.info("PowerPoint closed")
-
-            except Exception as cleanup_error:
-                logger.warning(
-                    "Error during PowerPoint cleanup: %s", str(cleanup_error)
+            except Exception as quit_error:
+                logger.debug(
+                    "PowerPoint already closed or error quitting: %s", str(quit_error)
                 )
-                raise
 
             # Release COM resources
             pythoncom.CoUninitialize()

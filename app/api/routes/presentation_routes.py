@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, Form, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, Form, Query
 from fastapi.responses import FileResponse
 from urllib.parse import quote
 
@@ -42,11 +42,22 @@ from app.models.bsr_reports_models import (
 )
 from app.services.bsr_report_orchestrator_service import bsr_report_orchestrator_service as bsr_report_orchestrator
 from app.models.response_models import ReplaceProjectImagesResponse, CreateSimpleDWResponse
+from app.models.task_models import TaskCreatedResponse, TaskStatusResponse, TaskListResponse
 from app.services.presentation_service import presentation_service
 from app.services.report_orchestrator_service import report_orchestrator_service
 from app.services.feedback_template_generator import feedback_template_generator
 from app.services.bi_guidelines_service import bi_guidelines_service
 from app.services.pptx_service import pptx_service
+from app.utils.task_manager import task_manager, TaskStatus
+from app.api.background_tasks import (
+    _create_presentation_background,
+    _generate_backup_background,
+    _create_bsr_presentation_background,
+    _download_results_background,
+    _create_feedback_template_background,
+    _generate_bsr_report_background,
+    _build_presentation_files_background,
+)
 from app.config.db import get_connection_scope
 from app.utils.download_utils import (
     build_api_download_url,
@@ -70,27 +81,29 @@ logger = get_logger(__name__)
 
 @router.post(
     "/create",
-    response_model=CreatePresentationResponse,
-    summary="Create a complete presentation from Excel + PPTX inputs with physical file generation",
+    response_model=TaskCreatedResponse,
+    summary="Create a complete presentation from Excel + PPTX inputs with physical file generation (Background Task)",
     description=(
-        "Upload the Excel candidate workbook, a base PPTX template, and a metadata JSON payload "
-        "to generate a fully populated presentation. This endpoint:\n\n"
-        "1. **Processes Excel data** - Extracts names, categories, groups, and rationales\n"
-        "2. **Converts PPTX to images** - Generates JPG images from each slide of the original PPTX\n"
-        "3. **Generates slide metadata** - Creates detailed slide information for database storage\n"
-        "4. **Applies template rotation** (optional) - Rotates through specified templates for variety\n"
-        "5. **Generates physical PowerPoint file** - Combines original PPTX slides with template-generated slides:\n"
-        "   - Original PPTX slides (before `page_number`)\n"
-        "   - Template-generated slides from Excel data (groups, individuals, multi-name slides)\n"
-        "   - Original PPTX slides (after generated slides)\n"
-        "6. **Persists to database** - Saves presentation metadata and slide details to nw_Master and nw_Details\n"
-        "7. **Returns complete response** - Includes presentation ID, generated file paths, and processing stats\n\n"
-        "The generated PowerPoint file is a complete, ready-to-present deck that seamlessly integrates "
-        "your original slides with dynamically generated content from the Excel data."
+        "**[BACKGROUND TASK]** Upload Excel + PPTX to create a complete presentation.\n\n"
+        "This endpoint starts a background task and returns immediately with a task_id. "
+        "The presentation creation happens asynchronously, allowing other API requests to be processed.\n\n"
+        "**Workflow:**\n"
+        "1. Upload files → Get task_id immediately\n"
+        "2. Poll `/api/presentations/tasks/{task_id}` to check status\n"
+        "3. When status='completed', retrieve result with presentation_id\n\n"
+        "**Processing Steps (Background):**\n"
+        "1. **Processes Excel data** - Extracts names, categories, groups, rationales\n"
+        "2. **Converts PPTX to images** - Generates JPG from each slide\n"
+        "3. **Generates slide metadata** - Creates database records\n"
+        "4. **Applies template rotation** - Rotates through specified templates\n"
+        "5. **Generates physical PowerPoint** - Combines original + generated slides\n"
+        "6. **Persists to database** - Saves to nw_Master and nw_Details\n\n"
+        "**Why Background?** PowerPoint generation is CPU-intensive and can take 30-120 seconds. "
+        "Background processing ensures the API remains responsive."
     ),
     response_description=(
-        "Creation status with presentation ID, total slide count, processing time, "
-        "and paths to generated PowerPoint files (.pptx and optional .pptm)."
+        "Task creation confirmation with task_id and status_url. "
+        "Use the status_url to poll for completion and get the final result."
     ),
     responses={
         400: {
@@ -129,99 +142,227 @@ logger = get_logger(__name__)
         },
     },
 )
-@handle_service_errors  # OPTIMIZATION: Centralized error handling
 async def create_presentation(
+    background_tasks: BackgroundTasks,
     metadata: CreatePresentationMetadata = Depends(parse_presentation_metadata),
     excel_file: UploadFile = File(..., description="Excel file (.xlsx or .xls)"),
     pptx_file: UploadFile = File(..., description="PowerPoint file (.pptx)"),
-) -> CreatePresentationResponse:
+) -> TaskCreatedResponse:
     """Create a presentation by combining JSON metadata with uploaded template files.
 
-    The client must submit a `metadata` field containing a JSON object with all
-    presentation parameters (project name, display name, background settings, flags,
-    etc.) together with two file uploads: the Excel candidate sheet (`excel_file`) and
-    the PowerPoint template (`pptx_file`).
+    **Background Task Implementation:**
+    This endpoint queues the presentation creation as a background task and returns
+    immediately with a task_id. Clients should poll the task status endpoint to
+    check progress and retrieve the final result.
 
-    **Optional Physical PowerPoint Generation:**
-    If `generate_physical_pptx=true` in metadata, the service will also generate a
-    complete physical PowerPoint file combining:
-    - Original slides from the uploaded PPTX (before generated content)
-    - Dynamically generated slides from Excel data using templates
-    - Original slides from the uploaded PPTX (after generated content)
-    
-    This requires additional template configuration fields:
-    - `template_pack`: Template directory name (e.g., "BackgroundTemplates")
-    - `base_template`, `multi_template`, `group_template`, `separator_template`, `summary_template`
-    - `include_macro_version`: Generate .pptm file (default: false)
+    **Workflow:**
+    1. Validates file uploads (Excel and PowerPoint)
+    2. Creates a background task for processing
+    3. Returns task_id and status_url immediately
+    4. Processing happens asynchronously (Excel → PPTX → Database → Files)
 
-    The service then executes the full pipeline:
-    Excel processing â†’ PPTX conversion â†’ slide generation â†’ template application â†’
-    database persistence â†’ [optional] physical PowerPoint generation.
+    **Polling for Results:**
+    Use GET /api/presentations/tasks/{task_id} to check status:
+    - status='pending': Task queued
+    - status='processing': Task running (check progress field)
+    - status='completed': Task done (check result field for presentation_id)
+    - status='failed': Task failed (check error field)
     """
     try:
         # Validate Excel file
         if not excel_file.filename or not excel_file.filename.lower().endswith((".xlsx", ".xls")):
             raise HTTPException(status_code=400, detail="Excel file must be .xlsx or .xls")
-        
+
         # Validate PPTX file
         if not pptx_file.filename or not pptx_file.filename.lower().endswith(".pptx"):
             raise HTTPException(status_code=400, detail="PPTX file must be .pptx")
-        
+
         # Read file contents with size validation
         excel_content = await excel_file.read()
         pptx_content = await pptx_file.read()
-        
+
         # Validate sizes
         max_excel_size = 10 * 1024 * 1024  # 10MB
         max_pptx_size = 50 * 1024 * 1024   # 50MB
-        
+
         if len(excel_content) == 0:
             raise HTTPException(status_code=400, detail="Empty Excel file provided")
         if len(excel_content) > max_excel_size:
             raise HTTPException(status_code=413, detail="Excel file too large. Maximum size is 10MB")
-            
+
         if len(pptx_content) == 0:
             raise HTTPException(status_code=400, detail="Empty PPTX file provided")
         if len(pptx_content) > max_pptx_size:
             raise HTTPException(status_code=413, detail="PPTX file too large. Maximum size is 50MB")
 
-        # Create request object from metadata + files
-        request: CreatePresentationRequest = metadata.to_service_request(
-            excel_content=excel_content,
-            excel_filename=excel_file.filename,
-            pptx_content=pptx_content,
-            pptx_filename=pptx_file.filename,
+        # Create background task
+        task_id = task_manager.create_task(
+            task_type="create_presentation",
+            description=f"Creating presentation for project: {metadata.project}, display: {metadata.display_name}",
+            metadata={
+                "project": metadata.project,
+                "display_name": metadata.display_name,
+                "excel_filename": excel_file.filename,
+                "pptx_filename": pptx_file.filename,
+            }
         )
 
         logger.info(
-            "Starting presentation creation for project: %s, display_name: %s",
+            "Created background task %s for presentation creation: project=%s, display_name=%s",
+            task_id,
             metadata.project,
             metadata.display_name,
         )
 
-        start_time = time.time()
-
-        # Orchestrate complete presentation creation
-        result = presentation_service.create_presentation(request)
-
-        processing_time = time.time() - start_time
-
-        logger.info(
-            "Presentation created successfully. ID: %s, Slides: %d, Time: %.2fs",
-            result.presentation_id,
-            result.total_slides,
-            processing_time,
+        # Queue background task
+        background_tasks.add_task(
+            _create_presentation_background,
+            task_id,
+            metadata,
+            excel_content,
+            excel_file.filename,
+            pptx_content,
+            pptx_file.filename,
         )
 
-        return result
+        # Return task information immediately
+        task_info = task_manager.get_task(task_id)
+
+        return TaskCreatedResponse(
+            task_id=task_id,
+            status=task_info["status"],
+            message=f"Presentation creation task started for project '{metadata.project}'",
+            task_type="create_presentation",
+            created_at=task_info["created_at"],
+            status_url=f"/api/presentations/tasks/{task_id}"
+        )
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Error creating presentation: %s", str(e))
+        logger.error("Error queueing presentation creation: %s", str(e), exc_info=True)
         raise HTTPException(
-            status_code=500, detail=f"Failed to create presentation: {str(e)}"
+            status_code=500, detail=f"Failed to queue presentation creation: {str(e)}"
         ) from e
+
+
+@router.get(
+    "/tasks/{task_id}",
+    response_model=TaskStatusResponse,
+    summary="Get background task status",
+    description=(
+        "Check the status of a background task (presentation creation, backup generation, etc.).\n\n"
+        "**Status Values:**\n"
+        "- `pending`: Task queued but not started\n"
+        "- `processing`: Task currently running (check progress field for percentage)\n"
+        "- `completed`: Task finished successfully (result field contains output)\n"
+        "- `failed`: Task failed (error field contains error message)\n\n"
+        "**Polling Recommendations:**\n"
+        "- Poll every 2-5 seconds while status is 'pending' or 'processing'\n"
+        "- Stop polling when status is 'completed' or 'failed'\n"
+        "- Implement exponential backoff for long-running tasks"
+    ),
+)
+async def get_task_status(task_id: str) -> TaskStatusResponse:
+    """Get the status of a background task.
+
+    Args:
+        task_id: Task identifier returned by a background endpoint
+
+    Returns:
+        TaskStatusResponse with current status, progress, result, and error
+
+    Raises:
+        HTTPException 404: If task not found
+    """
+    task = task_manager.get_task(task_id)
+
+    if not task:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Task {task_id} not found"
+        )
+
+    return TaskStatusResponse(**task)
+
+
+@router.get(
+    "/tasks",
+    response_model=TaskListResponse,
+    summary="List background tasks",
+    description=(
+        "Retrieve a list of background tasks with optional filtering.\n\n"
+        "**Filters:**\n"
+        "- `task_type`: Filter by task type (e.g., 'create_presentation', 'generate_backup')\n"
+        "- `status`: Filter by status (pending, processing, completed, failed)\n"
+        "- `limit`: Maximum number of tasks to return (default: 100)\n\n"
+        "Tasks are sorted by creation time (newest first)."
+    ),
+)
+async def list_tasks(
+    task_type: Optional[str] = Query(None, description="Filter by task type"),
+    status: Optional[str] = Query(None, description="Filter by status"),
+    limit: int = Query(100, ge=1, le=1000, description="Maximum tasks to return"),
+) -> TaskListResponse:
+    """List background tasks with optional filtering.
+
+    Args:
+        task_type: Optional filter by task type
+        status: Optional filter by status
+        limit: Maximum number of tasks to return
+
+    Returns:
+        TaskListResponse with list of tasks and total count
+    """
+    # Convert status string to TaskStatus enum if provided
+    status_filter = None
+    if status:
+        try:
+            status_filter = TaskStatus(status)
+        except ValueError:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid status: {status}. Must be one of: pending, processing, completed, failed"
+            )
+
+    tasks = task_manager.list_tasks(
+        task_type=task_type,
+        status=status_filter,
+        limit=limit
+    )
+
+    return TaskListResponse(
+        tasks=[TaskStatusResponse(**task) for task in tasks],
+        total=len(tasks)
+    )
+
+
+@router.delete(
+    "/tasks/{task_id}",
+    summary="Delete a task",
+    description="Delete a completed or failed task from the task manager.",
+)
+async def delete_task(task_id: str) -> dict:
+    """Delete a task from the task manager.
+
+    Args:
+        task_id: Task identifier
+
+    Returns:
+        Success message
+
+    Raises:
+        HTTPException 404: If task not found
+    """
+    deleted = task_manager.delete_task(task_id)
+
+    if not deleted:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Task {task_id} not found"
+        )
+
+    return {"message": f"Task {task_id} deleted successfully"}
 
 
 @router.post(
@@ -473,7 +614,7 @@ async def create_simple_dw_presentation(
 @router.post(
     "/create-bsr",
     summary="Create BSR presentation from PowerPoint file",
-    response_model=BSRCreatePresentationResponse,
+    response_model=TaskCreatedResponse,
     description=(
         "Create a new BSR (Board Sales Request) presentation by uploading a PowerPoint file.\n\n"
         "This endpoint:\n"
@@ -585,9 +726,10 @@ async def create_simple_dw_presentation(
     },
 )
 async def create_bsr_presentation(
+    background_tasks: BackgroundTasks,
     metadata: BSRCreatePresentationMetadata = Depends(parse_bsr_metadata),
     pptx_file: UploadFile = File(..., description="PowerPoint file (.pptx)"),
-) -> BSRCreatePresentationResponse:
+) -> TaskCreatedResponse:
     """Create a BSR presentation from a PowerPoint file.
 
     This endpoint handles the complete BSR presentation creation workflow:
@@ -615,64 +757,64 @@ async def create_bsr_presentation(
         # Read file content
         pptx_content = await pptx_file.read()
 
-        # Validate size (max 50MB for PowerPoint files)
+        # Validate size
         max_pptx_size = 50 * 1024 * 1024
         if len(pptx_content) == 0:
             raise HTTPException(status_code=400, detail="Empty PPTX file provided")
         if len(pptx_content) > max_pptx_size:
             raise HTTPException(status_code=413, detail="PPTX file too large. Maximum size is 50MB")
 
+        # Create background task
+        task_id = task_manager.create_task(
+            task_type="create_bsr_presentation",
+            description=f"Creating BSR presentation: {metadata.project_name}/{metadata.display_name}",
+            metadata={
+                "project_name": metadata.project_name,
+                "display_name": metadata.display_name,
+                "pptx_filename": pptx_file.filename,
+            }
+        )
+
         logger.info(
-            "Starting BSR presentation creation: project=%s, display_name=%s",
+            "Created background task %s for BSR presentation: project=%s, display=%s",
+            task_id,
             metadata.project_name,
             metadata.display_name,
         )
 
-        start_time = time.time()
-
-        # Call service to create BSR presentation
-        result = presentation_service.create_bsr_presentation(
-            project_name=metadata.project_name,
-            display_name=metadata.display_name,
-            slide_number=metadata.slide_number,
-            presentation_type=metadata.presentation_type,
-            user_name=metadata.user_name,
-            is_wide_ppt=metadata.is_wide_ppt,
-            pptx_content=pptx_content,
-            pptx_filename=pptx_file.filename,
-            categories=metadata.categories,  # Pass categories to service
+        # Queue background task
+        background_tasks.add_task(
+            _create_bsr_presentation_background,
+            task_id,
+            metadata,
+            pptx_content,
+            pptx_file.filename,
         )
 
-        processing_time = time.time() - start_time
+        # Return task information immediately
+        task_info = task_manager.get_task(task_id)
 
-        logger.info(
-            "BSR presentation created successfully. ID: %s, Slides: %d, Categories: %d, Time: %.2fs",
-            result.get("presentation_id"),
-            result.get("total_slides", 0),
-            result.get("categories_added", 0),
-            processing_time,
-        )
-
-        return BSRCreatePresentationResponse(
-            message="BSR Presentation created successfully",
-            presentation_id=result.get("presentation_id"),
-            total_slides=result.get("total_slides", 0),
-            processing_time_seconds=processing_time,
-            categories_added=result.get("categories_added", 0),
+        return TaskCreatedResponse(
+            task_id=task_id,
+            status=task_info["status"],
+            message=f"BSR presentation creation task started for '{metadata.project_name}'",
+            task_type="create_bsr_presentation",
+            created_at=task_info["created_at"],
+            status_url=f"/api/presentations/tasks/{task_id}"
         )
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Error creating BSR presentation: %s", str(e), exc_info=True)
+        logger.error("Error queueing BSR presentation creation: %s", str(e), exc_info=True)
         raise HTTPException(
-            status_code=500, detail=f"Failed to create BSR presentation: {str(e)}"
+            status_code=500,
+            detail=f"Failed to queue BSR presentation creation: {str(e)}"
         ) from e
-
 
 @router.post(
     "/createTemplate",
-    response_model=PresentationBuildResponse,
+    response_model=TaskCreatedResponse,
     summary="Assemble presentation files directly from an Excel candidate sheet",
     description=(
         "Generate PPTX artifacts using metadata and an Excel workbook without uploading a template file. "
@@ -718,17 +860,18 @@ async def create_bsr_presentation(
     },
 )
 async def build_presentation_files(
+    background_tasks: BackgroundTasks,
     metadata: PresentationBuildMetadata = Depends(parse_build_metadata),
     excel_file: UploadFile = File(..., description="Excel file (.xlsx or .xls)"),
-) -> PresentationBuildResponse:
+) -> TaskCreatedResponse:
     try:
         # Validate Excel file
         if not excel_file.filename or not excel_file.filename.lower().endswith((".xlsx", ".xls")):
             raise HTTPException(status_code=400, detail="Excel file must be .xlsx or .xls")
-        
+
         # Read file content with size validation
         excel_content = await excel_file.read()
-        
+
         # Validate size
         max_excel_size = 10 * 1024 * 1024  # 10MB
         if len(excel_content) == 0:
@@ -736,81 +879,54 @@ async def build_presentation_files(
         if len(excel_content) > max_excel_size:
             raise HTTPException(status_code=413, detail="Excel file too large. Maximum size is 10MB")
 
-        build_request = metadata.to_creation_request(
-            excel_content=excel_content,
-            excel_filename=excel_file.filename,
-            pptx_filename=metadata.base_template,
+        # Create background task
+        task_id = task_manager.create_task(
+            task_type="build_presentation_files",
+            description=f"Building presentation for: {metadata.project}/{metadata.display_name}",
+            metadata={
+                "project": metadata.project,
+                "display_name": metadata.display_name,
+                "excel_filename": excel_file.filename,
+            }
         )
-        build_options = metadata.to_build_options()
-
-        start_time = time.time()
-        artifacts = presentation_service.build_presentation_files(
-            build_request=build_request,
-            options=build_options,
-        )
-        processing_time = time.time() - start_time
-
-        printable_path = (
-            str(artifacts.printable_path)
-            if artifacts.printable_path is not None
-            else None
-        )
-        macro_path = (
-            str(artifacts.macro_path) if artifacts.macro_path is not None else None
-        )
-
-        printable_base64 = None
-        macro_base64 = None
-
-        if metadata.return_bytes:
-            if artifacts.printable_path and artifacts.printable_path.exists():
-                printable_base64 = base64.b64encode(
-                    artifacts.printable_path.read_bytes()
-                ).decode("utf-8")
-            if artifacts.macro_path and artifacts.macro_path.exists():
-                macro_base64 = base64.b64encode(
-                    artifacts.macro_path.read_bytes()
-                ).decode("utf-8")
 
         logger.info(
-            "Presentation assembly finished for %s/%s in %.2fs (slides=%d)",
+            "Created background task %s for presentation build: project=%s, display_name=%s",
+            task_id,
             metadata.project,
             metadata.display_name,
-            processing_time,
-            artifacts.total_slides,
         )
 
-        return PresentationBuildResponse(
-            message=f"Presentation assembled in {processing_time:.2f}s",
-            total_slides=artifacts.total_slides,
-            slide_start=artifacts.slide_start,
-            slide_end=artifacts.slide_end,
-            printable_pptx=printable_path,
-            macro_pptx=macro_path,
-            printable_base64=printable_base64,
-            macro_base64=macro_base64,
-            download_urls=artifacts.download_urls,
-            api_downloads={
-                key: build_api_download_url(path)
-                for key, path in (
-                    ("printable", artifacts.printable_path),
-                    ("macro", artifacts.macro_path),
-                )
-                if path is not None
-            },
-            summary=artifacts.summary,
-            warnings=artifacts.warnings,
+        # Queue background task
+        background_tasks.add_task(
+            _build_presentation_files_background,
+            task_id,
+            metadata.model_dump(),  # Serialize metadata
+            excel_content,
+            excel_file.filename,
+        )
+
+        # Return task information immediately
+        task_info = task_manager.get_task(task_id)
+
+        return TaskCreatedResponse(
+            task_id=task_id,
+            status=task_info["status"],
+            message=f"Presentation build task started for '{metadata.project}'",
+            task_type="build_presentation_files",
+            created_at=task_info["created_at"],
+            status_url=f"/api/presentations/tasks/{task_id}"
         )
 
     except HTTPException:
         raise
     except FileNotFoundError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except Exception as exc:  # pylint: disable=broad-except
-        logger.error("Error assembling presentation: %s", exc)
+    except Exception as exc:
+        logger.error("Error queueing presentation build: %s", exc, exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail="Failed to assemble presentation from provided inputs.",
+            detail="Failed to queue presentation build.",
         ) from exc
 
 
@@ -848,14 +964,36 @@ async def check_presentation_exists(
     from the check, which is useful for update operations.
     """
     try:
+        logger.info(
+            "Checking if presentation exists: project_name=%s, display_name=%s, exclude_id=%s",
+            project_name,
+            display_name,
+            exclude_id
+        )
+
+        # Query database to check if presentation exists
         exists = presentation_service.presentation_exists(
             project_name=project_name,
             display_name=display_name,
-            exclude_id=exclude_id,
+            exclude_id=exclude_id
         )
+
+        logger.info("Presentation exists check result: %s", exists)
+
         return {"exists": exists}
+
     except HTTPException:
         raise
+    except Exception as e:
+        logger.error(
+            "Error checking presentation exists: %s",
+            str(e),
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Database error while checking for presentation: {str(e)}"
+        ) from e
 
 @router.get(
     "/files/{token}",
@@ -978,8 +1116,10 @@ async def test_slide_generation(
             prs.save(str(test_output_path))
 
             # Now open with COM automation to test the layout logic
-            powerpoint = win32com.client.Dispatch("PowerPoint.Application")
-            powerpoint.Visible = 1
+            from app.utils.com_manager import com_manager
+            with com_manager.acquire("PowerPoint.Application Dispatch - Test"):
+                powerpoint = win32com.client.Dispatch("PowerPoint.Application")
+                powerpoint.Visible = 1
 
             presentation = powerpoint.Presentations.Open(str(test_output_path.absolute()))
             com_slide = presentation.Slides(1)
@@ -1133,8 +1273,10 @@ async def test_table_layout(names: list[str]) -> dict:
             prs.save(str(test_output_path))
 
             # Open with COM automation
-            powerpoint = win32com.client.Dispatch("PowerPoint.Application")
-            powerpoint.Visible = 1
+            from app.utils.com_manager import com_manager
+            with com_manager.acquire("PowerPoint.Application Dispatch - Test"):
+                powerpoint = win32com.client.Dispatch("PowerPoint.Application")
+                powerpoint.Visible = 1
 
             presentation = powerpoint.Presentations.Open(str(test_output_path.absolute()))
             com_slide = presentation.Slides(1)
@@ -1193,7 +1335,7 @@ async def test_table_layout(names: list[str]) -> dict:
 
 @router.post(
     "/download-results",
-    response_model=DownloadResultsResponse,
+    response_model=TaskCreatedResponse,
     summary="Download NW results (generates Excel and Word in a ZIP)",
     description=(
         "Always generates two files for the specified presentation and packages them in a ZIP file:\n\n"
@@ -1258,7 +1400,7 @@ async def test_table_layout(names: list[str]) -> dict:
     },
 )
 @handle_service_errors  # OPTIMIZATION: Centralized error handling
-async def download_results(request: DownloadResultsRequest) -> DownloadResultsResponse:
+async def download_results(background_tasks: BackgroundTasks, request: DownloadResultsRequest) -> TaskCreatedResponse:
     """Generate and download NW presentation results.
 
     This endpoint orchestrates the generation of various NW report types:
@@ -1326,47 +1468,50 @@ async def download_results(request: DownloadResultsRequest) -> DownloadResultsRe
         HTTPException 501: If report type is not yet implemented
     """
     try:
+        # Create background task
+        task_id = task_manager.create_task(
+            task_type="download_results",
+            description=f"Generating reports for presentation_id: {request.presentation_id}",
+            metadata={"presentation_id": request.presentation_id}
+        )
+
         logger.info(
-            "Received download results request: presentation_id=%d",
+            "Created background task %s for report generation: presentation_id=%d",
+            task_id,
             request.presentation_id,
         )
 
-        # Generate report using orchestrator service
-        response = report_orchestrator_service.generate_report(request)
-
-        logger.info(
-            "Reports (Excel+Word) generated for presentation %d",
+        # Queue background task
+        background_tasks.add_task(
+            _download_results_background,
+            task_id,
             request.presentation_id,
         )
 
-        return response
+        # Return task information immediately
+        task_info = task_manager.get_task(task_id)
 
-    except ValueError as e:
-        logger.error("Invalid request: %s", str(e))
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-    except FileNotFoundError as e:
-        logger.error("Template file not found: %s", str(e))
-        raise HTTPException(status_code=404, detail=str(e)) from e
-
-    except NotImplementedError as e:
-        logger.error("Feature not implemented: %s", str(e))
-        raise HTTPException(status_code=501, detail=str(e)) from e
+        return TaskCreatedResponse(
+            task_id=task_id,
+            status=task_info["status"],
+            message=f"Report generation task started for presentation {request.presentation_id}",
+            task_type="download_results",
+            created_at=task_info["created_at"],
+            status_url=f"/api/presentations/tasks/{task_id}"
+        )
 
     except HTTPException:
         raise
-
     except Exception as e:
-        logger.error("Error generating report: %s", str(e), exc_info=True)
+        logger.error("Error queueing report generation: %s", str(e), exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to generate report: {str(e)}"
+            detail=f"Failed to queue report generation: {str(e)}"
         ) from e
-
 
 @router.post(
     "/create-feedback-template",
-    response_model=CreateFeedbackTemplateResponse,
+    response_model=TaskCreatedResponse,
     summary="Create NW Feedback Template document (InputDocumentRationales)",
     description=(
         "Generate a complete Feedback Template document from the InputDocumentRationales template.\n\n"
@@ -1457,7 +1602,7 @@ async def download_results(request: DownloadResultsRequest) -> DownloadResultsRe
         },
     },
 )
-async def create_feedback_template(request: CreateFeedbackTemplateRequest) -> CreateFeedbackTemplateResponse:
+async def create_feedback_template(background_tasks: BackgroundTasks, request: CreateFeedbackTemplateRequest) -> TaskCreatedResponse:
     """Generate a Feedback Template document for an NW presentation.
 
     This endpoint creates a complete InputDocumentRationales document populated with all
@@ -1493,83 +1638,65 @@ async def create_feedback_template(request: CreateFeedbackTemplateRequest) -> Cr
         HTTPException 500: If document generation fails
     """
     try:
-        logger.info(
-            "Received create feedback template request: presentation_id=%d",
-            request.presentation_id,
-        )
-
-        # Get presentation info
-        presentation_info = bi_guidelines_service.get_project_info(
-            request.presentation_id
-        )
+        # Get presentation info first
+        presentation_info = bi_guidelines_service.get_project_info(request.presentation_id)
 
         if not presentation_info:
-            raise ValueError(
-                f"Presentation with ID {request.presentation_id} not found"
+            raise HTTPException(
+                status_code=404,
+                detail=f"Presentation with ID {request.presentation_id} not found"
             )
 
         display_name = presentation_info.get("DisplayName", "Unknown")
-        presentation_type = presentation_info.get("PresentationType", "Normal")
+
+        # Create background task
+        task_id = task_manager.create_task(
+            task_type="create_feedback_template",
+            description=f"Creating feedback template for: {display_name}",
+            metadata={
+                "presentation_id": request.presentation_id,
+                "display_name": display_name
+            }
+        )
 
         logger.info(
-            "Generating feedback template for display_name='%s', type='%s'",
+            "Created background task %s for feedback template: presentation_id=%d",
+            task_id,
+            request.presentation_id,
+        )
+
+        # Queue background task
+        background_tasks.add_task(
+            _create_feedback_template_background,
+            task_id,
+            request.presentation_id,
             display_name,
-            presentation_type,
         )
 
-        # Generate the feedback template document
-        warnings = []
-        try:
-            file_path = feedback_template_generator.generate_feedback_template(
-                presentation_id=request.presentation_id,
-                display_name=display_name,
-            )
+        # Return task information immediately
+        task_info = task_manager.get_task(task_id)
 
-            logger.info("Feedback template generated successfully: %s", file_path)
-
-        except Exception as e:
-            logger.error("Error generating feedback template: %s", str(e), exc_info=True)
-            raise
-
-        # Build download token
-        download_token = None
-        if file_path and file_path.exists():
-            # Return only the token; client prepends /api/presentations/files/
-            download_token = create_download_token(file_path)
-
-        return CreateFeedbackTemplateResponse(
-            success=True,
-            message="Feedback template generated successfully",
-            file_path=str(file_path),
-            file_name=file_path.name,
-            download_token=download_token,
-            presentation_id=request.presentation_id,
-            presentation_type=presentation_type,
-            warnings=warnings,
+        return TaskCreatedResponse(
+            task_id=task_id,
+            status=task_info["status"],
+            message=f"Feedback template task started for presentation {request.presentation_id}",
+            task_type="create_feedback_template",
+            created_at=task_info["created_at"],
+            status_url=f"/api/presentations/tasks/{task_id}"
         )
-
-    except ValueError as e:
-        logger.error("Invalid request: %s", str(e))
-        raise HTTPException(status_code=400, detail=str(e)) from e
-
-    except FileNotFoundError as e:
-        logger.error("Template file not found: %s", str(e))
-        raise HTTPException(status_code=404, detail=str(e)) from e
 
     except HTTPException:
         raise
-
     except Exception as e:
-        logger.error("Error creating feedback template: %s", str(e), exc_info=True)
+        logger.error("Error queueing feedback template: %s", str(e), exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to generate feedback template: {str(e)}"
+            detail=f"Failed to queue feedback template: {str(e)}"
         ) from e
-
 
 @router.post(
     "/backup",
-    response_model=GenerateBackupResponse,
+    response_model=TaskCreatedResponse,
     summary="Generate backup PowerPoint from saved files",
     description=(
         "Generate a complete PowerPoint backup presentation from previously saved Excel and PPTX files.\n\n"
@@ -1661,7 +1788,7 @@ async def create_feedback_template(request: CreateFeedbackTemplateRequest) -> Cr
         },
     },
 )
-async def generate_backup(request: GenerateBackupRequest) -> GenerateBackupResponse:
+async def generate_backup(background_tasks: BackgroundTasks, request: GenerateBackupRequest) -> TaskCreatedResponse:
     """Generate a backup PowerPoint presentation from saved files.
 
     This endpoint enables deferred backup generation. Users who didn't create
@@ -1687,91 +1814,45 @@ async def generate_backup(request: GenerateBackupRequest) -> GenerateBackupRespo
         HTTPException 500: If backup generation fails
     """
     try:
+        # Create background task
+        task_id = task_manager.create_task(
+            task_type="generate_backup",
+            description=f"Generating backup for presentation_id: {request.presentation_id}",
+            metadata={"presentation_id": request.presentation_id}
+        )
+
         logger.info(
-            "Received generate backup request: presentation_id=%d",
+            "Created background task %s for backup generation: presentation_id=%d",
+            task_id,
             request.presentation_id,
         )
 
-        # Generate backup using service
-        result = presentation_service.generate_backup_presentation(
-            presentation_id=request.presentation_id
-        )
-
-        # Check if there are missing files
-        missing_files = result.get("missing_files", [])
-
-        if missing_files:
-            # Files are missing - return response with missing file details
-            logger.warning(
-                "Cannot generate backup for presentation %d: %d file(s) missing",
-                request.presentation_id,
-                len(missing_files)
-            )
-
-            return GenerateBackupResponse(
-                success=False,
-                message=f"Cannot generate backup: {len(missing_files)} required file(s) missing. Please contact IT to upload the missing files.",
-                presentation_id=request.presentation_id,
-                printable_path=None,
-                file_name=None,
-                download_token=None,
-                total_slides=None,
-                warnings=result.get("warnings", "None"),
-                missing_files=missing_files,
-            )
-
-        # Extract file path from result
-        printable_path = result.get("printable_path", "")
-
-        if not printable_path:
-            raise HTTPException(
-                status_code=500,
-                detail="Backup generation succeeded but no file path was returned"
-            )
-
-        # Convert path string to Path object
-        file_path = Path(printable_path)
-
-        if not file_path.exists():
-            raise HTTPException(
-                status_code=500,
-                detail=f"Backup file was generated but not found at: {printable_path}"
-            )
-
-        # Create download token
-        download_token = create_download_token(file_path)
-
-        logger.info(
-            "Backup generated successfully for presentation %d: %s",
+        # Queue background task
+        background_tasks.add_task(
+            _generate_backup_background,
+            task_id,
             request.presentation_id,
-            file_path.name
         )
 
-        return GenerateBackupResponse(
-            success=True,
-            message="Backup presentation generated successfully",
-            presentation_id=request.presentation_id,
-            printable_path=printable_path,
-            file_name=file_path.name,
-            download_token=download_token,
-            total_slides=result.get("total_slides", "0"),
-            warnings=result.get("warnings", "None"),
-            missing_files=[],
+        # Return task information immediately
+        task_info = task_manager.get_task(task_id)
+
+        return TaskCreatedResponse(
+            task_id=task_id,
+            status=task_info["status"],
+            message=f"Backup generation task started for presentation {request.presentation_id}",
+            task_type="generate_backup",
+            created_at=task_info["created_at"],
+            status_url=f"/api/presentations/tasks/{task_id}"
         )
 
     except HTTPException:
         raise
-
     except Exception as e:
-        logger.error(
-            "Error generating backup for presentation %d: %s",
-            request.presentation_id,
-            str(e),
-            exc_info=True
-        )
+        logger.error("Error queueing backup generation: %s", str(e), exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to generate backup: {str(e)}"
+            detail=f"Failed to queue backup generation: {str(e)}"
         ) from e
 
 
@@ -1965,7 +2046,7 @@ async def download_presentation_file(presentation_id: int) -> FileResponse:
 
 @router.post(
     "/generate-bsr-report",
-    response_model=BSRGenerateReportResponse,
+    response_model=TaskCreatedResponse,
     summary="Generate BSR Excel and Word reports",
     description=(
         "Generate downloadable Excel and Word reports for a BSR presentation.\n\n"
@@ -1974,69 +2055,53 @@ async def download_presentation_file(presentation_id: int) -> FileResponse:
         "Files are saved to: C:\\inetpub\\wwwroot\\CreativePythonAPI\\NW_Files\\downloads\\{DisplayName}.{ext}"
     ),
 )
-async def generate_bsr_report(
-    request: BSRGenerateReportRequest
-) -> BSRGenerateReportResponse:
+async def generate_bsr_report(background_tasks: BackgroundTasks, request: BSRGenerateReportRequest) -> TaskCreatedResponse:
     """Generate BSR reports (Excel + Word)."""
     try:
-        start_time = time.time()
-
-        # Generate reports
-        result = bsr_report_orchestrator.generate_bsr_reports(
-            presentation_id=request.presentation_id,
-            display_name=request.display_name
+        # Create background task
+        task_id = task_manager.create_task(
+            task_type="generate_bsr_report",
+            description=f"Generating BSR reports for: {request.display_name or request.presentation_id}",
+            metadata={
+                "presentation_id": request.presentation_id,
+                "display_name": request.display_name
+            }
         )
 
-        processing_time = time.time() - start_time
-        # Build download tokens and an optional ZIP for both files
-        from app.utils.download_utils import create_download_token
-        import zipfile
-        from datetime import datetime
-        
-        excel_token = None
-        word_token = None
-        zip_path = None
-        zip_token = None
-        
-        try:
-            from pathlib import Path as _Path
-            excel_path = _Path(result.excel_path)
-            word_path = _Path(result.word_path) if result.word_path else None
-            if excel_path.exists():
-                excel_token = create_download_token(excel_path)
-            if word_path and word_path.exists():
-                word_token = create_download_token(word_path)
-            # Create ZIP only if both files exist
-            if excel_path.exists() and word_path and word_path.exists():
-                downloads_dir = excel_path.parent
-                base_name = (request.display_name or excel_path.stem or f"BSR_{request.presentation_id}")
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                zip_path = downloads_dir / f"{base_name}_BSR_Reports_{timestamp}.zip"
-                with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-                    zf.write(excel_path, arcname=excel_path.name)
-                    zf.write(word_path, arcname=word_path.name)
-                zip_token = create_download_token(zip_path)
-        except Exception as zip_exc:
-            logger.warning("Could not create tokens/ZIP for BSR reports: %s", str(zip_exc))
-
-        return BSRGenerateReportResponse(
-            message="BSR reports generated successfully",
-            excel_file=str(result.excel_path),
-            word_file=str(result.word_path),
-            processing_time_seconds=processing_time,
-            warnings=result.warnings,
-            excel_download_token=excel_token,
-            word_download_token=word_token,
-            zip_file=(str(zip_path) if zip_path else None),
-            zip_download_token=zip_token,
+        logger.info(
+            "Created background task %s for BSR report: presentation_id=%d",
+            task_id,
+            request.presentation_id,
         )
+
+        # Queue background task
+        background_tasks.add_task(
+            _generate_bsr_report_background,
+            task_id,
+            request.presentation_id,
+            request.display_name,
+        )
+
+        # Return task information immediately
+        task_info = task_manager.get_task(task_id)
+
+        return TaskCreatedResponse(
+            task_id=task_id,
+            status=task_info["status"],
+            message=f"BSR report generation task started for presentation {request.presentation_id}",
+            task_type="generate_bsr_report",
+            created_at=task_info["created_at"],
+            status_url=f"/api/presentations/tasks/{task_id}"
+        )
+
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error("Error generating BSR reports: %s", str(e), exc_info=True)
+        logger.error("Error queueing BSR report: %s", str(e), exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to generate BSR reports: {str(e)}"
+            detail=f"Failed to queue BSR report: {str(e)}"
         ) from e
-
 
 @router.put(
     "/{presentation_id}/categories",

@@ -152,8 +152,20 @@ class PPTXBuilderService:
         options: PresentationBuildOptions,
         details: List[Dict[str, Any]],
         excel_data: ProcessedExcelData,
+        progress_callback=None,
     ) -> PresentationBuildArtifacts:
-        """Compose final PPT deliverables using existing templates and Excel data."""
+        """Compose final PPT deliverables using existing templates and Excel data.
+        
+        Args:
+            request: Presentation creation request
+            options: Build options
+            details: List of detail items
+            excel_data: Processed Excel data
+            progress_callback: Optional callback function to report progress (int 0-100)
+        """
+
+        if progress_callback:
+            progress_callback(72)
 
         template_paths = self._resolve_template_paths(options)
         _ = excel_data  # Reserved for future enhancements (e.g., aggregated metrics)
@@ -274,6 +286,9 @@ class PPTXBuilderService:
                     download_urls["printable"] = self._relative_download_path(printable_path_out)
                 if macro_path_out:
                     download_urls["macro"] = self._relative_download_path(macro_path_out)
+
+            if progress_callback:
+                progress_callback(88)
 
             artifacts = PresentationBuildArtifacts(
                 printable_path=printable_path_out,
@@ -1335,10 +1350,18 @@ class PPTXBuilderService:
             logger.info("Slide exported to JPG: %s", image_path)
             
         finally:
-            if presentation:
-                presentation.Close()
-            if powerpoint:
-                powerpoint.Quit()
+            try:
+                if presentation:
+                    presentation.Close()
+            except Exception as e:
+                logger.debug("Presentation already closed or error closing: %s", str(e))
+
+            try:
+                if powerpoint:
+                    powerpoint.Quit()
+            except Exception as e:
+                logger.debug("PowerPoint already closed or error quitting: %s", str(e))
+
             pythoncom.CoUninitialize()
 
     @staticmethod

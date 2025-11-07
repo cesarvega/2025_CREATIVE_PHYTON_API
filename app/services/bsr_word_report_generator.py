@@ -52,9 +52,11 @@ class BSRWordReportGenerator:
         # Word automation
         doc = None
         try:
-            self.word = win32com.client.Dispatch("Word.Application")
-            self.word.Visible = False
-            self.word.DisplayAlerts = 0
+            from app.utils.com_manager import com_manager
+            with com_manager.acquire("Word.Application Dispatch"):
+                self.word = win32com.client.Dispatch("Word.Application")
+                self.word.Visible = False
+                self.word.DisplayAlerts = 0
 
             doc = self.word.Documents.Open(str(template))
 

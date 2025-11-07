@@ -28,7 +28,7 @@ class ReportOrchestratorService:
     """Orchestrates the generation of different types of NW reports."""
 
     def generate_report(
-        self, request: DownloadResultsRequest
+        self, request: DownloadResultsRequest, progress_callback=None
     ) -> DownloadResultsResponse:
         """Generate NW results (Excel and Word) for a presentation.
 
@@ -37,6 +37,7 @@ class ReportOrchestratorService:
 
         Args:
             request: Download results request with presentation ID.
+            progress_callback: Optional callback function to report progress (int 0-100)
 
         Returns:
             DownloadResultsResponse with primary file path and download token.
@@ -50,7 +51,9 @@ class ReportOrchestratorService:
             request.presentation_id,
         )
 
-        # Get presentation info
+        # Get presentation info (30-40%)
+        if progress_callback:
+            progress_callback(30)
         presentation_info = bi_guidelines_service.get_project_info(
             request.presentation_id
         )
@@ -74,14 +77,18 @@ class ReportOrchestratorService:
         primary_file_path: Optional[Path] = None
 
         try:
-            # Always generate both Excel and Word reports
+            # Generate Excel report (40-70%)
+            if progress_callback:
+                progress_callback(40)
             excel_path = self._generate_excel_report(
                 request, project_name, display_name
             )
             file_paths.append(excel_path)
             logger.info("Excel report generated: %s", excel_path)
 
-            # Generate Word report
+            # Generate Word report (70-90%)
+            if progress_callback:
+                progress_callback(70)
             try:
                 word_path = self._generate_word_report(
                     request, display_name
@@ -94,6 +101,8 @@ class ReportOrchestratorService:
                 word_path = None
 
             # Primary file is Excel for backward compatibility
+            if progress_callback:
+                progress_callback(90)
             primary_file_path = excel_path
 
         except FileNotFoundError as e:
@@ -194,7 +203,7 @@ class ReportOrchestratorService:
         request: DownloadResultsRequest,
         display_name: str,
     ) -> Path:
-        """Generate Word report.
+        """Generate Word report with retry logic for COM errors.
 
         Args:
             request: Download results request
@@ -202,18 +211,51 @@ class ReportOrchestratorService:
 
         Returns:
             Path to generated Word file
+
+        Raises:
+            Exception: If all retry attempts fail
         """
         logger.info("Generating Word report")
 
-        # Default to phonetics mode (True)
-        # This matches the C# implementation where isPhonetics is typically True
-        file_path = word_report_generator.generate_word_report(
-            presentation_id=request.presentation_id,
-            display_name=display_name,
-            is_phonetics=True,
-        )
+        # Retry logic for COM "Call was rejected" errors
+        max_retries = 3
+        retry_delay = 2.0  # seconds
 
-        return file_path
+        for attempt in range(max_retries):
+            try:
+                # Default to phonetics mode (True)
+                # This matches the C# implementation where isPhonetics is typically True
+                file_path = word_report_generator.generate_word_report(
+                    presentation_id=request.presentation_id,
+                    display_name=display_name,
+                    is_phonetics=True,
+                )
+
+                if attempt > 0:
+                    logger.info("Word report generated successfully on attempt %d", attempt + 1)
+
+                return file_path
+
+            except Exception as e:
+                error_str = str(e)
+                is_com_busy_error = (
+                    "-2147418111" in error_str or  # RPC_E_CALL_REJECTED
+                    "Call was rejected" in error_str or
+                    "busy" in error_str.lower()
+                )
+
+                if is_com_busy_error and attempt < max_retries - 1:
+                    logger.warning(
+                        "COM busy error on attempt %d/%d: %s. Retrying in %.1fs...",
+                        attempt + 1, max_retries, error_str, retry_delay
+                    )
+                    import time
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    # Not a COM busy error, or final attempt failed
+                    logger.error("Word report generation failed after %d attempts", attempt + 1)
+                    raise
 
     def _create_zip_archive(
         self, file_paths: list[Path], display_name: str
