@@ -180,16 +180,19 @@ class PPTXService:
         if not project_name or project_name != Path(project_name).name:
             raise ValueError("Invalid project name")
 
+        # Sanitize project_name to match actual folder name
+        sanitized_project_name = sanitize_folder_name(project_name)
+
         # Resolve existing project folder
         base_dir = get_project_base_dir(project_type)
-        project_folder = base_dir / project_name
+        project_folder = base_dir / sanitized_project_name
         thumbnails_folder = project_folder / "Thumbnails"
         # Always generate thumbnails to ensure UI thumbnails exist
         generate_thumbnails = True
 
         if not project_folder.exists():
             raise FileNotFoundError(
-                f"Project folder not found: {project_folder}"
+                f"Project folder not found: {project_folder} (sanitized from '{project_name}')"
             )
 
         # Ensure thumbnails folder exists only if generating thumbnails
@@ -227,15 +230,15 @@ class PPTXService:
         thumbnail_urls: List[str] = []
         titles: List[str] = []
 
-        # Build relative URLs without re-sanitizing folder name
+        # Build relative URLs using sanitized folder name
         root = get_relative_slide_root(project_type)
         for result in slide_results:
             image_filename = Path(result["image_path"]).name
             thumbnail_filename = Path(result["thumbnail_path"]).name if result.get("thumbnail_path") else None
             if root:
-                image_urls.append("/".join([root, project_name, image_filename]))
+                image_urls.append("/".join([root, sanitized_project_name, image_filename]))
                 if generate_thumbnails and thumbnail_filename:
-                    thumbnail_urls.append("/".join([root, project_name, "Thumbnails", thumbnail_filename]))
+                    thumbnail_urls.append("/".join([root, sanitized_project_name, "Thumbnails", thumbnail_filename]))
             else:
                 image_urls.append(str(Path(result["image_path"])) )
                 if generate_thumbnails and thumbnail_filename:
@@ -243,7 +246,7 @@ class PPTXService:
             titles.append(result.get("title", ""))
 
         return {
-            "project_name": project_name,
+            "project_name": sanitized_project_name,
             "project_type": project_type,
             "total_images": len(image_urls),
             "images": image_urls,

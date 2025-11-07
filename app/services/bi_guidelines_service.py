@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import shutil
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from app.config.db import get_connection_scope
+from app.config.settings import settings
 from app.models.response_models import ActivePresentation, TemplateGroup
 from app.utils.logging_utils import get_logger
+from app.utils.path_utils import sanitize_folder_name
 
 logger = get_logger(__name__)
 
@@ -537,6 +541,49 @@ class BIGuidelinesService:
         )
 
         with get_connection_scope(timeout=30) as cursor:
+            # First, get the current display name to check if it's changing
+            cursor.execute(
+                "SELECT DisplayName FROM [BI_GUIDELINES].[dbo].[bsr_Master] WHERE PresentationId = ?",
+                (presentation_id,)
+            )
+            current_record = cursor.fetchone()
+
+            if not current_record:
+                raise ValueError(f"BSR Presentation with ID {presentation_id} not found")
+
+            current_display_name = current_record.DisplayName
+
+            # If display name is changing, rename the physical folder
+            if display_name != current_display_name:
+                logger.debug(
+                    "BI_GUIDELINES - BSR display name changing from '%s' to '%s'",
+                    current_display_name,
+                    display_name
+                )
+
+                # Rename the physical folder before updating the database
+                folder_renamed = self._rename_project_folder(
+                    old_display_name=current_display_name,
+                    new_display_name=display_name,
+                    project_type="bsr"
+                )
+
+                if not folder_renamed:
+                    logger.warning(
+                        "Failed to rename BSR folder from '%s' to '%s', but continuing with database update",
+                        current_display_name,
+                        display_name
+                    )
+
+                # Update slide image paths in the database
+                self._update_slide_image_paths(
+                    cursor=cursor,
+                    presentation_id=presentation_id,
+                    old_display_name=current_display_name,
+                    new_display_name=display_name,
+                    project_type="bsr"
+                )
+
             # Execute BSR_UpdatePresentationMaster stored procedure
             cursor.execute(
                 "{CALL [BI_GUIDELINES].[dbo].[BSR_UpdatePresentationMaster](?, ?, ?)}",
@@ -733,6 +780,220 @@ class BIGuidelinesService:
                 display_name
             )
 
+    def _rename_project_folder(
+        self,
+        old_display_name: str,
+        new_display_name: str,
+        project_type: str = "nw",
+    ) -> bool:
+        """Rename physical project folder when display name changes.
+
+        Args:
+            old_display_name: Previous display name
+            new_display_name: New display name
+            project_type: 'nw' for NW_Files/nw2, 'bsr' for NW_Files/bipresents
+
+        Returns:
+            True if folder was renamed successfully or didn't exist, False if error occurred
+
+        Note:
+            This method logs errors but doesn't raise exceptions to avoid blocking
+            database updates if folder operations fail.
+        """
+        try:
+            # Sanitize folder names
+            old_folder_name = sanitize_folder_name(old_display_name)
+            new_folder_name = sanitize_folder_name(new_display_name)
+
+            # If folder names are the same after sanitization, no need to rename
+            if old_folder_name == new_folder_name:
+                logger.debug(
+                    "Folder names are identical after sanitization ('%s'), skipping rename",
+                    old_folder_name
+                )
+                return True
+
+            # Determine base directory based on project type
+            if project_type.lower() in ("bsr", "bipresents"):
+                base_dir = settings.get_base_dir_for_project_type("bipresents")
+            else:
+                base_dir = settings.get_base_dir_for_project_type("nw")
+
+            old_path = base_dir / old_folder_name
+            new_path = base_dir / new_folder_name
+
+            # Check if old folder exists
+            if not old_path.exists():
+                logger.warning(
+                    "Old folder does not exist, cannot rename: %s",
+                    old_path
+                )
+                # Return True because this is not a critical error - folder might not have been created yet
+                return True
+
+            # Check if new folder already exists
+            if new_path.exists():
+                logger.error(
+                    "Cannot rename folder: destination already exists. Old: %s, New: %s",
+                    old_path,
+                    new_path
+                )
+                return False
+
+            # Rename the folder
+            shutil.move(str(old_path), str(new_path))
+
+            logger.info(
+                "Successfully renamed project folder from '%s' to '%s' (type: %s)",
+                old_folder_name,
+                new_folder_name,
+                project_type
+            )
+            return True
+
+        except Exception as e:
+            logger.error(
+                "Error renaming project folder from '%s' to '%s': %s",
+                old_display_name,
+                new_display_name,
+                str(e),
+                exc_info=True
+            )
+            return False
+
+    def _update_slide_image_paths(
+        self,
+        cursor,
+        presentation_id: int,
+        old_display_name: str,
+        new_display_name: str,
+        project_type: str = "nw",
+    ) -> int:
+        """Update SlideBGFileName paths in detail tables when display name changes.
+
+        Args:
+            cursor: Database cursor
+            presentation_id: ID of the presentation
+            old_display_name: Previous display name
+            new_display_name: New display name
+            project_type: 'nw' or 'bsr'
+
+        Returns:
+            Number of rows updated
+        """
+        try:
+            old_folder = sanitize_folder_name(old_display_name)
+            new_folder = sanitize_folder_name(new_display_name)
+
+            if old_folder == new_folder:
+                logger.debug("Folder names identical after sanitization, no path updates needed")
+                return 0
+
+            # Determine table and slide path pattern based on project type
+            if project_type.lower() in ("bsr", "bipresents"):
+                table_name = "bsr_Details"
+            else:
+                table_name = "nw_Details"
+
+            # First, check what URLs actually exist in the database
+            check_sql = f"""
+                SELECT TOP 5 SlideNumber, SlideBGFileName
+                FROM [BI_GUIDELINES].[dbo].[{table_name}]
+                WHERE PresentationId = ?
+                ORDER BY SlideNumber
+            """
+            cursor.execute(check_sql, (presentation_id,))
+            sample_rows = cursor.fetchall()
+            
+            if sample_rows:
+                logger.info(
+                    "Sample URLs for presentation %d (first 5 slides):",
+                    presentation_id
+                )
+                for row in sample_rows:
+                    logger.info("  Slide %d: %s", row.SlideNumber, row.SlideBGFileName)
+            else:
+                logger.warning("No slides found for presentation_id=%d", presentation_id)
+                return 0
+
+            # Extract the actual folder name from the first URL in the database
+            # Format in DB: nw_slides/FOLDER_NAME/001.jpg or bsr_slides/FOLDER_NAME/001.jpg
+            first_url = sample_rows[0].SlideBGFileName if sample_rows else ""
+            
+            if not first_url:
+                logger.warning("No valid URL found for presentation_id=%d", presentation_id)
+                return 0
+
+            # Determine the slide root and extract actual folder from DB
+            if project_type.lower() in ("bsr", "bipresents"):
+                slide_root = "bsr_slides"
+            else:
+                slide_root = "nw_slides"
+
+            # Extract the actual folder name from the URL
+            # Example: "nw_slides/TEST_NW_11_07_2025_TEST1/001.jpg" -> "TEST_NW_11_07_2025_TEST1"
+            if slide_root in first_url:
+                parts = first_url.split('/')
+                try:
+                    root_index = parts.index(slide_root)
+                    actual_old_folder = parts[root_index + 1] if len(parts) > root_index + 1 else None
+                except (ValueError, IndexError):
+                    actual_old_folder = None
+            else:
+                actual_old_folder = None
+
+            if not actual_old_folder:
+                logger.warning(
+                    "Could not extract folder name from URL: %s",
+                    first_url
+                )
+                return 0
+
+            logger.info(
+                "Detected actual folder in database: '%s', updating to: '%s'",
+                actual_old_folder,
+                new_folder
+            )
+
+            # Build patterns WITHOUT leading slash (matching the DB format)
+            old_pattern = f"{slide_root}/{actual_old_folder}/"
+            new_pattern = f"{slide_root}/{new_folder}/"
+
+            # Update all slides for this presentation that contain the old folder name
+            update_sql = f"""
+                UPDATE [BI_GUIDELINES].[dbo].[{table_name}]
+                SET SlideBGFileName = REPLACE(SlideBGFileName, ?, ?)
+                WHERE PresentationId = ?
+                AND SlideBGFileName LIKE ?
+            """
+
+            cursor.execute(
+                update_sql,
+                (old_pattern, new_pattern, presentation_id, f"%{old_pattern}%")
+            )
+
+            rows_affected = cursor.rowcount
+
+            logger.info(
+                "Updated %d slide image paths from '%s' to '%s' (presentation_id=%d, type=%s)",
+                rows_affected,
+                old_pattern,
+                new_pattern,
+                presentation_id,
+                project_type
+            )
+
+            return rows_affected
+
+        except Exception as e:
+            logger.error(
+                "Error updating slide image paths for presentation %d: %s",
+                presentation_id,
+                str(e),
+                exc_info=True
+            )
+            return 0
+
     def update_project_details(
         self,
         presentation_id: int,
@@ -797,6 +1058,29 @@ class BIGuidelinesService:
                         f"Display name '{display_name}' is already in use by project '{existing_record.Project}' "
                         f"(PresentationId: {existing_record.PresentationId})"
                     )
+
+                # Rename the physical folder before updating the database
+                folder_renamed = self._rename_project_folder(
+                    old_display_name=current_display_name,
+                    new_display_name=display_name,
+                    project_type="nw"
+                )
+
+                if not folder_renamed:
+                    logger.warning(
+                        "Failed to rename folder from '%s' to '%s', but continuing with database update",
+                        current_display_name,
+                        display_name
+                    )
+
+                # Update slide image paths in the database
+                self._update_slide_image_paths(
+                    cursor=cursor,
+                    presentation_id=presentation_id,
+                    old_display_name=current_display_name,
+                    new_display_name=display_name,
+                    project_type="nw"
+                )
 
             # Execute stored procedure to update presentation master details
             # SP signature: nw_UpdatePresentationMaster @PresentationId, @DisplayName,
