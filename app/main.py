@@ -7,6 +7,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from scalar_fastapi import get_scalar_api_reference
+from contextlib import asynccontextmanager
 
 from app.api.routes import (
     analytics_routes,
@@ -15,9 +16,11 @@ from app.api.routes import (
     pptx_conversion,
     presentation_routes,
     day_master,
+    task_routes,
 )
 from app.config.settings import settings
 from app.utils.logging_utils import setup_logging
+from app.utils.concurrency_manager_v2 import concurrency_manager
 
 # Ensure directories exist before mounting static files
 settings.ensure_directories()
@@ -25,6 +28,26 @@ settings.ensure_directories()
 # Setup logging
 setup_logging()
 logger = logging.getLogger(__name__)
+
+
+# Lifespan context manager for startup and shutdown
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan events for FastAPI application."""
+    # Startup
+    logger.info("Starting CreativePythonAPI...")
+    logger.info("Initializing concurrency manager...")
+    concurrency_manager.start()
+    logger.info("Concurrency manager started with %d workers", concurrency_manager.max_workers)
+
+    yield
+
+    # Shutdown
+    logger.info("Shutting down CreativePythonAPI...")
+    logger.info("Stopping concurrency manager...")
+    concurrency_manager.stop(wait=True, timeout=10.0)
+    logger.info("Concurrency manager stopped")
+
 
 # Create FastAPI application
 app = FastAPI(
@@ -35,6 +58,7 @@ app = FastAPI(
     root_path=(
         "/CreativePythonAPI" if settings.environment.lower() == "production" else ""
     ),
+    lifespan=lifespan,
 )
 
 # CORS configuration
@@ -56,6 +80,9 @@ app.include_router(
 )
 app.include_router(
     analytics_routes.router, prefix="/api", tags=["Analytics Statistics"]
+)
+app.include_router(
+    task_routes.router, prefix="/api", tags=["Task Management"]
 )
 
 

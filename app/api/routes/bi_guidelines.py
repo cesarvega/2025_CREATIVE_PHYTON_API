@@ -226,28 +226,48 @@ async def get_bsr_display_names(
 
 @router.get("/project-info/{project_id}")
 async def get_project_info(project_id: int):
-    """Retrieve project information by executing the nw_PresentationInfo_Nw2_apr2020 stored procedure.
+    """Retrieve project information automatically detecting if it's NW or BSR type.
+
+    This endpoint intelligently searches for the project in both NW and BSR tables:
+    1. First tries to find the project in NW table (nw_PresentationInfo_Nw2_apr2020)
+    2. If not found in NW, tries BSR table (BSR_PresentationInfo)
+    3. Returns project details if found in either table
 
     Args:
         project_id: The project ID to retrieve information for.
 
     Returns:
         Dictionary containing all project details returned by the stored procedure.
+        Includes an additional field "project_type" indicating "NW" or "BSR".
 
     Raises:
-        HTTPException: 404 if project not found, 500 if database error occurs.
+        HTTPException: 404 if project not found in either table, 500 if database error occurs.
     """
     try:
+        # First, try to get project info from NW table
         project_details = bi_guidelines_service.get_project_info(project_id)
 
-        if project_details is None:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Project with ID {project_id} not found"
-            )
+        if project_details is not None:
+            # Found in NW table
+            project_details["project_type"] = "NW"
+            logger.info("Retrieved NW project info for project_id=%d", project_id)
+            return project_details
 
-        logger.info("Retrieved project info for project_id=%d", project_id)
-        return project_details
+        # Not found in NW, try BSR table
+        logger.debug("Project %d not found in NW table, trying BSR table", project_id)
+        project_details = bi_guidelines_service.get_bsr_project_info(project_id)
+
+        if project_details is not None:
+            # Found in BSR table
+            project_details["project_type"] = "BSR"
+            logger.info("Retrieved BSR project info for project_id=%d", project_id)
+            return project_details
+
+        # Not found in either table
+        raise HTTPException(
+            status_code=404,
+            detail=f"Project with ID {project_id} not found in NW or BSR tables"
+        )
 
     except HTTPException:
         raise

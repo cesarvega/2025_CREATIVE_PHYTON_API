@@ -3,6 +3,7 @@
 import time
 from typing import Optional
 import pythoncom
+import asyncio
 
 from app.models.presentation_models import CreatePresentationMetadata, BSRCreatePresentationMetadata
 from app.services.presentation_service import presentation_service
@@ -75,6 +76,15 @@ def _create_presentation_background(
             result=result.model_dump()
         )
 
+    except asyncio.CancelledError:
+        # Gracefully handle cancellation during server reload/shutdown
+        logger.warning("[Task %s] Background task cancelled during shutdown", task_id)
+        task_manager.update_status(
+            task_id,
+            TaskStatus.FAILED,
+            error="Task cancelled during server shutdown"
+        )
+        return
     except Exception as e:
         logger.error("[Task %s] Error creating presentation: %s", task_id, str(e), exc_info=True)
         task_manager.update_status(
@@ -119,6 +129,14 @@ def _generate_backup_background(
             result=result
         )
 
+    except asyncio.CancelledError:
+        logger.warning("[Task %s] Background task cancelled during shutdown", task_id)
+        task_manager.update_status(
+            task_id,
+            TaskStatus.FAILED,
+            error="Task cancelled during server shutdown"
+        )
+        return
     except Exception as e:
         logger.error("[Task %s] Error generating backup: %s", task_id, str(e), exc_info=True)
         task_manager.update_status(
@@ -195,6 +213,14 @@ def _create_bsr_presentation_background(
             }
         )
 
+    except asyncio.CancelledError:
+        logger.warning("[Task %s] Background task cancelled during shutdown", task_id)
+        task_manager.update_status(
+            task_id,
+            TaskStatus.FAILED,
+            error="Task cancelled during server shutdown"
+        )
+        return
     except Exception as e:
         logger.error("[Task %s] Error creating BSR presentation: %s", task_id, str(e), exc_info=True)
         task_manager.update_status(
@@ -290,6 +316,14 @@ def _download_results_background(
             result=result_dict
         )
 
+    except asyncio.CancelledError:
+        logger.warning("[Task %s] Background task cancelled during shutdown", task_id)
+        task_manager.update_status(
+            task_id,
+            TaskStatus.FAILED,
+            error="Task cancelled during server shutdown"
+        )
+        return
     except Exception as e:
         logger.error("[Task %s] Error generating reports: %s", task_id, str(e), exc_info=True)
         task_manager.update_status(
@@ -355,6 +389,14 @@ def _create_feedback_template_background(
             }
         )
 
+    except asyncio.CancelledError:
+        logger.warning("[Task %s] Background task cancelled during shutdown", task_id)
+        task_manager.update_status(
+            task_id,
+            TaskStatus.FAILED,
+            error="Task cancelled during server shutdown"
+        )
+        return
     except Exception as e:
         logger.error("[Task %s] Error generating feedback template: %s", task_id, str(e), exc_info=True)
         task_manager.update_status(
@@ -452,6 +494,14 @@ def _generate_bsr_report_background(
             }
         )
 
+    except asyncio.CancelledError:
+        logger.warning("[Task %s] Background task cancelled during shutdown", task_id)
+        task_manager.update_status(
+            task_id,
+            TaskStatus.FAILED,
+            error="Task cancelled during server shutdown"
+        )
+        return
     except Exception as e:
         logger.error("[Task %s] Error generating BSR reports: %s", task_id, str(e), exc_info=True)
         task_manager.update_status(
@@ -547,6 +597,14 @@ def _build_presentation_files_background(
             }
         )
 
+    except asyncio.CancelledError:
+        logger.warning("[Task %s] Background task cancelled during shutdown", task_id)
+        task_manager.update_status(
+            task_id,
+            TaskStatus.FAILED,
+            error="Task cancelled during server shutdown"
+        )
+        return
     except Exception as e:
         logger.error("[Task %s] Error building presentation: %s", task_id, str(e), exc_info=True)
         task_manager.update_status(

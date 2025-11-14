@@ -200,106 +200,109 @@ class PPTXBuilderService:
         created_slides = 0
 
         try:
-            try:
-                app = client.Dispatch("PowerPoint.Application")
-            except Exception as dispatch_error:  # pylint: disable=broad-except
-                logger.error(
-                    "Unable to start PowerPoint automation: %s",
-                    dispatch_error,
-                )
-                raise RuntimeError(
-                    "PowerPoint automation is unavailable. Ensure Microsoft PowerPoint is installed and accessible."
-                ) from dispatch_error
-            try:
-                app.Visible = 1
-            except Exception as visibility_error:  # pylint: disable=broad-except
-                logger.debug(
-                    "PowerPoint visibility flag could not be set: %s",
-                    visibility_error,
-                )
-
-            template_handles = self._open_template_presentations(app, template_paths)
-            base_template = template_handles["base"]
-
-            output_presentation = app.Presentations.Add()
-            output_presentation.PageSetup.SlideWidth = base_template.PageSetup.SlideWidth
-            output_presentation.PageSetup.SlideHeight = base_template.PageSetup.SlideHeight
-            output_presentation.ApplyTemplate(str(template_paths["base"].resolve()))
-
-            for detail in filtered_details:
-                template_key = self._select_template_kind(detail)
-                if template_key == "skip":
-                    continue
-
-                # Use cached template handle, open lazily only if needed
-                source_presentation = template_handles.get(template_key)
-                if source_presentation is None:
-                    source_presentation = app.Presentations.Open(
-                        str(template_paths[template_key].resolve()),
-                        ReadOnly=True,
-                        WithWindow=False,
+            # Protect entire PowerPoint build operation with semaphore
+            from app.utils.com_manager import com_manager
+            with com_manager.acquire("PowerPoint.Application - Build Presentation"):
+                try:
+                    app = client.Dispatch("PowerPoint.Application")
+                except Exception as dispatch_error:  # pylint: disable=broad-except
+                    logger.error(
+                        "Unable to start PowerPoint automation: %s",
+                        dispatch_error,
                     )
-                    template_handles[template_key] = source_presentation
+                    raise RuntimeError(
+                        "PowerPoint automation is unavailable. Ensure Microsoft PowerPoint is installed and accessible."
+                    ) from dispatch_error
+                try:
+                    app.Visible = 1
+                except Exception as visibility_error:  # pylint: disable=broad-except
+                    logger.debug(
+                        "PowerPoint visibility flag could not be set: %s",
+                        visibility_error,
+                    )
 
-                new_slide = self._copy_slide_from_template(
-                    source_presentation,
-                    output_presentation,
-                    template_paths[template_key],
-                )
-                created_slides += 1
+                template_handles = self._open_template_presentations(app, template_paths)
+                base_template = template_handles["base"]
 
-                if template_key == "separator":
-                    self._populate_separator_slide(new_slide, detail, warnings)
-                elif template_key == "summary":
-                    self._populate_summary_slide(new_slide, summary_tracker, warnings)
-                elif template_key == "group":
-                    self._populate_group_slide(new_slide, detail, warnings)
-                elif template_key == "multi":
-                    self._populate_multi_slide(new_slide, detail, summary_tracker, warnings)
-                else:
-                    self._populate_base_slide(new_slide, detail, summary_tracker, warnings)
+                output_presentation = app.Presentations.Add()
+                output_presentation.PageSetup.SlideWidth = base_template.PageSetup.SlideWidth
+                output_presentation.PageSetup.SlideHeight = base_template.PageSetup.SlideHeight
+                output_presentation.ApplyTemplate(str(template_paths["base"].resolve()))
 
-            printable_path_out: Optional[Path] = None
-            macro_path_out: Optional[Path] = None
+                for detail in filtered_details:
+                    template_key = self._select_template_kind(detail)
+                    if template_key == "skip":
+                        continue
 
-            if created_slides == 0:
-                warnings.append("No slides generated from the provided Excel data.")
-            else:
-                if options.include_print_ready_version:
-                    output_presentation.SaveAs(str(printable_path), PP_SAVE_AS_PPTX)
-                    printable_path_out = printable_path
+                    # Use cached template handle, open lazily only if needed
+                    source_presentation = template_handles.get(template_key)
+                    if source_presentation is None:
+                        source_presentation = app.Presentations.Open(
+                            str(template_paths[template_key].resolve()),
+                            ReadOnly=True,
+                            WithWindow=False,
+                        )
+                        template_handles[template_key] = source_presentation
 
-                if options.include_macro_version:
-                    if options.include_print_ready_version:
-                        output_presentation.SaveCopyAs(str(macro_path), PP_SAVE_AS_PPTM)
+                    new_slide = self._copy_slide_from_template(
+                        source_presentation,
+                        output_presentation,
+                        template_paths[template_key],
+                    )
+                    created_slides += 1
+
+                    if template_key == "separator":
+                        self._populate_separator_slide(new_slide, detail, warnings)
+                    elif template_key == "summary":
+                        self._populate_summary_slide(new_slide, summary_tracker, warnings)
+                    elif template_key == "group":
+                        self._populate_group_slide(new_slide, detail, warnings)
+                    elif template_key == "multi":
+                        self._populate_multi_slide(new_slide, detail, summary_tracker, warnings)
                     else:
-                        output_presentation.SaveAs(str(macro_path), PP_SAVE_AS_PPTM)
-                    macro_path_out = macro_path
+                        self._populate_base_slide(new_slide, detail, summary_tracker, warnings)
 
-                if not options.include_print_ready_version and not options.include_macro_version:
-                    output_presentation.SaveAs(str(printable_path), PP_SAVE_AS_PPTX)
-                    printable_path_out = printable_path
+                printable_path_out: Optional[Path] = None
+                macro_path_out: Optional[Path] = None
 
-            download_urls: Dict[str, str] = {}
-            if options.return_urls:
-                if printable_path_out:
-                    download_urls["printable"] = self._relative_download_path(printable_path_out)
-                if macro_path_out:
-                    download_urls["macro"] = self._relative_download_path(macro_path_out)
+                if created_slides == 0:
+                    warnings.append("No slides generated from the provided Excel data.")
+                else:
+                    if options.include_print_ready_version:
+                        output_presentation.SaveAs(str(printable_path), PP_SAVE_AS_PPTX)
+                        printable_path_out = printable_path
 
-            if progress_callback:
-                progress_callback(88)
+                    if options.include_macro_version:
+                        if options.include_print_ready_version:
+                            output_presentation.SaveCopyAs(str(macro_path), PP_SAVE_AS_PPTM)
+                        else:
+                            output_presentation.SaveAs(str(macro_path), PP_SAVE_AS_PPTM)
+                        macro_path_out = macro_path
 
-            artifacts = PresentationBuildArtifacts(
-                printable_path=printable_path_out,
-                macro_path=macro_path_out,
-                total_slides=created_slides,
-                slide_start=options.slide_start,
-                slide_end=options.slide_end,
-                download_urls=download_urls,
-                summary={key: list(values) for key, values in summary_tracker.items()},
-                warnings=warnings,
-            )
+                    if not options.include_print_ready_version and not options.include_macro_version:
+                        output_presentation.SaveAs(str(printable_path), PP_SAVE_AS_PPTX)
+                        printable_path_out = printable_path
+
+                download_urls: Dict[str, str] = {}
+                if options.return_urls:
+                    if printable_path_out:
+                        download_urls["printable"] = self._relative_download_path(printable_path_out)
+                    if macro_path_out:
+                        download_urls["macro"] = self._relative_download_path(macro_path_out)
+
+                if progress_callback:
+                    progress_callback(88)
+
+                artifacts = PresentationBuildArtifacts(
+                    printable_path=printable_path_out,
+                    macro_path=macro_path_out,
+                    total_slides=created_slides,
+                    slide_start=options.slide_start,
+                    slide_end=options.slide_end,
+                    download_urls=download_urls,
+                    summary={key: list(values) for key, values in summary_tracker.items()},
+                    warnings=warnings,
+                )
 
         except Exception as exc:  # pylint: disable=broad-except
             logger.error("Error composing presentation: %s", exc)
@@ -382,164 +385,167 @@ class PPTXBuilderService:
         template_handles: Dict[str, Any] = {}
 
         try:
-            # Initialize PowerPoint
-            try:
-                app = client.Dispatch("PowerPoint.Application")
-                app.Visible = 1
-            except Exception as dispatch_error:
-                logger.error("Unable to start PowerPoint automation: %s", dispatch_error)
-                raise RuntimeError(
-                    "PowerPoint automation is unavailable. Ensure Microsoft PowerPoint is installed."
-                ) from dispatch_error
-
-            # Open template presentations
-            template_handles = self._open_template_presentations(app, template_paths)
-            base_template = template_handles["base"]
-
-            # Create new presentation with base template configuration
-            output_presentation = app.Presentations.Add()
-            output_presentation.PageSetup.SlideWidth = base_template.PageSetup.SlideWidth
-            output_presentation.PageSetup.SlideHeight = base_template.PageSetup.SlideHeight
-            output_presentation.ApplyTemplate(str(template_paths["base"].resolve()))
-
-            # Open original PPTX sent by user
-            original_pptx = app.Presentations.Open(str(original_pptx_path), WithWindow=False)
-            total_original_slides = original_pptx.Slides.Count
-
-            logger.info(
-                "Composing presentation: %d original slides, insert at position %d, %d generated slides",
-                total_original_slides,
-                page_number_insert,
-                len(details),
-            )
-
-            # SECTION A: Insert original slides before page_number_insert
-            if page_number_insert > 1:
-                slides_to_copy = min(page_number_insert - 1, total_original_slides)
-                for i in range(1, slides_to_copy + 1):
-                    try:
-                        slide = original_pptx.Slides(i)
-                        slide.Copy()
-                        output_presentation.Slides.Paste(output_presentation.Slides.Count + 1)
-                        total_slides_created += 1
-                        logger.debug("Copied original slide %d", i)
-                    except Exception as copy_error:
-                        logger.warning("Failed to copy original slide %d: %s", i, copy_error)
-                        warnings.append(f"Failed to copy original slide {i}")
-
-            logger.info("Inserted %d prefix slides from original PPTX", total_slides_created)
-
-            # SECTION B: Insert template-generated slides from Excel data
-            generated_count = 0
-            for detail in details:
-                template_key = self._select_template_kind(detail)
-                if template_key == "skip":
-                    continue
-
-                # Use cached template handle, open lazily only if needed
-                source_presentation = template_handles.get(template_key)
-                if source_presentation is None:
-                    source_presentation = app.Presentations.Open(
-                        str(template_paths[template_key].resolve()),
-                        ReadOnly=True,
-                        WithWindow=False,
-                    )
-                    template_handles[template_key] = source_presentation
-
+            # Protect entire PowerPoint composition operation with semaphore
+            from app.utils.com_manager import com_manager
+            with com_manager.acquire("PowerPoint.Application - Compose with Original"):
+                # Initialize PowerPoint
                 try:
-                    new_slide = self._copy_slide_from_template(
-                        source_presentation,
-                        output_presentation,
-                        template_paths[template_key],
-                    )
-                    total_slides_created += 1
-                    generated_count += 1
+                    app = client.Dispatch("PowerPoint.Application")
+                    app.Visible = 1
+                except Exception as dispatch_error:
+                    logger.error("Unable to start PowerPoint automation: %s", dispatch_error)
+                    raise RuntimeError(
+                        "PowerPoint automation is unavailable. Ensure Microsoft PowerPoint is installed."
+                    ) from dispatch_error
 
-                    # Populate slide with data based on template type
-                    if template_key == "separator":
-                        self._populate_separator_slide(new_slide, detail, warnings)
-                    elif template_key == "summary":
-                        self._populate_summary_slide(new_slide, summary_tracker, warnings)
-                    elif template_key == "group":
-                        self._populate_group_slide(new_slide, detail, warnings)
-                    elif template_key == "multi":
-                        self._populate_multi_slide(new_slide, detail, summary_tracker, warnings)
-                    else:
-                        self._populate_base_slide(new_slide, detail, summary_tracker, warnings)
+                # Open template presentations
+                template_handles = self._open_template_presentations(app, template_paths)
+                base_template = template_handles["base"]
 
-                except Exception as slide_error:
-                    logger.error("Failed to create template slide: %s", slide_error)
-                    warnings.append(f"Failed to create template slide: {str(slide_error)}")
+                # Create new presentation with base template configuration
+                output_presentation = app.Presentations.Add()
+                output_presentation.PageSetup.SlideWidth = base_template.PageSetup.SlideWidth
+                output_presentation.PageSetup.SlideHeight = base_template.PageSetup.SlideHeight
+                output_presentation.ApplyTemplate(str(template_paths["base"].resolve()))
 
-            logger.info("Inserted %d template-generated slides", generated_count)
+                # Open original PPTX sent by user
+                original_pptx = app.Presentations.Open(str(original_pptx_path), WithWindow=False)
+                total_original_slides = original_pptx.Slides.Count
 
-            # SECTION C: Insert remaining original slides after generated slides
-            if page_number_insert <= total_original_slides:
-                suffix_count = 0
-                for i in range(page_number_insert, total_original_slides + 1):
+                logger.info(
+                    "Composing presentation: %d original slides, insert at position %d, %d generated slides",
+                    total_original_slides,
+                    page_number_insert,
+                    len(details),
+                )
+
+                # SECTION A: Insert original slides before page_number_insert
+                if page_number_insert > 1:
+                    slides_to_copy = min(page_number_insert - 1, total_original_slides)
+                    for i in range(1, slides_to_copy + 1):
+                        try:
+                            slide = original_pptx.Slides(i)
+                            slide.Copy()
+                            output_presentation.Slides.Paste(output_presentation.Slides.Count + 1)
+                            total_slides_created += 1
+                            logger.debug("Copied original slide %d", i)
+                        except Exception as copy_error:
+                            logger.warning("Failed to copy original slide %d: %s", i, copy_error)
+                            warnings.append(f"Failed to copy original slide {i}")
+
+                logger.info("Inserted %d prefix slides from original PPTX", total_slides_created)
+
+                # SECTION B: Insert template-generated slides from Excel data
+                generated_count = 0
+                for detail in details:
+                    template_key = self._select_template_kind(detail)
+                    if template_key == "skip":
+                        continue
+
+                    # Use cached template handle, open lazily only if needed
+                    source_presentation = template_handles.get(template_key)
+                    if source_presentation is None:
+                        source_presentation = app.Presentations.Open(
+                            str(template_paths[template_key].resolve()),
+                            ReadOnly=True,
+                            WithWindow=False,
+                        )
+                        template_handles[template_key] = source_presentation
+
                     try:
-                        slide = original_pptx.Slides(i)
-                        slide.Copy()
-                        output_presentation.Slides.Paste(output_presentation.Slides.Count + 1)
+                        new_slide = self._copy_slide_from_template(
+                            source_presentation,
+                            output_presentation,
+                            template_paths[template_key],
+                        )
                         total_slides_created += 1
-                        suffix_count += 1
-                        logger.debug("Copied original slide %d", i)
-                    except Exception as copy_error:
-                        logger.warning("Failed to copy original slide %d: %s", i, copy_error)
-                        warnings.append(f"Failed to copy original slide {i}")
-                
-                logger.info("Inserted %d suffix slides from original PPTX", suffix_count)
+                        generated_count += 1
 
-            # Save output files
-            printable_path_out: Optional[Path] = None
-            macro_path_out: Optional[Path] = None
+                        # Populate slide with data based on template type
+                        if template_key == "separator":
+                            self._populate_separator_slide(new_slide, detail, warnings)
+                        elif template_key == "summary":
+                            self._populate_summary_slide(new_slide, summary_tracker, warnings)
+                        elif template_key == "group":
+                            self._populate_group_slide(new_slide, detail, warnings)
+                        elif template_key == "multi":
+                            self._populate_multi_slide(new_slide, detail, summary_tracker, warnings)
+                        else:
+                            self._populate_base_slide(new_slide, detail, summary_tracker, warnings)
 
-            if total_slides_created == 0:
-                warnings.append("No slides were generated in the presentation.")
-            else:
-                if options.include_print_ready_version:
-                    output_presentation.SaveAs(str(printable_path.resolve()), PP_SAVE_AS_PPTX)
-                    printable_path_out = printable_path
-                    logger.info("Saved printable presentation: %s", printable_path)
+                    except Exception as slide_error:
+                        logger.error("Failed to create template slide: %s", slide_error)
+                        warnings.append(f"Failed to create template slide: {str(slide_error)}")
 
-                if options.include_macro_version:
+                logger.info("Inserted %d template-generated slides", generated_count)
+
+                # SECTION C: Insert remaining original slides after generated slides
+                if page_number_insert <= total_original_slides:
+                    suffix_count = 0
+                    for i in range(page_number_insert, total_original_slides + 1):
+                        try:
+                            slide = original_pptx.Slides(i)
+                            slide.Copy()
+                            output_presentation.Slides.Paste(output_presentation.Slides.Count + 1)
+                            total_slides_created += 1
+                            suffix_count += 1
+                            logger.debug("Copied original slide %d", i)
+                        except Exception as copy_error:
+                            logger.warning("Failed to copy original slide %d: %s", i, copy_error)
+                            warnings.append(f"Failed to copy original slide {i}")
+
+                    logger.info("Inserted %d suffix slides from original PPTX", suffix_count)
+
+                # Save output files
+                printable_path_out: Optional[Path] = None
+                macro_path_out: Optional[Path] = None
+
+                if total_slides_created == 0:
+                    warnings.append("No slides were generated in the presentation.")
+                else:
                     if options.include_print_ready_version:
-                        output_presentation.SaveCopyAs(str(macro_path.resolve()), PP_SAVE_AS_PPTM)
-                    else:
-                        output_presentation.SaveAs(str(macro_path.resolve()), PP_SAVE_AS_PPTM)
-                    macro_path_out = macro_path
-                    logger.info("Saved macro presentation: %s", macro_path)
+                        output_presentation.SaveAs(str(printable_path.resolve()), PP_SAVE_AS_PPTX)
+                        printable_path_out = printable_path
+                        logger.info("Saved printable presentation: %s", printable_path)
 
-                if not options.include_print_ready_version and not options.include_macro_version:
-                    output_presentation.SaveAs(str(printable_path.resolve()), PP_SAVE_AS_PPTX)
-                    printable_path_out = printable_path
+                    if options.include_macro_version:
+                        if options.include_print_ready_version:
+                            output_presentation.SaveCopyAs(str(macro_path.resolve()), PP_SAVE_AS_PPTM)
+                        else:
+                            output_presentation.SaveAs(str(macro_path.resolve()), PP_SAVE_AS_PPTM)
+                        macro_path_out = macro_path
+                        logger.info("Saved macro presentation: %s", macro_path)
 
-            # Generate download URLs if requested
-            download_urls: Dict[str, str] = {}
-            if options.return_urls:
-                if printable_path_out:
-                    download_urls["printable"] = self._relative_download_path(printable_path_out)
-                if macro_path_out:
-                    download_urls["macro"] = self._relative_download_path(macro_path_out)
+                    if not options.include_print_ready_version and not options.include_macro_version:
+                        output_presentation.SaveAs(str(printable_path.resolve()), PP_SAVE_AS_PPTX)
+                        printable_path_out = printable_path
 
-            artifacts = PresentationBuildArtifacts(
-                printable_path=printable_path_out,
-                macro_path=macro_path_out,
-                total_slides=total_slides_created,
-                slide_start=1,
-                slide_end=total_slides_created,
-                download_urls=download_urls,
-                summary={key: list(values) for key, values in summary_tracker.items()},
-                warnings=warnings,
-            )
+                # Generate download URLs if requested
+                download_urls: Dict[str, str] = {}
+                if options.return_urls:
+                    if printable_path_out:
+                        download_urls["printable"] = self._relative_download_path(printable_path_out)
+                    if macro_path_out:
+                        download_urls["macro"] = self._relative_download_path(macro_path_out)
 
-            logger.info(
-                "Presentation composition complete: %d total slides, %d warnings",
-                total_slides_created,
-                len(warnings),
-            )
+                artifacts = PresentationBuildArtifacts(
+                    printable_path=printable_path_out,
+                    macro_path=macro_path_out,
+                    total_slides=total_slides_created,
+                    slide_start=1,
+                    slide_end=total_slides_created,
+                    download_urls=download_urls,
+                    summary={key: list(values) for key, values in summary_tracker.items()},
+                    warnings=warnings,
+                )
 
-            return artifacts
+                logger.info(
+                    "Presentation composition complete: %d total slides, %d warnings",
+                    total_slides_created,
+                    len(warnings),
+                )
+
+                return artifacts
 
         except Exception as exc:
             logger.error("Error composing presentation with original slides: %s", exc)
@@ -1338,16 +1344,19 @@ class PPTXBuilderService:
         presentation = None
 
         try:
-            powerpoint = client.Dispatch("PowerPoint.Application")
-            powerpoint.Visible = 1
-            presentation = powerpoint.Presentations.Open(str(ppt_path.resolve()), WithWindow=False)
-            if presentation.Slides.Count == 0:
-                raise ValueError("Presentation contains no slides to export")
+            # Protect PowerPoint export operation with semaphore
+            from app.utils.com_manager import com_manager
+            with com_manager.acquire("PowerPoint.Application - Export Slide to Image"):
+                powerpoint = client.Dispatch("PowerPoint.Application")
+                powerpoint.Visible = 1
+                presentation = powerpoint.Presentations.Open(str(ppt_path.resolve()), WithWindow=False)
+                if presentation.Slides.Count == 0:
+                    raise ValueError("Presentation contains no slides to export")
 
-            slide = presentation.Slides(1)
-            # Export as JPG with high quality
-            slide.Export(str(image_path.resolve()), "JPG")
-            logger.info("Slide exported to JPG: %s", image_path)
+                slide = presentation.Slides(1)
+                # Export as JPG with high quality
+                slide.Export(str(image_path.resolve()), "JPG")
+                logger.info("Slide exported to JPG: %s", image_path)
             
         finally:
             try:

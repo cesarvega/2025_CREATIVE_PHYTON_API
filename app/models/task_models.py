@@ -13,6 +13,8 @@ class TaskCreatedResponse(BaseModel):
     task_type: str = Field(..., description="Type of task being executed")
     created_at: str = Field(..., description="ISO timestamp when task was created")
     status_url: str = Field(..., description="URL to check task status")
+    position: Optional[int] = Field(None, description="Number of tasks ahead (0 = processing immediately, 1+ = tasks waiting ahead)")
+    estimated_wait_seconds: Optional[float] = Field(None, description="Estimated wait time in seconds")
 
     class Config:
         json_schema_extra = {

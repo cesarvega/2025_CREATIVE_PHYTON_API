@@ -74,9 +74,58 @@ from app.api.dependencies import (
     validate_pptx_file,
     validate_file_size,
 )
+# Removed old concurrency_utils import - using new concurrency system
+from app.utils.concurrency_manager_v2 import concurrency_manager
+from app.utils.task_queue import TaskPriority
 
 router = APIRouter(prefix="/presentations", tags=["Presentation Creation"])
 logger = get_logger(__name__)
+
+
+# Helper functions for concurrency control
+def check_concurrency_limit():
+    """Check if system can accept new tasks.
+
+    Raises:
+        HTTPException: If queue is full
+    """
+    status = concurrency_manager.get_queue_status()
+    queue_full = status["queued_count"] >= status["queue_capacity"]
+
+    if queue_full:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "Service temporarily unavailable",
+                "message": "Task queue is full. Please try again later.",
+                "queue_status": {
+                    "active": status["active_count"],
+                    "queued": status["queued_count"],
+                    "capacity": status["queue_capacity"]
+                }
+            }
+        )
+
+
+def get_concurrency_status() -> dict:
+    """Get current concurrency status.
+
+    Returns:
+        Dictionary with queue statistics
+    """
+    status = concurrency_manager.get_queue_status()
+    return {
+        "active_tasks": status["active_count"],
+        "queued_tasks": status["queued_count"],
+        "available_slots": status["available_slots"],
+        "max_workers": status["max_workers"],
+        "queue_capacity": status["queue_capacity"],
+        "statistics": {
+            "total_submitted": status["total_submitted"],
+            "total_completed": status["total_completed"],
+            "total_failed": status["total_failed"]
+        }
+    }
 
 
 @router.post(
@@ -140,6 +189,24 @@ logger = get_logger(__name__)
                 }
             },
         },
+        503: {
+            "description": "Service at capacity - too many concurrent tasks.",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": {
+                            "error": "Service temporarily unavailable",
+                            "message": "El sistema ha alcanzado su capacidad máxima de procesamiento. Por favor, intente nuevamente en unos momentos.",
+                            "message_en": "The system has reached its maximum processing capacity. Please try again in a few moments.",
+                            "active_tasks": 2,
+                            "max_concurrent_tasks": 2,
+                            "retry_after_seconds": 30,
+                            "action": "retry_later"
+                        }
+                    }
+                }
+            },
+        },
     },
 )
 async def create_presentation(
@@ -169,6 +236,8 @@ async def create_presentation(
     - status='failed': Task failed (check error field)
     """
     try:
+        # Check concurrency limit before accepting the task
+        check_concurrency_limit()
         # Validate Excel file
         if not excel_file.filename or not excel_file.filename.lower().endswith((".xlsx", ".xls")):
             raise HTTPException(status_code=400, detail="Excel file must be .xlsx or .xls")
@@ -214,27 +283,27 @@ async def create_presentation(
             metadata.display_name,
         )
 
-        # Queue background task
-        background_tasks.add_task(
-            _create_presentation_background,
-            task_id,
-            metadata,
-            excel_content,
-            excel_file.filename,
-            pptx_content,
-            pptx_file.filename,
+        # Submit task to concurrency manager (new queue system)
+        submission_result = await concurrency_manager.submit_task(
+            task_id=task_id,
+            task_type="create_presentation",
+            func=_create_presentation_background,
+            args=(task_id, metadata, excel_content, excel_file.filename, pptx_content, pptx_file.filename),
+            priority=TaskPriority.NORMAL,
         )
 
-        # Return task information immediately
+        # Return task information with queue position
         task_info = task_manager.get_task(task_id)
 
         return TaskCreatedResponse(
             task_id=task_id,
-            status=task_info["status"],
-            message=f"Presentation creation task started for project '{metadata.project}'",
+            status=submission_result["status"],
+            message=f"Presentation creation task {'started' if submission_result.get('will_start_immediately') else 'queued'} for project '{metadata.project}'",
             task_type="create_presentation",
             created_at=task_info["created_at"],
-            status_url=f"/api/presentations/tasks/{task_id}"
+            status_url=f"/api/presentations/tasks/{task_id}",
+            position=submission_result.get("position"),
+            estimated_wait_seconds=submission_result.get("estimated_wait_seconds")
         )
 
     except HTTPException:
@@ -244,6 +313,33 @@ async def create_presentation(
         raise HTTPException(
             status_code=500, detail=f"Failed to queue presentation creation: {str(e)}"
         ) from e
+
+
+@router.get(
+    "/concurrency-status",
+    summary="Get current concurrency status",
+    description=(
+        "Get the current concurrency status of the system.\n\n"
+        "This endpoint provides information about:\n"
+        "- Number of currently active tasks\n"
+        "- Maximum concurrent tasks allowed\n"
+        "- Available slots for new tasks\n"
+        "- Whether the system is at capacity\n\n"
+        "Use this endpoint to check if the system can accept new tasks before submitting them."
+    ),
+)
+async def get_concurrency_status_endpoint() -> dict:
+    """Get current concurrency status.
+
+    Returns:
+        Dictionary with concurrency status information including:
+        - active_tasks: Number of currently active tasks
+        - max_concurrent_tasks: Maximum allowed concurrent tasks
+        - available_slots: Number of available slots
+        - at_capacity: Whether system is at capacity
+        - utilization_percentage: Current utilization percentage
+    """
+    return get_concurrency_status()
 
 
 @router.get(
@@ -723,6 +819,22 @@ async def create_simple_dw_presentation(
                 }
             },
         },
+        503: {
+            "description": "Service at capacity - too many concurrent tasks.",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": {
+                            "error": "Service temporarily unavailable",
+                            "message": "El sistema ha alcanzado su capacidad máxima de procesamiento. Por favor, intente nuevamente en unos momentos.",
+                            "active_tasks": 2,
+                            "max_concurrent_tasks": 2,
+                            "retry_after_seconds": 30
+                        }
+                    }
+                }
+            },
+        },
     },
 )
 async def create_bsr_presentation(
@@ -750,6 +862,9 @@ async def create_bsr_presentation(
         HTTPException 500: If creation process fails
     """
     try:
+        # Check concurrency limit before accepting the task
+        check_concurrency_limit()
+
         # Validate file
         if not pptx_file.filename or not pptx_file.filename.lower().endswith(".pptx"):
             raise HTTPException(status_code=400, detail="PPTX file must be .pptx")
@@ -782,25 +897,27 @@ async def create_bsr_presentation(
             metadata.display_name,
         )
 
-        # Queue background task
-        background_tasks.add_task(
-            _create_bsr_presentation_background,
-            task_id,
-            metadata,
-            pptx_content,
-            pptx_file.filename,
+        # Submit task to concurrency manager
+        submission_result = await concurrency_manager.submit_task(
+            task_id=task_id,
+            task_type="create_bsr_presentation",
+            func=_create_bsr_presentation_background,
+            args=(task_id, metadata, pptx_content, pptx_file.filename),
+            priority=TaskPriority.NORMAL,
         )
 
-        # Return task information immediately
+        # Return task information with queue position
         task_info = task_manager.get_task(task_id)
 
         return TaskCreatedResponse(
             task_id=task_id,
-            status=task_info["status"],
-            message=f"BSR presentation creation task started for '{metadata.project_name}'",
+            status=submission_result["status"],
+            message=f"BSR presentation creation task {'started' if submission_result.get('will_start_immediately') else 'queued'} for '{metadata.project_name}'",
             task_type="create_bsr_presentation",
             created_at=task_info["created_at"],
-            status_url=f"/api/presentations/tasks/{task_id}"
+            status_url=f"/api/presentations/tasks/{task_id}",
+            position=submission_result.get("position"),
+            estimated_wait_seconds=submission_result.get("estimated_wait_seconds")
         )
 
     except HTTPException:
@@ -857,6 +974,22 @@ async def create_bsr_presentation(
                 }
             },
         },
+        503: {
+            "description": "Service at capacity - too many concurrent tasks.",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": {
+                            "error": "Service temporarily unavailable",
+                            "message": "El sistema ha alcanzado su capacidad máxima de procesamiento. Por favor, intente nuevamente en unos momentos.",
+                            "active_tasks": 2,
+                            "max_concurrent_tasks": 2,
+                            "retry_after_seconds": 30
+                        }
+                    }
+                }
+            },
+        },
     },
 )
 async def build_presentation_files(
@@ -865,6 +998,8 @@ async def build_presentation_files(
     excel_file: UploadFile = File(..., description="Excel file (.xlsx or .xls)"),
 ) -> TaskCreatedResponse:
     try:
+        # Check concurrency limit before accepting the task
+        check_concurrency_limit()
         # Validate Excel file
         if not excel_file.filename or not excel_file.filename.lower().endswith((".xlsx", ".xls")):
             raise HTTPException(status_code=400, detail="Excel file must be .xlsx or .xls")
@@ -897,25 +1032,27 @@ async def build_presentation_files(
             metadata.display_name,
         )
 
-        # Queue background task
-        background_tasks.add_task(
-            _build_presentation_files_background,
-            task_id,
-            metadata.model_dump(),  # Serialize metadata
-            excel_content,
-            excel_file.filename,
+        # Submit task to concurrency manager
+        submission_result = await concurrency_manager.submit_task(
+            task_id=task_id,
+            task_type="build_presentation_files",
+            func=_build_presentation_files_background,
+            args=(task_id, metadata.model_dump(), excel_content, excel_file.filename),
+            priority=TaskPriority.NORMAL,
         )
 
-        # Return task information immediately
+        # Return task information with queue position
         task_info = task_manager.get_task(task_id)
 
         return TaskCreatedResponse(
             task_id=task_id,
-            status=task_info["status"],
-            message=f"Presentation build task started for '{metadata.project}'",
+            status=submission_result["status"],
+            message=f"Presentation build task {'started' if submission_result.get('will_start_immediately') else 'queued'} for '{metadata.project}'",
             task_type="build_presentation_files",
             created_at=task_info["created_at"],
-            status_url=f"/api/presentations/tasks/{task_id}"
+            status_url=f"/api/presentations/tasks/{task_id}",
+            position=submission_result.get("position"),
+            estimated_wait_seconds=submission_result.get("estimated_wait_seconds")
         )
 
     except HTTPException:
@@ -1397,6 +1534,22 @@ async def test_table_layout(names: list[str]) -> dict:
                 }
             },
         },
+        503: {
+            "description": "Service at capacity - too many concurrent tasks.",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": {
+                            "error": "Service temporarily unavailable",
+                            "message": "El sistema ha alcanzado su capacidad máxima de procesamiento. Por favor, intente nuevamente en unos momentos.",
+                            "active_tasks": 2,
+                            "max_concurrent_tasks": 2,
+                            "retry_after_seconds": 30
+                        }
+                    }
+                }
+            },
+        },
     },
 )
 @handle_service_errors  # OPTIMIZATION: Centralized error handling
@@ -1468,6 +1621,9 @@ async def download_results(background_tasks: BackgroundTasks, request: DownloadR
         HTTPException 501: If report type is not yet implemented
     """
     try:
+        # Check concurrency limit before accepting the task
+        check_concurrency_limit()
+
         # Create background task
         task_id = task_manager.create_task(
             task_type="download_results",
@@ -1481,23 +1637,27 @@ async def download_results(background_tasks: BackgroundTasks, request: DownloadR
             request.presentation_id,
         )
 
-        # Queue background task
-        background_tasks.add_task(
-            _download_results_background,
-            task_id,
-            request.presentation_id,
+        # Submit task to concurrency manager
+        submission_result = await concurrency_manager.submit_task(
+            task_id=task_id,
+            task_type="download_results",
+            func=_download_results_background,
+            args=(task_id, request.presentation_id),
+            priority=TaskPriority.NORMAL,
         )
 
-        # Return task information immediately
+        # Return task information with queue position
         task_info = task_manager.get_task(task_id)
 
         return TaskCreatedResponse(
             task_id=task_id,
-            status=task_info["status"],
-            message=f"Report generation task started for presentation {request.presentation_id}",
+            status=submission_result["status"],
+            message=f"Report generation task {'started' if submission_result.get('will_start_immediately') else 'queued'} for presentation {request.presentation_id}",
             task_type="download_results",
             created_at=task_info["created_at"],
-            status_url=f"/api/presentations/tasks/{task_id}"
+            status_url=f"/api/presentations/tasks/{task_id}",
+            position=submission_result.get("position"),
+            estimated_wait_seconds=submission_result.get("estimated_wait_seconds")
         )
 
     except HTTPException:
@@ -1600,6 +1760,22 @@ async def download_results(background_tasks: BackgroundTasks, request: DownloadR
                 }
             },
         },
+        503: {
+            "description": "Service at capacity - too many concurrent tasks.",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": {
+                            "error": "Service temporarily unavailable",
+                            "message": "El sistema ha alcanzado su capacidad máxima de procesamiento. Por favor, intente nuevamente en unos momentos.",
+                            "active_tasks": 2,
+                            "max_concurrent_tasks": 2,
+                            "retry_after_seconds": 30
+                        }
+                    }
+                }
+            },
+        },
     },
 )
 async def create_feedback_template(background_tasks: BackgroundTasks, request: CreateFeedbackTemplateRequest) -> TaskCreatedResponse:
@@ -1638,6 +1814,9 @@ async def create_feedback_template(background_tasks: BackgroundTasks, request: C
         HTTPException 500: If document generation fails
     """
     try:
+        # Check concurrency limit before accepting the task
+        check_concurrency_limit()
+
         # Get presentation info first
         presentation_info = bi_guidelines_service.get_project_info(request.presentation_id)
 
@@ -1665,24 +1844,27 @@ async def create_feedback_template(background_tasks: BackgroundTasks, request: C
             request.presentation_id,
         )
 
-        # Queue background task
-        background_tasks.add_task(
-            _create_feedback_template_background,
-            task_id,
-            request.presentation_id,
-            display_name,
+        # Submit task to concurrency manager
+        submission_result = await concurrency_manager.submit_task(
+            task_id=task_id,
+            task_type="create_feedback_template",
+            func=_create_feedback_template_background,
+            args=(task_id, request.presentation_id, display_name),
+            priority=TaskPriority.NORMAL,
         )
 
-        # Return task information immediately
+        # Return task information with queue position
         task_info = task_manager.get_task(task_id)
 
         return TaskCreatedResponse(
             task_id=task_id,
-            status=task_info["status"],
-            message=f"Feedback template task started for presentation {request.presentation_id}",
+            status=submission_result["status"],
+            message=f"Feedback template task {'started' if submission_result.get('will_start_immediately') else 'queued'} for presentation {request.presentation_id}",
             task_type="create_feedback_template",
             created_at=task_info["created_at"],
-            status_url=f"/api/presentations/tasks/{task_id}"
+            status_url=f"/api/presentations/tasks/{task_id}",
+            position=submission_result.get("position"),
+            estimated_wait_seconds=submission_result.get("estimated_wait_seconds")
         )
 
     except HTTPException:
@@ -1786,6 +1968,22 @@ async def create_feedback_template(background_tasks: BackgroundTasks, request: C
                 }
             },
         },
+        503: {
+            "description": "Service at capacity - too many concurrent tasks.",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": {
+                            "error": "Service temporarily unavailable",
+                            "message": "El sistema ha alcanzado su capacidad máxima de procesamiento. Por favor, intente nuevamente en unos momentos.",
+                            "active_tasks": 2,
+                            "max_concurrent_tasks": 2,
+                            "retry_after_seconds": 30
+                        }
+                    }
+                }
+            },
+        },
     },
 )
 async def generate_backup(background_tasks: BackgroundTasks, request: GenerateBackupRequest) -> TaskCreatedResponse:
@@ -1814,6 +2012,9 @@ async def generate_backup(background_tasks: BackgroundTasks, request: GenerateBa
         HTTPException 500: If backup generation fails
     """
     try:
+        # Check concurrency limit before accepting the task
+        check_concurrency_limit()
+
         # Create background task
         task_id = task_manager.create_task(
             task_type="generate_backup",
@@ -1827,23 +2028,27 @@ async def generate_backup(background_tasks: BackgroundTasks, request: GenerateBa
             request.presentation_id,
         )
 
-        # Queue background task
-        background_tasks.add_task(
-            _generate_backup_background,
-            task_id,
-            request.presentation_id,
+        # Submit task to concurrency manager
+        submission_result = await concurrency_manager.submit_task(
+            task_id=task_id,
+            task_type="generate_backup",
+            func=_generate_backup_background,
+            args=(task_id, request.presentation_id),
+            priority=TaskPriority.NORMAL,
         )
 
-        # Return task information immediately
+        # Return task information with queue position
         task_info = task_manager.get_task(task_id)
 
         return TaskCreatedResponse(
             task_id=task_id,
-            status=task_info["status"],
-            message=f"Backup generation task started for presentation {request.presentation_id}",
+            status=submission_result["status"],
+            message=f"Backup generation task {'started' if submission_result.get('will_start_immediately') else 'queued'} for presentation {request.presentation_id}",
             task_type="generate_backup",
             created_at=task_info["created_at"],
-            status_url=f"/api/presentations/tasks/{task_id}"
+            status_url=f"/api/presentations/tasks/{task_id}",
+            position=submission_result.get("position"),
+            estimated_wait_seconds=submission_result.get("estimated_wait_seconds")
         )
 
     except HTTPException:
@@ -2054,10 +2259,30 @@ async def download_presentation_file(presentation_id: int) -> FileResponse:
         "**Word Report**: Contains slide notes, attributes, and key concepts\n\n"
         "Files are saved to: C:\\inetpub\\wwwroot\\CreativePythonAPI\\NW_Files\\downloads\\{DisplayName}.{ext}"
     ),
+    responses={
+        503: {
+            "description": "Service at capacity - too many concurrent tasks.",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": {
+                            "error": "Service temporarily unavailable",
+                            "message": "El sistema ha alcanzado su capacidad máxima de procesamiento. Por favor, intente nuevamente en unos momentos.",
+                            "active_tasks": 2,
+                            "max_concurrent_tasks": 2,
+                            "retry_after_seconds": 30
+                        }
+                    }
+                }
+            },
+        },
+    },
 )
 async def generate_bsr_report(background_tasks: BackgroundTasks, request: BSRGenerateReportRequest) -> TaskCreatedResponse:
     """Generate BSR reports (Excel + Word)."""
     try:
+        # Check concurrency limit before accepting the task
+        check_concurrency_limit()
         # Create background task
         task_id = task_manager.create_task(
             task_type="generate_bsr_report",
@@ -2074,24 +2299,27 @@ async def generate_bsr_report(background_tasks: BackgroundTasks, request: BSRGen
             request.presentation_id,
         )
 
-        # Queue background task
-        background_tasks.add_task(
-            _generate_bsr_report_background,
-            task_id,
-            request.presentation_id,
-            request.display_name,
+        # Submit task to concurrency manager
+        submission_result = await concurrency_manager.submit_task(
+            task_id=task_id,
+            task_type="generate_bsr_report",
+            func=_generate_bsr_report_background,
+            args=(task_id, request.presentation_id, request.display_name),
+            priority=TaskPriority.NORMAL,
         )
 
-        # Return task information immediately
+        # Return task information with queue position
         task_info = task_manager.get_task(task_id)
 
         return TaskCreatedResponse(
             task_id=task_id,
-            status=task_info["status"],
-            message=f"BSR report generation task started for presentation {request.presentation_id}",
+            status=submission_result["status"],
+            message=f"BSR report generation task {'started' if submission_result.get('will_start_immediately') else 'queued'} for presentation {request.presentation_id}",
             task_type="generate_bsr_report",
             created_at=task_info["created_at"],
-            status_url=f"/api/presentations/tasks/{task_id}"
+            status_url=f"/api/presentations/tasks/{task_id}",
+            position=submission_result.get("position"),
+            estimated_wait_seconds=submission_result.get("estimated_wait_seconds")
         )
 
     except HTTPException:

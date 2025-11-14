@@ -4,7 +4,14 @@
       "Bash(Format-Table ProcessName,Id,Path -AutoSize)",
       "Bash(dir:*)",
       "Bash(nul)",
-      "Bash(python verify_fix.py:*)"
+      "Bash(python verify_fix.py:*)",
+      "Bash(python -m py_compile:*)",
+      "Bash(python:*)",
+      "Bash(taskkill:*)",
+      "Bash(del \"c:\\inetpub\\wwwroot\\CreativePythonAPI\\app\\utils\\socketio_manager.py\")",
+      "Bash(rm:*)",
+      "Bash(Get-Process python -ErrorAction SilentlyContinue)",
+      "Bash(Stop-Process -Force)"
     ],
     "deny": [],
     "ask": []

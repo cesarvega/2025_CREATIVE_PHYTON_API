@@ -165,6 +165,21 @@ class Settings(BaseSettings):
     email_nonproprietary: str = "Chicago-Nonproprietary@brandinstitute.com"
     email_enabled: bool = True  # Toggle email notifications
 
+    # Concurrency settings
+    concurrency_max_workers: int = 1  # PowerPoint COM: only 1 simultaneous
+    concurrency_queue_size: int = 100
+    task_timeout_seconds: int = 600  # 10 minutes maximum
+    progress_update_interval: int = 5  # seconds
+
+    # Socket.IO settings
+    socketio_cors_origins: str = "http://localhost:4200,https://tools.brandinstitute.com,null"
+    socketio_async_mode: str = "asgi"  # asgi mode for FastAPI integration
+
+    @property
+    def socketio_cors_origins_list(self) -> list[str]:
+        """Get Socket.IO CORS origins as a list"""
+        return [origin.strip() for origin in self.socketio_cors_origins.split(",")]
+
     def get_base_dir_for_project_type(self, project_type: str) -> Path:
         """Get the base directory for a specific project type."""
         if project_type == self.PROJECT_TYPE_BIPRESENTS:
