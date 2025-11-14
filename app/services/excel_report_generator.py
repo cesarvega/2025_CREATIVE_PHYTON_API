@@ -234,7 +234,8 @@ class ExcelReportGenerator:
                     for item in data:
                         pid = item.get('ParticipantId') or item.get('participant_id')
                         name = item.get('Name') or item.get('name')
-                        vote = item.get('Vote') or item.get('vote')
+                        # Fix: Use if/else to handle 0 value correctly (0 is falsy in Python)
+                        vote = item.get('Vote') if 'Vote' in item else item.get('vote')
 
                         # Convert vote value to text if numeric
                         if vote is not None:

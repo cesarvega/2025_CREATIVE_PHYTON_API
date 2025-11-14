@@ -49,6 +49,7 @@ from app.services.feedback_template_generator import feedback_template_generator
 from app.services.bi_guidelines_service import bi_guidelines_service
 from app.services.pptx_service import pptx_service
 from app.utils.task_manager import task_manager, TaskStatus
+from app.utils.concurrency_manager_v2 import concurrency_manager
 from app.api.background_tasks import (
     _create_presentation_background,
     _generate_backup_background,
@@ -379,6 +380,20 @@ async def get_task_status(task_id: str) -> TaskStatusResponse:
             detail=f"Task {task_id} not found"
         )
 
+    # Calculate current position in queue if task is pending
+    # This ensures position is always up-to-date even after cancellations
+    if task["status"] == "pending":
+        queue_position = concurrency_manager.get_task_position(task_id)
+        if queue_position is not None:
+            # Task is in queue - calculate actual position
+            pool_stats = concurrency_manager.worker_pool.get_stats()
+            processing_workers = pool_stats["processing_workers"]
+            actual_position = processing_workers + queue_position
+
+            # Update task dict with current position info
+            task["position"] = actual_position
+            task["estimated_wait_seconds"] = actual_position * 90.0
+
     return TaskStatusResponse(**task)
 
 
@@ -435,11 +450,11 @@ async def list_tasks(
 
 @router.delete(
     "/tasks/{task_id}",
-    summary="Delete a task",
-    description="Delete a completed or failed task from the task manager.",
+    summary="Cancel or delete a task",
+    description="Cancel a queued/processing task or delete a completed/failed task.",
 )
 async def delete_task(task_id: str) -> dict:
-    """Delete a task from the task manager.
+    """Cancel or delete a task.
 
     Args:
         task_id: Task identifier
@@ -449,16 +464,25 @@ async def delete_task(task_id: str) -> dict:
 
     Raises:
         HTTPException 404: If task not found
+        HTTPException 409: If task is processing and cannot be cancelled
     """
+    # First, try to cancel if it's in queue
+    cancelled = await concurrency_manager.cancel_task(task_id)
+
+    if cancelled:
+        return {"message": f"Task {task_id} cancelled successfully"}
+
+    # If not cancelled, try to delete (for completed/failed tasks)
     deleted = task_manager.delete_task(task_id)
 
-    if not deleted:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Task {task_id} not found"
-        )
+    if deleted:
+        return {"message": f"Task {task_id} deleted successfully"}
 
-    return {"message": f"Task {task_id} deleted successfully"}
+    # Task not found anywhere
+    raise HTTPException(
+        status_code=404,
+        detail=f"Task {task_id} not found"
+    )
 
 
 @router.post(

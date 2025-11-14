@@ -111,6 +111,11 @@ class ConcurrencyManager:
         idle_workers = pool_stats["idle_workers"]
         processing_workers = pool_stats["processing_workers"]
 
+        logger.info(
+            "Pool stats before enqueue: idle=%d, processing=%d, total=%d",
+            idle_workers, processing_workers, pool_stats["total_workers"]
+        )
+
         # Add to queue first
         queue_position = self.task_queue.enqueue(
             task_id=task_id,
@@ -126,7 +131,10 @@ class ConcurrencyManager:
 
         if idle_workers > 0:
             # Task will be processed immediately
-            logger.info("Task %s will be processed immediately (idle workers: %d)", task_id, idle_workers)
+            logger.info(
+                "Task %s will be processed immediately (idle_workers=%d, queue_pos=%d, final_position=%d)",
+                task_id, idle_workers, queue_position, queue_position
+            )
 
             return {
                 "task_id": task_id,
@@ -172,10 +180,14 @@ class ConcurrencyManager:
             return False
 
         # Try to cancel from queue
+        # The queue.cancel() method uses a lock, so it's thread-safe
+        # If a worker dequeues the task at the exact same time, one of these will happen:
+        # 1. cancel() runs first -> task removed, dequeue() won't get it
+        # 2. dequeue() runs first -> task removed, cancel() returns False
         cancelled = self.task_queue.cancel(task_id)
 
         if cancelled:
-            logger.info("Task %s cancelled from queue", task_id)
+            logger.info("Task %s successfully cancelled from queue", task_id)
 
             # Update task status
             task_manager.update_status(
@@ -186,6 +198,15 @@ class ConcurrencyManager:
 
             return True
 
+        # Task not found in queue
+        # Check if it's currently processing (in case it just started)
+        active_tasks = self.worker_pool.get_active_tasks()
+        if task_id in active_tasks:
+            logger.warning("Cannot cancel task %s - already processing", task_id)
+            return False
+
+        # Task doesn't exist or already completed
+        logger.warning("Cannot cancel task %s - not found in queue or already completed", task_id)
         return False
 
     def get_task_position(self, task_id: str) -> Optional[int]:

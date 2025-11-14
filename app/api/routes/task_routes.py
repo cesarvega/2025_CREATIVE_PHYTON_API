@@ -31,6 +31,19 @@ async def get_task_status(task_id: str):
     if not task:
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
 
+    # Calculate current position in queue if task is pending
+    position = None
+    estimated_wait_seconds = None
+
+    if task["status"] == "pending":
+        queue_position = concurrency_manager.get_task_position(task_id)
+        if queue_position is not None:
+            # Task is in queue - calculate actual position
+            pool_stats = concurrency_manager.worker_pool.get_stats()
+            processing_workers = pool_stats["processing_workers"]
+            position = processing_workers + queue_position
+            estimated_wait_seconds = position * 90.0
+
     return {
         "task_id": task["task_id"],
         "task_type": task["task_type"],
@@ -43,6 +56,8 @@ async def get_task_status(task_id: str):
         "started_at": task.get("started_at"),
         "completed_at": task.get("completed_at"),
         "metadata": task.get("metadata", {}),
+        "position": position,
+        "estimated_wait_seconds": estimated_wait_seconds,
     }
 
 
@@ -122,9 +137,10 @@ async def get_task_position(task_id: str):
     Returns:
         Position and estimated wait time
     """
-    position = concurrency_manager.get_task_position(task_id)
+    # Get position in queue (0-indexed within queue only)
+    queue_position = concurrency_manager.get_task_position(task_id)
 
-    if position is None:
+    if queue_position is None:
         # Task not in queue - check if it exists
         task = task_manager.get_task(task_id)
         if not task:
@@ -138,13 +154,22 @@ async def get_task_position(task_id: str):
             "message": f"Task is not in queue (status: {task['status']})",
         }
 
-    # Estimate wait time
-    estimated_wait = position * 90.0  # Assume 90 seconds per task
+    # Task is in queue - calculate actual position including processing tasks
+    pool_stats = concurrency_manager.worker_pool.get_stats()
+    processing_workers = pool_stats["processing_workers"]
+
+    # Actual position = number of tasks ahead (processing + queued before this one)
+    actual_position = processing_workers + queue_position
+
+    # Estimate wait time based on actual position
+    estimated_wait = actual_position * 90.0  # Assume 90 seconds per task
 
     return {
         "task_id": task_id,
         "in_queue": True,
-        "position": position,
+        "position": actual_position,
+        "queue_position": queue_position,
+        "processing_tasks": processing_workers,
         "estimated_wait_seconds": estimated_wait,
         "estimated_wait_minutes": round(estimated_wait / 60, 1),
     }

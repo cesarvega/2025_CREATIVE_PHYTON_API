@@ -43,6 +43,8 @@ class TaskStatusResponse(BaseModel):
     created_at: str = Field(..., description="ISO timestamp when task was created")
     started_at: Optional[str] = Field(None, description="ISO timestamp when task started processing")
     completed_at: Optional[str] = Field(None, description="ISO timestamp when task completed")
+    position: Optional[int] = Field(None, description="Current position in queue (None if not queued, recalculated on each request)")
+    estimated_wait_seconds: Optional[float] = Field(None, description="Estimated wait time in seconds (recalculated on each request)")
 
     class Config:
         json_schema_extra = {

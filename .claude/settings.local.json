@@ -11,7 +11,8 @@
       "Bash(del \"c:\\inetpub\\wwwroot\\CreativePythonAPI\\app\\utils\\socketio_manager.py\")",
       "Bash(rm:*)",
       "Bash(Get-Process python -ErrorAction SilentlyContinue)",
-      "Bash(Stop-Process -Force)"
+      "Bash(Stop-Process -Force)",
+      "Bash(del verify_neutral_vote_fix.py)"
     ],
     "deny": [],
     "ask": []
