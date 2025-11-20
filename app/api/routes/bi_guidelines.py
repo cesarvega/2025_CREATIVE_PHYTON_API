@@ -5,8 +5,9 @@ from the BI_GUIDELINES database.
 """
 
 import pyodbc
+from pathlib import Path
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Form, Depends
 
 from app.config.db import (
     DatabaseConnectionError,
@@ -14,12 +15,16 @@ from app.config.db import (
     get_connection_scope,
     get_db_connection,
 )
+from app.config.settings import settings
 from app.models.bi_guidelines_models import (
     NWMasterRequest,
     ReloadProjectSoundsRequest,
     ProjectUpdateRequest,
     BSRProjectUpdateRequest,
+    BackgroundTemplateCreate,
+    BackgroundTemplateUpdate,
 )
+from app.utils.image_processor import create_thumbnail, get_thumbnail_filename
 from app.models.nsr_models import (
     NSRProjectConfigResponse,
     NSRUpdateRuleRequest,
@@ -32,10 +37,20 @@ from app.models.presentation_models import PresentationData
 from app.models.response_models import (
     ActivePresentationsResponse,
     DisplayNamesResponse,
+    TemplateGroup,
     TemplateGroupsResponse,
+    CustomThemesListResponse,
+    CustomThemeCreateResponse,
+    CustomThemeDeleteResponse,
 )
 from app.services.bi_guidelines_service import bi_guidelines_service
 from app.services.nsr_service import nsr_service
+from app.utils.file_upload_utils import (
+    process_file,
+    FileValidationError,
+    FileProcessingError,
+    cleanup_theme_file,
+)
 from app.utils.logging_utils import get_logger
 
 router = APIRouter(prefix="/bi_guidelines", tags=["BI Guidelines"])
@@ -396,12 +411,12 @@ async def get_bsr_project_info(project_id: int):
 @router.get(
     "/template-groups",
     response_model=TemplateGroupsResponse,
-    summary="Get list of template groups",
+    summary="Get list of background templates",
     description=(
         "Retrieve available background templates grouped by category from BI_GUIDELINES database. "
-        "This endpoint executes the getNW_TemplateGroups stored procedure and returns:\n\n"
-        "- **Template information**: ID, name, and category for each template\n"
-        "- **Complete list**: All available templates without pagination\n\n"
+        "This endpoint executes the getNW_TemplateGroups stored procedure.\n\n"
+        "- **Template information**: ID, name, category, and file path for each template\n"
+        "- **Preview URLs**: Full URLs to access the background images\n\n"
         "Useful for populating template selection dropdowns and displaying available background options."
     ),
 )
@@ -415,11 +430,16 @@ async def get_template_groups() -> TemplateGroupsResponse:
     - Get all templates: `GET /api/bi_guidelines/template-groups`
     """
     try:
-        template_groups, total = bi_guidelines_service.get_template_groups()
+        template_groups, total, custom_count, system_count = bi_guidelines_service.get_template_groups()
         return TemplateGroupsResponse(
             template_groups=template_groups,
             total=total,
+            custom_count=custom_count,
+            system_count=system_count,
         )
+    except ValueError as e:
+        logger.error("Validation error in get_template_groups: %s", str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except Exception as e:
         logger.error("Error retrieving template groups: %s", str(e), exc_info=True)
         raise HTTPException(
@@ -924,6 +944,352 @@ async def initialize_nsr_rules(project_name: str) -> NSRInitializeResponse:
         raise HTTPException(
             status_code=500,
             detail=f"Failed to initialize NSR rules: {str(e)}"
+        ) from e
+
+
+# --- Custom Themes Endpoints ---
+
+
+@router.post(
+    "/background-templates",
+    response_model=CustomThemeCreateResponse,
+    status_code=201,
+    summary="Upload a new background template",
+    description=(
+        "Upload a custom background (JPG, PNG, or PPTX).\n\n"
+        "**File Requirements:**\n"
+        "- Format: JPG, PNG, or PPTX\n"
+        "- Max size: 10MB\n"
+        "- PPTX files: First slide extracted as JPG (1920x1080)\n"
+        "- Images saved directly to BackGrounds folder\n\n"
+        "**Storage:**\n"
+        "- Production: C:\\inetpub\\wwwroot\\nw2\\assets\\images\\BackGrounds\n"
+        "- Development: NW_Files/backgrounds\n"
+        "- Files stored with sanitized filenames"
+    ),
+)
+async def create_background_template(
+    template_name: str = Form(..., min_length=3, max_length=100),
+    template_group: str = Form(..., min_length=3, max_length=100),
+    background_file: UploadFile = File(...),
+):
+    """Upload a background template (image or PPTX).
+    
+    This endpoint:
+    1. Validates the uploaded file (JPG/PNG/PPTX, max 10MB)
+    2. For PPTX: Extracts first slide as JPG
+    3. Saves to BackGrounds directory
+    4. Creates record in nw_Templates table
+    5. Returns template information
+    """
+    try:
+        # Read file content
+        file_content = await background_file.read()
+        
+        logger.info(
+            "Creating background template '%s' in group '%s' (file: %s, size: %d bytes)",
+            template_name,
+            template_group,
+            background_file.filename,
+            len(file_content)
+        )
+        
+        # Determine output directory based on environment
+        backgrounds_dir = settings.backgrounds_dir
+        
+        # Process and save file
+        try:
+            saved_filename = process_file(
+                filename=background_file.filename,
+                file_content=file_content,
+                output_dir=backgrounds_dir
+            )
+        except FileValidationError as e:
+            logger.warning("File validation failed for '%s': %s", background_file.filename, str(e))
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except FileProcessingError as e:
+            logger.error("File processing failed for '%s': %s", background_file.filename, str(e))
+            raise HTTPException(status_code=500, detail=f"Failed to process file: {str(e)}") from e
+        
+        # Generate thumbnail for faster loading in frontend
+        try:
+            thumbnails_dir = backgrounds_dir / "thumbnails"
+            thumbnails_dir.mkdir(exist_ok=True)
+            
+            source_path = backgrounds_dir / saved_filename
+            thumbnail_filename = get_thumbnail_filename(saved_filename)
+            thumbnail_path = thumbnails_dir / thumbnail_filename
+            
+            create_thumbnail(source_path, thumbnail_path)
+            logger.info("Thumbnail created: %s", thumbnail_filename)
+        except Exception as e:
+            # Don't fail the entire request if thumbnail creation fails
+            logger.warning("Failed to create thumbnail for '%s': %s", saved_filename, str(e))
+        
+        # Build relative path for database storage
+        # Physical path: C:/inetpub/wwwroot/nw2/assets/images/BackGrounds/slide_7.png
+        # DB path: images/BackGrounds/slide_7.png
+        relative_path = f"images/BackGrounds/{saved_filename}"
+        
+        # Create database record
+        template_data = bi_guidelines_service.create_background_template(
+            template_name=template_name,
+            template_group=template_group,
+            file_name=relative_path
+        )
+        
+        logger.info(
+            "Successfully created background template '%s' (ID: %d)",
+            template_name,
+            template_data['template_id']
+        )
+        
+        # Build response
+        theme = TemplateGroup(
+            template_group_id=template_data['template_id'],
+            template_name=template_data['template_name'],
+            category=template_data['template_group'],
+            template_file_name=template_data['template_path']
+        )
+        
+        return CustomThemeCreateResponse(
+            success=True,
+            message="Background template created successfully",
+            template=theme
+        )
+        
+    except ValueError as e:
+        logger.error("Validation error creating background template: %s", str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Unexpected error creating background template: %s", str(e), exc_info=True)
+        # Cleanup on error
+        if 'saved_filename' in locals():
+            file_path = backgrounds_dir / saved_filename
+            if file_path.exists():
+                file_path.unlink()
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to create background template"
+        ) from e
+
+
+@router.get(
+    "/background-templates",
+    response_model=CustomThemesListResponse,
+    summary="Get list of background templates",
+    description=(
+        "Retrieve background templates with optional filtering by group.\n\n"
+        "**Filters:**\n"
+        "- `template_group`: Filter by group/category\n"
+        "- `page`: Page number (default: 1)\n"
+        "- `limit`: Results per page (default: 50, max: 100)"
+    ),
+)
+async def get_background_templates(
+    template_group: Optional[str] = Query(None, description="Filter by template group"),
+    page: int = Query(1, ge=1, description="Page number"),
+    limit: int = Query(50, ge=1, le=100, description="Results per page"),
+):
+    """Get list of background templates with optional pagination and filtering."""
+    try:
+        templates, total = bi_guidelines_service.get_background_templates(
+            template_group=template_group,
+            page=page,
+            limit=limit
+        )
+        
+        # Convert to TemplateGroup format with preview URLs
+        theme_groups = []
+        for t in templates:
+            # Construct preview URL and thumbnail URL
+            preview_url = None
+            thumbnail_url = None
+            
+            if t['template_path']:
+                from app.config.settings import settings
+                if settings.environment == "production":
+                    base_url = "https://tools.brandinstitute.com/nw2/assets/"
+                else:
+                    base_url = "https://tools.brandinstitute.com/nw2/assets/"
+                
+                # Full resolution image - normalize path separators
+                preview_url = f"{base_url}{t['template_path'].replace(chr(92), '/')}"
+                
+                # Thumbnail (300x169px for fast loading)
+                # Maintain subdirectory structure
+                # Example: images/BackGrounds/Backgrounds2019/file.jpg
+                #       -> images/BackGrounds/Backgrounds2019/thumbnails/file.jpg
+                path_parts = Path(t['template_path'])
+                thumbnail_filename = get_thumbnail_filename(path_parts.name)
+                
+                # Build thumbnail path maintaining subdirectory structure
+                if path_parts.parent and str(path_parts.parent) != '.':
+                    thumbnail_path = f"{path_parts.parent}/thumbnails/{thumbnail_filename}"
+                else:
+                    thumbnail_path = f"thumbnails/{thumbnail_filename}"
+                
+                # Normalize to forward slashes for URL
+                thumbnail_url = f"{base_url}{thumbnail_path.replace(chr(92), '/')}"
+            
+            theme_groups.append(
+                TemplateGroup(
+                    template_group_id=t['template_id'],
+                    template_name=t['template_name'],
+                    category=t['template_group'],
+                    template_file_name=t['template_path'],
+                    thumbnail_url=thumbnail_url,
+                    preview_url=preview_url
+                )
+            )
+        
+        return CustomThemesListResponse(
+            success=True,
+            templates=theme_groups,
+            total=total,
+            page=page,
+            limit=limit
+        )
+        
+    except Exception as e:
+        logger.error("Error retrieving background templates: %s", str(e), exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to retrieve background templates"
+        ) from e
+
+
+@router.get(
+    "/background-templates/{template_id}",
+    response_model=TemplateGroup,
+    summary="Get a single background template by ID",
+    description="Retrieve detailed information about a specific background template.",
+)
+async def get_background_template(template_id: int):
+    """Get a single background template by template ID."""
+    try:
+        template = bi_guidelines_service.get_background_template(template_id)
+        
+        if not template:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Background template with ID {template_id} not found"
+            )
+        
+        return TemplateGroup(
+            template_group_id=template['template_id'],
+            template_name=template['template_name'],
+            category=template['template_group'],
+            template_file_name=template['template_path']
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error retrieving background template %d: %s", template_id, str(e), exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to retrieve background template"
+        ) from e
+
+
+
+@router.patch(
+    "/background-templates/{template_id}",
+    response_model=TemplateGroup,
+    summary="Update a background template",
+    description=(
+        "Update template name or group.\n\n"
+        "**Updatable fields:**\n"
+        "- template_name\n"
+        "- template_group\n\n"
+        "**Note:** To change the image, delete and recreate the template."
+    ),
+)
+async def update_background_template(
+    template_id: int,
+    template_name: Optional[str] = Form(None, min_length=3, max_length=100),
+    template_group: Optional[str] = Form(None, min_length=3, max_length=100),
+):
+    """Update a background template's metadata (name/group only)."""
+    try:
+        # Update database
+        updated_template = bi_guidelines_service.update_background_template(
+            template_id=template_id,
+            template_name=template_name,
+            template_group=template_group
+        )
+        
+        logger.info("Successfully updated background template %d", template_id)
+        
+        return TemplateGroup(
+            template_group_id=updated_template['template_id'],
+            template_name=updated_template['template_name'],
+            category=updated_template['template_group'],
+            template_file_name=updated_template['template_path']
+        )
+        
+    except ValueError as e:
+        logger.error("Validation error updating background template: %s", str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Unexpected error updating background template %d: %s", template_id, str(e), exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to update background template"
+        ) from e
+
+
+@router.delete(
+    "/background-templates/{template_id}",
+    response_model=CustomThemeDeleteResponse,
+    summary="Delete a background template",
+    description=(
+        "Delete a background template.\n\n"
+        "This will:\n"
+        "- Remove the record from nw_Templates table\n"
+        "- Delete the physical image file from BackGrounds folder"
+    ),
+)
+async def delete_background_template(
+    template_id: int,
+):
+    """Delete a background template."""
+    try:
+        # Delete from database and get file path
+        success, template_path = bi_guidelines_service.delete_background_template(
+            template_id=template_id
+        )
+        
+        # Delete physical file
+        if success and template_path:
+            file_path = settings.backgrounds_dir / template_path
+            if file_path.exists():
+                file_path.unlink()
+                logger.info("Deleted physical file: %s", file_path)
+        
+        logger.info("Successfully deleted background template %d", template_id)
+        
+        return CustomThemeDeleteResponse(
+            success=True,
+            message="Background template deleted successfully",
+            deleted_template_id=template_id
+        )
+        
+    except ValueError as e:
+        logger.error("Validation error deleting background template: %s", str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Unexpected error deleting background template %d: %s", template_id, str(e), exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to delete background template"
         ) from e
 
 

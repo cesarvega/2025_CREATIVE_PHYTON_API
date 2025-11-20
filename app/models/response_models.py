@@ -67,6 +67,9 @@ class TemplateGroup(BaseModel):
     Represents a background image template from the nw_Templates table.
     The template_file_name contains the relative path to the background image
     (e.g., 'images/BackGrounds/Backgrounds2019/BrandDNA.jpg').
+    
+    The thumbnail_url provides a lightweight version (300x169px) for fast loading
+    in list views, while preview_url provides the full-resolution original.
     """
 
     template_group_id: int
@@ -76,6 +79,14 @@ class TemplateGroup(BaseModel):
         default=None,
         description="Relative path to the background image file"
     )
+    thumbnail_url: Optional[str] = Field(
+        None, 
+        description="URL to lightweight thumbnail (300x169px) for fast loading in lists"
+    )
+    preview_url: Optional[str] = Field(
+        None, 
+        description="URL to full-resolution background image"
+    )
 
 
 class TemplateGroupsResponse(BaseModel):
@@ -83,6 +94,35 @@ class TemplateGroupsResponse(BaseModel):
 
     template_groups: List[TemplateGroup]
     total: int
+    custom_count: int = Field(default=0, description="Number of custom themes")
+    system_count: int = Field(default=0, description="Number of system themes")
+
+
+class CustomThemesListResponse(BaseModel):
+    """Response model for background templates list (simplified)."""
+    
+    success: bool = True
+    templates: List["TemplateGroup"]  # Forward reference
+    total: int
+    page: int = Field(default=1, ge=1)
+    limit: int = Field(default=50, ge=1, le=100)
+
+
+class CustomThemeCreateResponse(BaseModel):
+    """Response model for background template creation."""
+    
+    success: bool = True
+    message: str = "Background template created successfully"
+    template: "TemplateGroup"  # Forward reference
+
+
+class CustomThemeDeleteResponse(BaseModel):
+    """Response model for background template deletion."""
+    
+    success: bool = True
+    message: str = "Background template deleted successfully"
+    deleted_template_id: int
+
 
 
 class ReplaceProjectImagesResponse(BaseModel):

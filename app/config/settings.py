@@ -74,6 +74,18 @@ class Settings(BaseSettings):
             "NW_Files"
         )
 
+    @property
+    def backgrounds_dir(self) -> Path:
+        """Get backgrounds directory for custom background templates.
+        
+        Production: C:/inetpub/wwwroot/nw2/assets/images/BackGrounds
+        Development: NW_Files/backgrounds
+        """
+        return self._get_path_for_env(
+            "C:/inetpub/wwwroot/nw2/assets/images/BackGrounds",
+            "NW_Files/backgrounds"
+        )
+
     # Application paths
     app_dir: Path = Path(__file__).parent.parent.parent.resolve()
 

@@ -598,14 +598,15 @@ class BIGuidelinesService:
                 presentation_id
             )
 
-    def get_template_groups(self) -> Tuple[List[TemplateGroup], int]:
+    def get_template_groups(self) -> Tuple[List[TemplateGroup], int, int, int]:
         """Retrieve template groups from BI_GUIDELINES database.
 
         Executes the getNW_TemplateGroups stored procedure to get
         available background templates grouped by category.
 
         Returns:
-            Tuple containing (list of TemplateGroup objects, total count).
+            Tuple containing (list of TemplateGroup objects, total count, custom_count, system_count).
+            Note: custom_count is always 0 (legacy field for compatibility).
 
         Raises:
             DatabaseConnectionError: If connection to database fails.
@@ -614,69 +615,77 @@ class BIGuidelinesService:
         logger.debug("BI_GUIDELINES - Fetching template groups")
 
         with get_connection_scope(timeout=30) as cursor:
-            # Execute stored procedure
+            # Execute stored procedure for system templates
+            # SP now returns: TemplateId, TemplateName, TemplateGroup, TemplateFileName
             cursor.execute("{CALL [BI_GUIDELINES].[dbo].[getNW_TemplateGroups]}")
 
-            # Get column names and rows
-            columns = [column[0] for column in cursor.description]
             rows = cursor.fetchall()
 
-            # Log columns for debugging
-            logger.info("BI_GUIDELINES - Template groups columns: %s", columns)
-            if rows:
-                logger.info("BI_GUIDELINES - First row sample: %s", dict(zip(columns, rows[0])))
-
             template_groups = []
-            for idx, row in enumerate(rows):
-                # Convert row to dictionary for easier access
-                row_dict = dict(zip(columns, row))
-
-                # The SP might return multiple columns or a single concatenated column
-                # Try to get individual columns first
-                temp_group_value = row_dict.get("'TempGroup'") or row_dict.get('TempGroup')
-                template_file_name = row_dict.get("'TemplateFileName'") or row_dict.get('TemplateFileName')
-
-                # If we have a concatenated value, parse it
-                if temp_group_value and not template_file_name:
-                    # Parse the value if it contains delimited data (e.g., "Category~TemplateName~Path")
-                    parts = str(temp_group_value).split('~')
-                    category = parts[0] if len(parts) > 0 else None
-                    template_name = parts[1] if len(parts) > 1 else str(temp_group_value)
-                    template_file_name = parts[2] if len(parts) > 2 else None
-                elif not temp_group_value and row_dict:
-                    # Fallback: use first value if column name is unexpected
-                    temp_group_value = list(row_dict.values())[0] if row_dict else None
-                    parts = str(temp_group_value).split('~') if temp_group_value else []
-                    category = parts[0] if len(parts) > 0 else None
-                    template_name = parts[1] if len(parts) > 1 else str(temp_group_value) if temp_group_value else ''
-                    template_file_name = parts[2] if len(parts) > 2 else None
-                else:
-                    # We have separate columns
-                    if temp_group_value:
-                        parts = str(temp_group_value).split('~')
-                        category = parts[0] if len(parts) > 0 else None
-                        template_name = parts[1] if len(parts) > 1 else str(temp_group_value)
+            for row in rows:
+                # Construct preview URL and thumbnail URL from template file name
+                # DB path: "images/BackGrounds/BMW_blue.jpg"
+                # Full URL: "https://tools.brandinstitute.com/nw2/assets/images/BackGrounds/BMW_blue.jpg"
+                # Thumbnail: "https://tools.brandinstitute.com/nw2/assets/images/BackGrounds/thumbnails/BMW_blue.jpg"
+                preview_url = None
+                thumbnail_url = None
+                
+                if row.TemplateFileName:
+                    # Check if running in production
+                    from app.config.settings import settings
+                    from pathlib import Path
+                    from app.utils.image_processor import get_thumbnail_filename
+                    
+                    if settings.environment == "production":
+                        base_url = "https://tools.brandinstitute.com/nw2/assets/"
                     else:
-                        category = None
-                        template_name = ''
-
+                        # For development, point to production server since images are stored there
+                        base_url = "https://tools.brandinstitute.com/nw2/assets/"
+                    
+                    # Full resolution image
+                    # Normalize path separators to forward slashes for URLs
+                    preview_url = f"{base_url}{row.TemplateFileName.replace(chr(92), '/')}"
+                    
+                    # Thumbnail (300x169px for fast loading)
+                    # Maintain subdirectory structure in thumbnails
+                    # Example: images/BackGrounds/Backgrounds2019/BlueCrag.jpg
+                    #       -> images/BackGrounds/Backgrounds2019/thumbnails/BlueCrag.jpg
+                    path_parts = Path(row.TemplateFileName)
+                    thumbnail_filename = get_thumbnail_filename(path_parts.name)
+                    
+                    # Build thumbnail path maintaining subdirectory structure
+                    # If path is: images/BackGrounds/Backgrounds2019/file.jpg
+                    # Parent is: images/BackGrounds/Backgrounds2019
+                    # Thumbnail: images/BackGrounds/Backgrounds2019/thumbnails/file.jpg
+                    if path_parts.parent and str(path_parts.parent) != '.':
+                        thumbnail_path = f"{path_parts.parent}/thumbnails/{thumbnail_filename}"
+                    else:
+                        thumbnail_path = f"thumbnails/{thumbnail_filename}"
+                    
+                    # Normalize to forward slashes for URL
+                    thumbnail_url = f"{base_url}{thumbnail_path.replace(chr(92), '/')}"
+                
                 template_groups.append(
                     TemplateGroup(
-                        template_group_id=idx + 1,  # Use index as ID since SP doesn't return one
-                        template_name=template_name,
-                        category=category,
-                        template_file_name=template_file_name,
+                        template_group_id=row.TemplateId,
+                        template_name=row.TemplateName,
+                        category=row.TemplateGroup,
+                        template_file_name=row.TemplateFileName,
+                        thumbnail_url=thumbnail_url,
+                        preview_url=preview_url
                     )
                 )
 
-            total = len(template_groups)
+            system_count = len(template_groups)
+            total = system_count
+            custom_count = 0
 
             logger.info(
                 "BI_GUIDELINES - Retrieved %d template groups",
-                total,
+                total
             )
 
-            return template_groups, total
+            return template_groups, total, custom_count, system_count
 
     def get_background_templates_by_names(self, template_names: List[str]) -> Dict[str, Dict[str, any]]:
         """Query nw_Templates table to get background info for given template names.
@@ -1102,6 +1111,346 @@ class BIGuidelinesService:
                 presentation_status
             )
 
+    # --- Custom Themes Methods ---
+
+    def create_background_template(
+        self,
+        *,
+        template_name: str,
+        template_group: str,
+        file_name: str
+    ) -> dict:
+        """Create a new background template in nw_Templates table.
+        
+        Args:
+            template_name: Name of the template (unique)
+            template_group: Group/category for organization
+            file_name: Filename of the uploaded image (will be saved to BackGrounds folder)
+            
+        Returns:
+            Dictionary with created template data including template_id
+            
+        Raises:
+            ValueError: If template name already exists
+            DatabaseConnectionError: If connection fails
+            DatabaseTransactionError: If insert fails
+        """
+        logger.debug(
+            "BI_GUIDELINES - Creating background template '%s' in group '%s'",
+            template_name,
+            template_group
+        )
+
+        with get_connection_scope(timeout=30) as cursor:
+            # Check if template name already exists
+            cursor.execute(
+                """
+                SELECT TemplateId FROM [BI_GUIDELINES].[dbo].[nw_Templates]
+                WHERE TemplateName = ?
+                """,
+                (template_name,)
+            )
+            existing = cursor.fetchone()
+            
+            if existing:
+                raise ValueError(
+                    f"Template '{template_name}' already exists"
+                )
+
+            # Insert into nw_Templates using stored procedure
+            cursor.execute(
+                """
+                EXEC [BI_GUIDELINES].[dbo].[nw_InsertTemplate]
+                    @TemplateName = ?,
+                    @TemplateGroup = ?,
+                    @TemplateFileName = ?
+                """,
+                (template_name, template_group, file_name)
+            )
+            
+            # Get the inserted template ID
+            cursor.execute(
+                """
+                SELECT TemplateId, TemplateName, TemplateGroup, TemplateFileName
+                FROM [BI_GUIDELINES].[dbo].[nw_Templates]
+                WHERE TemplateName = ?
+                """,
+                (template_name,)
+            )
+            result = cursor.fetchone()
+            cursor.connection.commit()
+
+            logger.info(
+                "BI_GUIDELINES - Created background template '%s' with ID %d",
+                template_name,
+                result.TemplateId
+            )
+
+            return {
+                "template_id": result.TemplateId,
+                "template_name": result.TemplateName,
+                "template_group": result.TemplateGroup,
+                "template_path": result.TemplateFileName
+            }
+
+    def get_background_templates(
+        self,
+        *,
+        template_group: Optional[str] = None,
+        page: int = 1,
+        limit: int = 50
+    ) -> Tuple[List[dict], int]:
+        """Retrieve background templates with optional pagination and filtering.
+        
+        Args:
+            template_group: Filter by group/category (optional)
+            page: Page number (1-indexed)
+            limit: Results per page
+            
+        Returns:
+            Tuple of (list of template dicts, total count)
+        """
+        offset = (page - 1) * limit
+
+        logger.debug(
+            "BI_GUIDELINES - Fetching background templates: group=%s, page=%d",
+            template_group or "(all)",
+            page
+        )
+
+        with get_connection_scope(timeout=30) as cursor:
+            # Build query based on filter
+            if template_group:
+                count_query = """
+                    SELECT COUNT(*) as total
+                    FROM [BI_GUIDELINES].[dbo].[nw_Templates]
+                    WHERE TemplateGroup = ?
+                """
+                query = """
+                    SELECT TemplateId, TemplateName, TemplateGroup, TemplateFileName
+                    FROM [BI_GUIDELINES].[dbo].[nw_Templates]
+                    WHERE TemplateGroup = ?
+                    ORDER BY TemplateName
+                    OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
+                """
+                # Get total count
+                cursor.execute(count_query, (template_group,))
+                total = cursor.fetchone().total
+                
+                # Get paginated results
+                cursor.execute(query, (template_group, offset, limit))
+            else:
+                count_query = """
+                    SELECT COUNT(*) as total
+                    FROM [BI_GUIDELINES].[dbo].[nw_Templates]
+                """
+                query = """
+                    SELECT TemplateId, TemplateName, TemplateGroup, TemplateFileName
+                    FROM [BI_GUIDELINES].[dbo].[nw_Templates]
+                    ORDER BY TemplateGroup, TemplateName
+                    OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
+                """
+                # Get total count
+                cursor.execute(count_query)
+                total = cursor.fetchone().total
+                
+                # Get paginated results
+                cursor.execute(query, (offset, limit))
+            
+            rows = cursor.fetchall()
+
+            templates = []
+            for row in rows:
+                templates.append({
+                    "template_id": row.TemplateId,
+                    "template_name": row.TemplateName,
+                    "template_group": row.TemplateGroup,
+                    "template_path": row.TemplateFileName
+                })
+
+            logger.info(
+                "BI_GUIDELINES - Retrieved %d background templates (total: %d)",
+                len(templates),
+                total
+            )
+
+            return templates, total
+
+    def get_background_template(self, template_id: int) -> Optional[dict]:
+        """Get a single background template by ID.
+        
+        Args:
+            template_id: Template ID
+            
+        Returns:
+            Template dict or None if not found
+        """
+        logger.debug("BI_GUIDELINES - Fetching background template ID: %d", template_id)
+
+        with get_connection_scope(timeout=30) as cursor:
+            cursor.execute(
+                """
+                SELECT TemplateId, TemplateName, TemplateGroup, TemplateFileName
+                FROM [BI_GUIDELINES].[dbo].[nw_Templates]
+                WHERE TemplateId = ?
+                """,
+                (template_id,)
+            )
+            row = cursor.fetchone()
+
+            if not row:
+                logger.warning("Background template %d not found", template_id)
+                return None
+
+            return {
+                "template_id": row.TemplateId,
+                "template_name": row.TemplateName,
+                "template_group": row.TemplateGroup,
+                "template_path": row.TemplateFileName
+            }
+
+    def update_background_template(
+        self,
+        *,
+        template_id: int,
+        template_name: Optional[str] = None,
+        template_group: Optional[str] = None
+    ) -> dict:
+        """Update a background template's name or group.
+        
+        Note: TemplateFileName cannot be updated. To change the image, delete and recreate.
+        
+        Args:
+            template_id: Template ID to update
+            template_name: New template name (optional)
+            template_group: New group/category (optional)
+            
+        Returns:
+            Updated template dict
+            
+        Raises:
+            ValueError: If template not found or no fields to update
+        """
+        logger.debug(
+            "BI_GUIDELINES - Updating background template %d",
+            template_id
+        )
+
+        with get_connection_scope(timeout=30) as cursor:
+            # Verify template exists
+            cursor.execute(
+                """
+                SELECT TemplateId, TemplateName, TemplateGroup, TemplateFileName
+                FROM [BI_GUIDELINES].[dbo].[nw_Templates]
+                WHERE TemplateId = ?
+                """,
+                (template_id,)
+            )
+            row = cursor.fetchone()
+            
+            if not row:
+                raise ValueError(f"Background template {template_id} not found")
+
+            # Build UPDATE statement dynamically
+            update_fields = []
+            params = []
+
+            if template_name is not None:
+                # Check for duplicate name
+                cursor.execute(
+                    """
+                    SELECT TemplateId FROM [BI_GUIDELINES].[dbo].[nw_Templates]
+                    WHERE TemplateName = ? AND TemplateId != ?
+                    """,
+                    (template_name, template_id)
+                )
+                if cursor.fetchone():
+                    raise ValueError(f"Template name '{template_name}' already exists")
+                
+                update_fields.append("TemplateName = ?")
+                params.append(template_name)
+            
+            if template_group is not None:
+                update_fields.append("TemplateGroup = ?")
+                params.append(template_group)
+
+            if not update_fields:
+                raise ValueError("No fields to update")
+
+            # Execute update using stored procedure or direct SQL
+            cursor.execute(
+                """
+                EXEC [BI_GUIDELINES].[dbo].[nw_UpdateTemplate]
+                    @TemplateId = ?,
+                    @TemplateName = ?,
+                    @TemplateGroup = ?
+                """,
+                (template_id, template_name or row.TemplateName, template_group or row.TemplateGroup)
+            )
+            
+            cursor.connection.commit()
+
+            logger.info("BI_GUIDELINES - Updated background template %d", template_id)
+
+            # Return updated template
+            return self.get_background_template(template_id)
+
+    def delete_background_template(
+        self,
+        *,
+        template_id: int
+    ) -> Tuple[bool, str]:
+        """Delete a background template.
+        
+        Args:
+            template_id: Template ID to delete
+            
+        Returns:
+            Tuple of (success bool, template_path for file cleanup)
+            
+        Raises:
+            ValueError: If template not found
+        """
+        logger.debug(
+            "BI_GUIDELINES - Deleting background template %d",
+            template_id
+        )
+
+        with get_connection_scope(timeout=30) as cursor:
+            # Get template path before deleting
+            cursor.execute(
+                """
+                SELECT TemplateFileName FROM [BI_GUIDELINES].[dbo].[nw_Templates]
+                WHERE TemplateId = ?
+                """,
+                (template_id,)
+            )
+            row = cursor.fetchone()
+            
+            if not row:
+                raise ValueError(f"Background template {template_id} not found")
+            
+            template_path = row.TemplateFileName
+
+            # Delete from database
+            cursor.execute(
+                """
+                DELETE FROM [BI_GUIDELINES].[dbo].[nw_Templates]
+                WHERE TemplateId = ?
+                """,
+                (template_id,)
+            )
+
+            cursor.connection.commit()
+
+            logger.info(
+                "BI_GUIDELINES - Deleted background template %d",
+                template_id
+            )
+
+            return True, template_path
+
 
 # Global service instance
 bi_guidelines_service = BIGuidelinesService()
+
