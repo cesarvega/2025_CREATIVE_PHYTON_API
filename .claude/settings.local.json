@@ -12,7 +12,8 @@
       "Bash(rm:*)",
       "Bash(Get-Process python -ErrorAction SilentlyContinue)",
       "Bash(Stop-Process -Force)",
-      "Bash(del verify_neutral_vote_fix.py)"
+      "Bash(del verify_neutral_vote_fix.py)",
+      "Bash(sqlcmd:*)"
     ],
     "deny": [],
     "ask": []

@@ -961,6 +961,7 @@ class PresentationService:
     ) -> PresentationData:
         details: List[DetailItem] = []
         last_group_name = ""
+        last_group_letter = ""
         default_template = self._get_template_metadata("Default")
         default_template_id = default_template["template_id"]
 
@@ -985,7 +986,8 @@ class PresentationService:
                     kana="",
                     logo_filename="",
                     template_id=0,
-                    name_sub_group=""
+                    name_sub_group="",
+                    group_letter=""
                 ))
 
     # 2) Slides generated from the Excel data
@@ -1022,6 +1024,7 @@ class PresentationService:
                     slide_number=slide_number,
                     project_type=request.project_type,
                 )
+                group_letter = excel_data.lst_group_letters[index] if index < len(excel_data.lst_group_letters) else ""
                 details.append(DetailItem(
                     slide_number=slide_number,
                     slide_type="Image",
@@ -1036,6 +1039,7 @@ class PresentationService:
                     logo_filename=excel_data.lst_logos[index],
                     template_id=0,
                     name_sub_group=name_sub_group,
+                    group_letter=group_letter,
                 ))
                 slide_number += 1
 
@@ -1050,6 +1054,7 @@ class PresentationService:
                     default_template_id=default_template_id,
                 )
                 last_group_name = detail.group_name or last_group_name
+                last_group_letter = detail.group_letter or last_group_letter
                 details.append(detail)
                 slide_number += 1
 
@@ -1088,6 +1093,7 @@ class PresentationService:
                 last_group=last_group_name,
                 request=request,
                 default_template_id=default_template_id,
+                last_group_letter=last_group_letter,
             )
             details.append(summary_slide)
             slide_number += 1
@@ -1109,7 +1115,8 @@ class PresentationService:
                     kana="",
                     logo_filename="",
                     template_id=0,
-                    name_sub_group=""
+                    name_sub_group="",
+                    group_letter=""
                 ))
                 slide_number += 1
 
@@ -1151,6 +1158,7 @@ class PresentationService:
             request.project_type, request.presentation_type
         )
         group_name = excel_data.lst_categories[index] or excel_data.lst_names[index]
+        group_letter = excel_data.lst_group_letters[index] if index < len(excel_data.lst_group_letters) else ""
 
         return DetailItem(
             slide_number=slide_number,
@@ -1168,6 +1176,7 @@ class PresentationService:
             logo_filename="",
             template_id=default_template_id,
             name_sub_group="",
+            group_letter=group_letter,
         )
         
     def _create_individual_slide(
@@ -1184,6 +1193,7 @@ class PresentationService:
             request.project_type, request.presentation_type
         )
         group_name = current_group or excel_data.lst_categories[index]
+        group_letter = excel_data.lst_group_letters[index] if index < len(excel_data.lst_group_letters) else ""
 
         return DetailItem(
             slide_number=slide_number,
@@ -1199,6 +1209,7 @@ class PresentationService:
             logo_filename=excel_data.lst_logos[index],
             template_id=default_template_id,  # May be updated with template rotation
             name_sub_group=excel_data.lst_name_sub_groups[index],
+            group_letter=group_letter,
         )
 
     def _create_summary_slide(
@@ -1207,6 +1218,7 @@ class PresentationService:
         last_group: str,
         request: CreatePresentationRequest,
         default_template_id: int,
+        last_group_letter: str = "",
     ) -> DetailItem:
         """Create a summary slide for NW/DW projects."""
         return DetailItem(
@@ -1225,6 +1237,7 @@ class PresentationService:
             logo_filename="",
             template_id=default_template_id,
             name_sub_group="",
+            group_letter=last_group_letter,
         )
 
     def _create_existing_ppt_slides(
@@ -1657,13 +1670,26 @@ class PresentationService:
                 bg_index += 1
 
             # Insert the slide with the determined background path and template ID
+            # Combine group_letter and group_name in format: "A|Prescreen Survivors"
+            group_name_raw = slide.get("group_name") or ""
+            group_letter_raw = slide.get("group_letter") or ""
+
+            if group_letter_raw and group_name_raw:
+                # Format: "A|Prescreen Survivors"
+                group_name_with_letter = f"{group_letter_raw}|{group_name_raw}"
+            elif group_name_raw:
+                # No letter, just the name (for backward compatibility)
+                group_name_with_letter = group_name_raw
+            else:
+                group_name_with_letter = ""
+
             detail_params = (
                 presentation_id,
                 slide["slide_number"],
                 slide_type,
                 path_to_save,  # Full background image path
                 slide.get("slide_description") or "",
-                slide.get("group_name") or "",
+                group_name_with_letter,  # Group name with letter prefix: "A|Prescreen Survivors"
                 slide.get("category") or "",
                 slide.get("name") or "",
                 slide.get("rationale") or "",

@@ -361,6 +361,10 @@ class DetailItem(BaseModel):
     name_sub_group: Optional[str] = Field(
         default=None, description="Sub-group label for nested grouping scenarios."
     )
+    group_letter: Optional[str] = Field(
+        default="",
+        description="Group letter (A, B, C) indicating the voting behavior for this slide's group."
+    )
 
 
 class PresentationData(BaseModel):

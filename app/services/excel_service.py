@@ -130,6 +130,7 @@ def process_excel_file(
     lst_kana = []
     lst_logos = []
     lst_name_sub_groups = []
+    lst_group_letters = []
 
     # Collect all rows first - optimized with generator and early filtering
     all_rows = []
@@ -143,6 +144,7 @@ def process_excel_file(
     all_rows = _apply_test_name_order(all_rows, test_name_order)
 
     if not has_groups:
+        current_group_letter = ""
         for row in all_rows:
             raw_type = _clean(str(row[TYPE_COLUMN - 1].value) if len(row) >= TYPE_COLUMN else "")
             raw_category = _clean(str(row[CATEGORY_COLUMN - 1].value) if len(row) >= CATEGORY_COLUMN else "")
@@ -150,7 +152,7 @@ def process_excel_file(
             raw_rationale = _clean(str(row[RATIONALE_COLUMN - 1].value) if len(row) >= RATIONALE_COLUMN else "")
             raw_kana = _normalize_kana(str(row[KANA_COLUMN - 1].value) if len(row) >= KANA_COLUMN else "", is_phonetics)
             raw_logo = _clean(str(row[LOGO_COLUMN - 1].value) if len(row) >= LOGO_COLUMN else "")
-            
+
             # Extract subgroup: Check column G (Group1) first
             raw_name_sub_group = _clean(
                 str(row[NAME_SUBGROUP_COLUMN - 1].value) if len(row) >= NAME_SUBGROUP_COLUMN else ""
@@ -161,11 +163,16 @@ def process_excel_file(
 
             name, notation = _split_name_and_notation(raw_name)
 
-            if has_groups:
-                m = _group_marker_regex.match(raw_type)
-                marker = m.group(1).upper() if m else ""
-            else:
-                marker = ""
+            # Extract group letter from Grupo1/Grupo2 (e.g., "a1" -> "A", "b2" -> "B")
+            if raw_name_sub_group and len(raw_name_sub_group) > 0:
+                # Take the first character and uppercase it
+                first_char = raw_name_sub_group[0].upper()
+                if first_char.isalpha():
+                    current_group_letter = first_char
+
+            # Extract marker from Type column (for backward compatibility)
+            m = _group_marker_regex.match(raw_type)
+            marker = m.group(1).upper() if m else ""
 
             lst_types.append(marker)
             lst_categories.append(raw_category)
@@ -175,15 +182,17 @@ def process_excel_file(
             lst_kana.append(raw_kana)
             lst_logos.append(raw_logo)
             lst_name_sub_groups.append(raw_name_sub_group)
+            lst_group_letters.append(current_group_letter)
     
     else:
         # NEW: Group processing logic
         processed_indices = set()
-        
+        current_group_letter = ""
+
         for i, row in enumerate(all_rows):
             if i in processed_indices:
                 continue
-            
+
             # Extract subgroup: Check column G (Group1) first
             raw_name_sub_group = _clean(
                 str(row[NAME_SUBGROUP_COLUMN - 1].value) if len(row) >= NAME_SUBGROUP_COLUMN else ""
@@ -191,9 +200,9 @@ def process_excel_file(
             # If column G is empty, fallback to column H (Group2)
             if not raw_name_sub_group and len(row) >= NAME_SUBGROUP_COLUMN + 1:
                 raw_name_sub_group = _clean(str(row[NAME_SUBGROUP_COLUMN].value))
-            
+
             delimiter = GROUP_DELIMITER
-            
+
             # Process row data
             raw_type = _clean(str(row[TYPE_COLUMN - 1].value) if len(row) >= TYPE_COLUMN else "")
             raw_category = _clean(str(row[CATEGORY_COLUMN - 1].value) if len(row) >= CATEGORY_COLUMN else "")
@@ -201,9 +210,17 @@ def process_excel_file(
             raw_rationale = _clean(str(row[RATIONALE_COLUMN - 1].value) if len(row) >= RATIONALE_COLUMN else "")
             raw_kana = _normalize_kana(str(row[KANA_COLUMN - 1].value) if len(row) >= KANA_COLUMN else "", is_phonetics)
             raw_logo = _clean(str(row[LOGO_COLUMN - 1].value) if len(row) >= LOGO_COLUMN else "")
-            
+
             name, notation = _split_name_and_notation(raw_name)
-            
+
+            # Extract group letter from Grupo1/Grupo2 (e.g., "a1" -> "A", "b2" -> "B")
+            if raw_name_sub_group and len(raw_name_sub_group) > 0:
+                # Take the first character and uppercase it
+                first_char = raw_name_sub_group[0].upper()
+                if first_char.isalpha():
+                    current_group_letter = first_char
+
+            # Extract marker from Type column (for backward compatibility)
             if raw_type:
                 m = _group_marker_regex.match(raw_type)
                 marker = m.group(1).upper() if m else ""
@@ -220,6 +237,7 @@ def process_excel_file(
                 lst_kana.append(raw_kana)
                 lst_logos.append(raw_logo)
                 lst_name_sub_groups.append("")
+                lst_group_letters.append(current_group_letter)
                 processed_indices.add(i)
             else:
                 # Group multiple rows with same sub_group
@@ -253,7 +271,7 @@ def process_excel_file(
                 # Combine with delimiter
                 combined_name = delimiter.join(grouped_names) + delimiter
                 combined_rationale = delimiter.join(grouped_rationales) + delimiter
-                
+
                 lst_types.append(marker)
                 lst_categories.append(raw_category)
                 lst_names.append(combined_name)
@@ -262,6 +280,7 @@ def process_excel_file(
                 lst_kana.append(raw_kana)
                 lst_logos.append(raw_logo)
                 lst_name_sub_groups.append(raw_name_sub_group)
+                lst_group_letters.append(current_group_letter)
 
     if not lst_names:
         raise ValueError("The Excel file does not contain valid candidates")
@@ -275,6 +294,7 @@ def process_excel_file(
         lst_kana=lst_kana,
         lst_logos=lst_logos,
         lst_name_sub_groups=lst_name_sub_groups,
+        lst_group_letters=lst_group_letters,
         is_phonetics=is_phonetics,
     )
 
