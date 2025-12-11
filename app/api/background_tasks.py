@@ -187,6 +187,7 @@ def _create_bsr_presentation_background(
                 pptx_content=pptx_content,
                 pptx_filename=pptx_filename,
                 categories=metadata.categories,
+                overwrite_existing=metadata.overwrite_existing,
                 progress_callback=progress_callback,
             )
 
@@ -209,6 +210,7 @@ def _create_bsr_presentation_background(
                 "presentation_id": result.get("presentation_id"),
                 "total_slides": result.get("total_slides", 0),
                 "categories_added": result.get("categories_added", 0),
+                "overwritten": result.get("overwritten", False),
                 "processing_time_seconds": processing_time,
             }
         )

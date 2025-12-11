@@ -149,3 +149,4 @@ class CreateSimpleDWResponse(BaseModel):
     images: List[str]
     thumbnails: List[str] = []
     presentation_id: Optional[int] = None
+    overwritten: bool = False

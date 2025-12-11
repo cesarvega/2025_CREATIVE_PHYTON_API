@@ -95,8 +95,21 @@ def build_relative_slide_path(
     *,
     subdir: Optional[str] = None,
     fallback_root: Optional[str] = None,
+    cache_bust: Optional[int] = None,
 ) -> str:
-    """Construct a relative URL path for slide assets."""
+    """Construct a relative URL path for slide assets.
+
+    Args:
+        project_type: Type of project (e.g., 'bipresents', 'nw')
+        display_name: Display name for the project
+        filename: Name of the file
+        subdir: Optional subdirectory (e.g., 'Thumbnails')
+        fallback_root: Fallback root if project_type is not recognized
+        cache_bust: Optional timestamp for cache busting (prevents browser caching issues)
+
+    Returns:
+        URL path with optional cache busting query parameter
+    """
     parts = []
     root = get_relative_slide_root(project_type)
     if root:
@@ -107,7 +120,14 @@ def build_relative_slide_path(
     if subdir:
         parts.append(subdir)
     parts.append(filename)
-    return "/".join(parts)
+
+    url = "/".join(parts)
+
+    # Add cache busting query parameter if provided
+    if cache_bust is not None:
+        url = f"{url}?v={cache_bust}"
+
+    return url
 
 
 def get_nw_downloads_dir() -> Path:

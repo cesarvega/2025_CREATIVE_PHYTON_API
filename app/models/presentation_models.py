@@ -149,6 +149,12 @@ class CreatePresentationMetadata(BaseModel):
         description="Create backup file flag (0 or 1). When 1, creates a full backup of the presentation. Default: 0",
     )
 
+    # ===== OVERWRITE OPTIONS (FROM FRONTEND) =====
+    overwrite_existing: bool = Field(
+        False,
+        description="If True, allows overwriting an existing presentation with the same project and display_name. Default: False",
+    )
+
     def to_service_request(
         self,
         *,
@@ -185,6 +191,7 @@ class CreatePresentationMetadata(BaseModel):
             page_number=self.page_number,
             project_type=self.project_type,
             create_backup=self.create_backup,
+            overwrite_existing=self.overwrite_existing,
         )
 
 
@@ -274,6 +281,10 @@ class CreatePresentationRequest(BaseModel):
         le=1,
         description="Create backup file flag (0 or 1). When 1, creates a full backup copy of the generated presentation.",
     )
+    overwrite_existing: bool = Field(
+        False,
+        description="If True, allows overwriting an existing presentation with the same project and display_name.",
+    )
 
 
 class CreatePresentationResponse(BaseModel):
@@ -314,6 +325,10 @@ class CreatePresentationResponse(BaseModel):
     )
     processing_time_seconds: float = Field(
         ..., description="Total processing time spent inside the orchestration pipeline."
+    )
+    overwritten: bool = Field(
+        default=False,
+        description="Indicates if an existing presentation was overwritten during creation."
     )
 
 
@@ -774,6 +789,10 @@ class SimpleDWMetadata(BaseModel):
     userName: str = Field(..., description="User initiating the operation")
     slideType: str = Field("Image", description="SlideType to record in details, default 'Image'")
     presentationType: str = Field("Design", description="Master PresentationType, default 'Design'")
+    overwrite_existing: bool = Field(
+        False,
+        description="If True, allows overwriting an existing presentation with the same projectName and displayName. Default: False",
+    )
 
 
 class BSRCreatePresentationMetadata(BaseModel):
@@ -791,6 +810,7 @@ class BSRCreatePresentationMetadata(BaseModel):
                 "presentation_type": "BSR",
                 "user_name": "analyst",
                 "is_wide_ppt": 0,
+                "overwrite_existing": False,
                 "categories": {
                     "add_categories": True,
                     "mode": "both",
@@ -837,6 +857,10 @@ class BSRCreatePresentationMetadata(BaseModel):
     categories: Optional[dict] = Field(
         default=None,
         description="Optional categories configuration with add_categories flag, mode, and category definitions"
+    )
+    overwrite_existing: Optional[bool] = Field(
+        default=False,
+        description="If True, allows overwriting an existing presentation with the same project_name and display_name"
     )
 
     @model_validator(mode="after")
@@ -921,6 +945,7 @@ class BSRCreatePresentationResponse(BaseModel):
                 "total_slides": 6,
                 "processing_time_seconds": 8.45,
                 "categories_added": 2,
+                "overwritten": False,
             }
         }
     )
@@ -940,6 +965,10 @@ class BSRCreatePresentationResponse(BaseModel):
     )
     categories_added: int = Field(
         0, description="Number of categories added (0, 1, or 2)"
+    )
+    overwritten: bool = Field(
+        default=False, 
+        description="Indicates if an existing presentation was overwritten"
     )
 
 

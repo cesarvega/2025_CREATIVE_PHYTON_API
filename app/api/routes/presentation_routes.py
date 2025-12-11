@@ -142,12 +142,19 @@ def get_concurrency_status() -> dict:
         "2. Poll `/api/presentations/tasks/{task_id}` to check status\n"
         "3. When status='completed', retrieve result with presentation_id\n\n"
         "**Processing Steps (Background):**\n"
-        "1. **Processes Excel data** - Extracts names, categories, groups, rationales\n"
-        "2. **Converts PPTX to images** - Generates JPG from each slide\n"
-        "3. **Generates slide metadata** - Creates database records\n"
-        "4. **Applies template rotation** - Rotates through specified templates\n"
-        "5. **Generates physical PowerPoint** - Combines original + generated slides\n"
-        "6. **Persists to database** - Saves to nw_Master and nw_Details\n\n"
+        "1. **Checks if presentation exists** - Verifies project + display_name combination\n"
+        "2. **Handles overwrite logic** - If exists and overwrite_existing=true, deletes old presentation\n"
+        "3. **Processes Excel data** - Extracts names, categories, groups, rationales\n"
+        "4. **Converts PPTX to images** - Generates JPG from each slide\n"
+        "5. **Generates slide metadata** - Creates database records\n"
+        "6. **Applies template rotation** - Rotates through specified templates\n"
+        "7. **Generates physical PowerPoint** - Combines original + generated slides\n"
+        "8. **Persists to database** - Saves to nw_Master and nw_Details\n\n"
+        "**Overwrite Behavior:**\n"
+        "- Set `overwrite_existing: true` in metadata to allow overwriting existing presentations\n"
+        "- If presentation exists and overwrite_existing=false (default), returns 400 error\n"
+        "- Frontend should first check with `/api/presentations/exists` and confirm with user\n"
+        "- When overwriting, both database records AND physical files are deleted\n\n"
         "**Why Background?** PowerPoint generation is CPU-intensive and can take 30-120 seconds. "
         "Background processing ensures the API remains responsive."
     ),
@@ -157,10 +164,19 @@ def get_concurrency_status() -> dict:
     ),
     responses={
         400: {
-            "description": "Invalid or missing files provided in the multipart request.",
+            "description": "Invalid request, missing files, or presentation already exists without overwrite confirmation.",
             "content": {
                 "application/json": {
-                    "example": {"detail": "Excel file must be .xlsx or .xls"}
+                    "examples": {
+                        "invalid_file": {
+                            "summary": "Invalid file type",
+                            "value": {"detail": "Excel file must be .xlsx or .xls"}
+                        },
+                        "already_exists": {
+                            "summary": "Presentation already exists (overwrite not confirmed)",
+                            "value": {"detail": "Presentation already exists: NW_Project/NW_Display"}
+                        }
+                    }
                 }
             },
         },
@@ -576,11 +592,44 @@ async def create_simple_dw_presentation(
             raise HTTPException(status_code=400, detail="Invalid project name")
 
         logger.info(
-            "DW create-simple request: projectName='%s', displayName='%s', user='%s'",
+            "DW create-simple request: projectName='%s', displayName='%s', user='%s', overwrite='%s'",
             projectName,
             displayName,
             userName,
+            metadata.overwrite_existing,
         )
+
+        # Check if presentation exists and handle overwrite logic
+        existing_id = presentation_service._check_presentation_exists(projectName, displayName)
+        was_overwritten = False
+        overwrite_presentation_id = None
+
+        if existing_id and not metadata.overwrite_existing:
+            # Presentation exists and overwrite not confirmed
+            logger.warning(
+                "DW presentation already exists: %s/%s (ID: %d) - overwrite not confirmed",
+                projectName,
+                displayName,
+                existing_id
+            )
+            raise HTTPException(
+                status_code=400,
+                detail=f"Presentation already exists: {projectName}/{displayName}"
+            )
+
+        if existing_id and metadata.overwrite_existing:
+            # Presentation exists and overwrite confirmed
+            logger.info(
+                "Overwriting DW presentation: %s/%s (ID: %d) by user: %s",
+                projectName,
+                displayName,
+                existing_id,
+                userName
+            )
+            # Clean details and files but KEEP the master record (preserves ID)
+            presentation_service._clean_presentation_for_overwrite(existing_id, settings.PROJECT_TYPE_DW)
+            was_overwritten = True
+            overwrite_presentation_id = existing_id
 
         # Generate images under displayName folder (nw_slides/[displayName]/001.jpg)
         result = pptx_service.convert_pptx_to_images(
@@ -595,79 +644,107 @@ async def create_simple_dw_presentation(
         presentation_id: Optional[int] = None
         try:
             with get_connection_scope(timeout=30) as cursor:
-                # Resolve PresentationId from nw_Master via Project + DisplayName
-                cursor.execute(
-                    (
-                        "SELECT TOP 1 PresentationId "
-                        "FROM [BI_GUIDELINES].[dbo].[nw_Master] "
-                        "WHERE Project = ? AND DisplayName = ? "
-                        "ORDER BY PresentationId DESC"
-                    ),
-                    (projectName, displayName),
-                )
-                row = cursor.fetchone()
-                if not row:
-                    # If no master exists, create a minimal master record (Design/DW)
-                    master_sql = (
-                        "EXEC [dbo].[nw_InsertPresentationMaster_sep2025] "
-                        "@Project=?, @DisplayName=?, @MainPptFileName=?, @NameCandidateFileName=?, "
-                        "@NameCandidateBGType=?, @NameCandidateBGName=?, @NameCandidateStartingSlide=?, "
-                        "@PresentationType=?, @UploadedBy=?, @BSRDisplayName=?, "
-                        "@isParticipantsVote=?, @isWideScreenPPT=?, @isAWSLinkReq=?;"
-                    )
-                    master_params = (
-                        projectName,
-                        displayName,
-                        validated_file.filename or "",
-                        "",  # NameCandidateFileName not used in DW simple flow
-                        "Default",  # BG type
-                        "",  # BG name
-                        1,  # Starting slide
-                        presentationType,  # PresentationType from frontend (e.g., 'Design')
-                        userName or "",
-                        "",  # BSRDisplayName
-                        0,  # isParticipantsVote
-                        1 if getattr(metadata, "widePresentation", False) else 0,  # isWideScreenPPT
-                        0,  # isAWSLinkReq
-                    )
+                # If overwriting, use the preserved ID, otherwise check if master exists
+                if overwrite_presentation_id:
+                    presentation_id = overwrite_presentation_id
+                    logger.info("Using preserved presentation ID for overwrite: %d", presentation_id)
 
-                    cursor.execute(master_sql, master_params)
-
-                    # Try to fetch PresentationId from result set(s)
-                    while True:
-                        try:
-                            created_row = cursor.fetchone()
-                            if created_row:
-                                presentation_id = int(created_row[0])
-                                break
-                        except Exception:
-                            # Some drivers/SPs return no row; proceed to nextset
-                            pass
-                        if not cursor.nextset():
-                            break
-
-                    # Fallback lookup if SP did not return ID
-                    if not presentation_id:
-                        cursor.execute(
-                            (
-                                "SELECT TOP 1 PresentationId "
-                                "FROM [BI_GUIDELINES].[dbo].[nw_Master] "
-                                "WHERE Project = ? AND DisplayName = ? "
-                                "ORDER BY PresentationId DESC"
-                            ),
-                            (projectName, displayName),
+                    # Update master record with new values
+                    # Note: Only updating essential fields that are guaranteed to exist in nw_Master
+                    update_sql = """
+                        UPDATE [BI_GUIDELINES].[dbo].[nw_Master]
+                        SET
+                            MainPptFileName = ?,
+                            PresentationType = ?,
+                            UploadedBy = ?,
+                            isWideScreenPPT = ?
+                        WHERE PresentationId = ?
+                    """
+                    cursor.execute(
+                        update_sql,
+                        (
+                            validated_file.filename or "",
+                            presentationType,
+                            userName or "",
+                            1 if getattr(metadata, "widePresentation", False) else 0,
+                            presentation_id,
                         )
-                        row2 = cursor.fetchone()
-                        if not row2:
-                            raise HTTPException(
-                                status_code=404,
-                                detail=(
-                                    "Presentation master not found and could not be created"
-                                ),
-                            )
-                        presentation_id = int(row2[0])
+                    )
+                    logger.info("✅ DW master record updated: ID=%d", presentation_id)
                 else:
-                    presentation_id = int(row[0])
+                    # Resolve PresentationId from nw_Master via Project + DisplayName
+                    cursor.execute(
+                        (
+                            "SELECT TOP 1 PresentationId "
+                            "FROM [BI_GUIDELINES].[dbo].[nw_Master] "
+                            "WHERE Project = ? AND DisplayName = ? "
+                            "ORDER BY PresentationId DESC"
+                        ),
+                        (projectName, displayName),
+                    )
+                    row = cursor.fetchone()
+                    if not row:
+                        # If no master exists, create a minimal master record (Design/DW)
+                        master_sql = (
+                            "EXEC [dbo].[nw_InsertPresentationMaster_sep2025] "
+                            "@Project=?, @DisplayName=?, @MainPptFileName=?, @NameCandidateFileName=?, "
+                            "@NameCandidateBGType=?, @NameCandidateBGName=?, @NameCandidateStartingSlide=?, "
+                            "@PresentationType=?, @UploadedBy=?, @BSRDisplayName=?, "
+                            "@isParticipantsVote=?, @isWideScreenPPT=?, @isAWSLinkReq=?;"
+                        )
+                        master_params = (
+                            projectName,
+                            displayName,
+                            validated_file.filename or "",
+                            "",  # NameCandidateFileName not used in DW simple flow
+                            "Default",  # BG type
+                            "",  # BG name
+                            1,  # Starting slide
+                            presentationType,  # PresentationType from frontend (e.g., 'Design')
+                            userName or "",
+                            "",  # BSRDisplayName
+                            0,  # isParticipantsVote
+                            1 if getattr(metadata, "widePresentation", False) else 0,  # isWideScreenPPT
+                            0,  # isAWSLinkReq
+                        )
+
+                        cursor.execute(master_sql, master_params)
+
+                        # Try to fetch PresentationId from result set(s)
+                        while True:
+                            try:
+                                created_row = cursor.fetchone()
+                                if created_row:
+                                    presentation_id = int(created_row[0])
+                                    break
+                            except Exception:
+                                # Some drivers/SPs return no row; proceed to nextset
+                                pass
+                            if not cursor.nextset():
+                                break
+
+                        # Fallback lookup if SP did not return ID
+                        if not presentation_id:
+                            cursor.execute(
+                                (
+                                    "SELECT TOP 1 PresentationId "
+                                    "FROM [BI_GUIDELINES].[dbo].[nw_Master] "
+                                    "WHERE Project = ? AND DisplayName = ? "
+                                    "ORDER BY PresentationId DESC"
+                                ),
+                                (projectName, displayName),
+                            )
+                            row2 = cursor.fetchone()
+                            if not row2:
+                                raise HTTPException(
+                                    status_code=404,
+                                    detail=(
+                                        "Presentation master not found and could not be created"
+                                    ),
+                                )
+                            presentation_id = int(row2[0])
+                    else:
+                        presentation_id = int(row[0])
 
                 # Insert a detail row for each generated image with the requested SlideType
                 insert_sql = (
@@ -706,7 +783,7 @@ async def create_simple_dw_presentation(
             ) from db_exc
 
         return CreateSimpleDWResponse(
-            message=result["message"],
+            message=result["message"] if not was_overwritten else "DW presentation overwritten successfully",
             project_name=result.get("project_name", projectName),
             display_name=displayName,
             project_type=result.get("project_type", settings.PROJECT_TYPE_DW),
@@ -716,6 +793,7 @@ async def create_simple_dw_presentation(
             images=result["images"],
             thumbnails=result.get("thumbnails", []),
             presentation_id=presentation_id,
+            overwritten=was_overwritten,
         )
 
     except FileNotFoundError as fnf:
@@ -738,13 +816,20 @@ async def create_simple_dw_presentation(
     description=(
         "Create a new BSR (Board Sales Request) presentation by uploading a PowerPoint file.\n\n"
         "This endpoint:\n"
-        "1. Validates presentation doesn't already exist\n"
-        "2. Validates display name hasn't been used\n"
-        "3. Converts PowerPoint slides to images\n"
-        "4. Reads slide titles from the PowerPoint\n"
-        "5. Creates presentation record in database\n"
-        "6. Inserts slide details including summary slide at specified position\n"
-        "7. **(Optional)** Processes and inserts additional categories\n\n"
+        "1. Checks if presentation already exists\n"
+        "2. If exists and overwrite_existing=false (default), returns 400 error\n"
+        "3. If exists and overwrite_existing=true, deletes old presentation and creates new one\n"
+        "4. Validates display name hasn't been used by other projects (skipped if overwriting)\n"
+        "5. Converts PowerPoint slides to images\n"
+        "6. Reads slide titles from the PowerPoint\n"
+        "7. Creates presentation record in database\n"
+        "8. Inserts slide details including summary slide at specified position\n"
+        "9. **(Optional)** Processes and inserts additional categories\n\n"
+        "**Overwrite Behavior:**\n"
+        "- Set `overwrite_existing: true` in metadata to allow overwriting existing presentations\n"
+        "- When overwriting, the old presentation is deleted (including all details and categories)\n"
+        "- Frontend should first check with `/api/presentations/bsr/exists` and confirm with user\n"
+        "- Audit trail: deletion is logged with username for accountability\n\n"
         "**Slide Insertion Logic:**\n"
         "If the PowerPoint has 5 slides and slide_number=3:\n"
         "- Slide 1 (Image) -> Slide #1\n"
@@ -786,31 +871,48 @@ async def create_simple_dw_presentation(
             "description": "BSR presentation created successfully",
             "content": {
                 "application/json": {
-                    "example": {
-                        "message": "BSR Presentation created successfully",
-                        "presentation_id": 12345,
-                        "total_slides": 6,
-                        "processing_time_seconds": 8.45,
-                        "categories_added": 2,
+                    "examples": {
+                        "created": {
+                            "summary": "New presentation created",
+                            "value": {
+                                "message": "BSR Presentation created successfully",
+                                "presentation_id": 12345,
+                                "total_slides": 6,
+                                "processing_time_seconds": 8.45,
+                                "categories_added": 2,
+                                "overwritten": False
+                            }
+                        },
+                        "overwritten": {
+                            "summary": "Existing presentation overwritten",
+                            "value": {
+                                "message": "BSR Presentation overwritten successfully",
+                                "presentation_id": 12346,
+                                "total_slides": 6,
+                                "processing_time_seconds": 9.12,
+                                "categories_added": 2,
+                                "overwritten": True
+                            }
+                        }
                     }
                 }
             },
         },
         400: {
-            "description": "Invalid request or presentation already exists",
+            "description": "Invalid request or presentation already exists without overwrite confirmation",
             "content": {
                 "application/json": {
                     "examples": {
                         "already_exists": {
-                            "summary": "Presentation already exists",
+                            "summary": "Presentation already exists (overwrite not confirmed)",
                             "value": {
-                                "detail": "Presentation already exists for project 'BSR_Project' with display name 'BSR_Presentation'"
+                                "detail": "BSR presentation already exists: BSR_Project/BSR_Presentation"
                             }
                         },
                         "display_name_used": {
-                            "summary": "Display name already used",
+                            "summary": "Display name already used by another project",
                             "value": {
-                                "detail": "Display name 'BSR_Presentation' has already been used"
+                                "detail": "Display name already used by another project: OtherProject"
                             }
                         }
                     }
@@ -1155,6 +1257,183 @@ async def check_presentation_exists(
             status_code=500,
             detail=f"Database error while checking for presentation: {str(e)}"
         ) from e
+
+
+@router.get(
+    "/exists",
+    summary="Check if a presentation exists (NW/NSR/DW)",
+    response_description="Returns a boolean indicating if the presentation exists and its ID if found.",
+    responses={
+        200: {
+            "description": "Check completed successfully.",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "exists": {
+                            "summary": "Presentation exists",
+                            "value": {"exists": True, "presentation_id": 12345}
+                        },
+                        "not_exists": {
+                            "summary": "Presentation does not exist",
+                            "value": {"exists": False, "presentation_id": None}
+                        }
+                    }
+                }
+            },
+        },
+        500: {
+            "description": "Database error during check.",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Database error while checking for presentation."}
+                }
+            },
+        },
+    },
+)
+async def check_presentation_exists(
+    project_name: str = Query(..., description="Project name to check"),
+    display_name: str = Query(..., description="Display name to check"),
+) -> dict:
+    """
+    Check if a presentation with the given project name and display name already exists.
+
+    This endpoint is for NW/NSR/DW presentations and returns both existence status
+    and the presentation ID if found, which can be useful for the frontend to implement
+    overwrite confirmation workflows.
+
+    Args:
+        project_name: The project name to check
+        display_name: The display name to check
+
+    Returns:
+        dict: Contains 'exists' (bool) and 'presentation_id' (int or None)
+    """
+    try:
+        logger.info(
+            "Checking if presentation exists: project_name=%s, display_name=%s",
+            project_name,
+            display_name
+        )
+
+        # Use the service method to check existence
+        presentation_id = presentation_service._check_presentation_exists(
+            project_name=project_name,
+            display_name=display_name
+        )
+
+        exists = presentation_id is not None
+
+        logger.info(
+            "Presentation exists check result: exists=%s, id=%s",
+            exists,
+            presentation_id
+        )
+
+        return {
+            "exists": exists,
+            "presentation_id": presentation_id
+        }
+
+    except Exception as e:
+        logger.error(
+            "Error checking presentation exists: %s",
+            str(e),
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Database error while checking for presentation: {str(e)}"
+        ) from e
+
+
+@router.get(
+    "/bsr/exists",
+    summary="Check if a BSR presentation exists",
+    response_description="Returns a boolean indicating if the BSR presentation exists and its ID if found.",
+    responses={
+        200: {
+            "description": "Check completed successfully.",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "exists": {
+                            "summary": "Presentation exists",
+                            "value": {"exists": True, "presentation_id": 12345}
+                        },
+                        "not_exists": {
+                            "summary": "Presentation does not exist",
+                            "value": {"exists": False, "presentation_id": None}
+                        }
+                    }
+                }
+            },
+        },
+        500: {
+            "description": "Database error during check.",
+            "content": {
+                "application/json": {
+                    "example": {"detail": "Database error while checking for BSR presentation."}
+                }
+            },
+        },
+    },
+)
+async def check_bsr_presentation_exists(
+    project_name: str = Query(..., description="BSR project name to check"),
+    display_name: str = Query(..., description="BSR display name to check"),
+) -> dict:
+    """
+    Check if a BSR presentation with the given project name and display name already exists.
+    
+    This endpoint is specifically for BSR presentations and returns both existence status
+    and the presentation ID if found, which can be useful for the frontend to implement
+    overwrite confirmation workflows.
+    
+    Args:
+        project_name: The BSR project name to check
+        display_name: The BSR display name to check
+        
+    Returns:
+        dict: Contains 'exists' (bool) and 'presentation_id' (int or None)
+    """
+    try:
+        logger.info(
+            "Checking if BSR presentation exists: project_name=%s, display_name=%s",
+            project_name,
+            display_name
+        )
+
+        # Use the service method to check existence
+        presentation_id = presentation_service._check_bsr_presentation_exists(
+            project_name=project_name,
+            display_name=display_name
+        )
+        
+        exists = presentation_id is not None
+
+        logger.info(
+            "BSR presentation exists check result: exists=%s, id=%s",
+            exists,
+            presentation_id
+        )
+
+        return {
+            "exists": exists,
+            "presentation_id": presentation_id
+        }
+
+    except Exception as e:
+        logger.error(
+            "Error checking BSR presentation exists: %s",
+            str(e),
+            exc_info=True
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Database error while checking for BSR presentation: {str(e)}"
+        ) from e
+
 
 @router.get(
     "/files/{token}",

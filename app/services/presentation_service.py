@@ -58,6 +58,7 @@ class PresentationService:
         pptx_content: bytes,
         pptx_filename: str,
         categories: Optional[Dict[str, Any]] = None,
+        overwrite_existing: bool = False,
         progress_callback=None,
     ) -> Dict[str, Any]:
         """
@@ -73,10 +74,11 @@ class PresentationService:
             pptx_content: PowerPoint file content
             pptx_filename: PowerPoint filename
             categories: Optional categories configuration with add_categories flag
+            overwrite_existing: If True, allows overwriting existing presentation
             progress_callback: Optional callback function to report progress (int 0-100)
 
         Returns:
-            Dict with presentation_id, total_slides, and categories_added
+            Dict with presentation_id, total_slides, categories_added, and overwritten flag
 
         Raises:
             HTTPException: If validation fails or creation errors occur
@@ -88,26 +90,74 @@ class PresentationService:
             clean_display_name = PathLib(display_name).name if "/" in display_name or "\\" in display_name else display_name
 
             logger.info(
-                "Creating BSR presentation: project=%s, display=%s, slide_number=%d",
+                "Creating BSR presentation: project=%s, display=%s, slide_number=%d, overwrite=%s",
                 project_name,
                 clean_display_name,
                 slide_number,
+                overwrite_existing,
             )
 
-            # 1. Validate presentation doesn't exist (30%)
+            # 1. Check if presentation exists (30%)
             if progress_callback:
                 progress_callback(30)
-            self._validate_bsr_presentation_not_exists(project_name, clean_display_name)
+            
+            existing_presentation_id = self._check_bsr_presentation_exists(
+                project_name, clean_display_name
+            )
+            
+            # NEW VALIDATION LOGIC
+            if existing_presentation_id and not overwrite_existing:
+                # If exists and NO overwrite confirmation, return error 400
+                logger.warning(
+                    "BSR presentation already exists: %s/%s (ID: %d) - overwrite not confirmed",
+                    project_name,
+                    clean_display_name,
+                    existing_presentation_id
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"BSR presentation already exists: {project_name}/{clean_display_name}"
+                )
+            
+            # If exists AND overwrite confirmed, clean it for overwrite (keep ID)
+            was_overwritten = False
+            overwrite_presentation_id = None
+            if existing_presentation_id and overwrite_existing:
+                logger.info(
+                    "Overwriting BSR presentation: %s/%s (ID: %d) by user: %s",
+                    project_name,
+                    clean_display_name,
+                    existing_presentation_id,
+                    user_name
+                )
+                # Clean details and files but KEEP the master record (preserves ID)
+                self._clean_bsr_presentation_for_overwrite(existing_presentation_id)
+                was_overwritten = True
+                overwrite_presentation_id = existing_presentation_id
 
-            # 2. Validate display name hasn't been used (35%)
+            # 2. Validate display name hasn't been used by OTHER projects (35%)
+            # Skip this validation if we're overwriting (display name is already ours)
             if progress_callback:
                 progress_callback(35)
-            self._validate_bsr_display_name_not_used(clean_display_name)
+            
+            if not was_overwritten:
+                self._validate_bsr_display_name_not_used(project_name, clean_display_name)
 
             # 3. Convert PowerPoint to images (40-55%)
             if progress_callback:
                 progress_callback(40)
-            logger.info("Converting PowerPoint to images")
+            
+            logger.info("Converting PowerPoint to images for display_name=%s", clean_display_name)
+            
+            # IMPORTANT: Force deletion of existing folder before conversion
+            # This ensures old images are completely removed when overwriting
+            if was_overwritten:
+                try:
+                    pptx_service.delete_conversion(clean_display_name, "bipresents")
+                    logger.info("🔄 Forced deletion of old image folder before recreating: %s", clean_display_name)
+                except Exception as e:
+                    logger.warning("Failed to pre-delete folder (may not exist): %s", str(e))
+            
             # For BSR we store assets under the bipresents (bsr_slides) root
             pptx_data = pptx_service.convert_pptx_to_images(
                 file_content=pptx_content,
@@ -124,19 +174,36 @@ class PresentationService:
             logger.info("Extracting slide titles")
             slide_titles = self._extract_slide_titles(pptx_content, pptx_filename)
 
-            # 5. Insert presentation master record (60-70%)
+            # 5. Insert or Update presentation master record (60-70%)
             if progress_callback:
                 progress_callback(60)
-            logger.info("Inserting presentation master record")
-            presentation_id = self._insert_bsr_master_record(
-                project_name=project_name,
-                display_name=clean_display_name,
-                pptx_filename=pptx_filename,
-                slide_number=slide_number,
-                presentation_type=presentation_type,
-                user_name=user_name,
-                is_wide_ppt=is_wide_ppt,
-            )
+
+            if was_overwritten:
+                # UPDATE existing master record (keeps same ID)
+                logger.info("Updating presentation master record ID=%d", overwrite_presentation_id)
+                self._update_bsr_master_record(
+                    presentation_id=overwrite_presentation_id,
+                    project_name=project_name,
+                    display_name=clean_display_name,
+                    pptx_filename=pptx_filename,
+                    slide_number=slide_number,
+                    presentation_type=presentation_type,
+                    user_name=user_name,
+                    is_wide_ppt=is_wide_ppt,
+                )
+                presentation_id = overwrite_presentation_id
+            else:
+                # INSERT new master record (creates new ID)
+                logger.info("Inserting new presentation master record")
+                presentation_id = self._insert_bsr_master_record(
+                    project_name=project_name,
+                    display_name=clean_display_name,
+                    pptx_filename=pptx_filename,
+                    slide_number=slide_number,
+                    presentation_type=presentation_type,
+                    user_name=user_name,
+                    is_wide_ppt=is_wide_ppt,
+                )
 
             # 6. Insert presentation detail records (70-80%)
             if progress_callback:
@@ -177,7 +244,8 @@ class PresentationService:
                 progress_callback(90)
 
             logger.info(
-                "BSR presentation created successfully: ID=%d, Total Slides=%d, Categories=%d",
+                "BSR presentation %s successfully: ID=%d, Total Slides=%d, Categories=%d",
+                "overwritten" if was_overwritten else "created",
                 presentation_id,
                 total_slides,
                 len(categories_created),
@@ -187,6 +255,7 @@ class PresentationService:
                 "presentation_id": presentation_id,
                 "total_slides": total_slides,
                 "categories_added": len(categories_created),
+                "overwritten": was_overwritten,
             }
 
         except HTTPException:
@@ -225,6 +294,39 @@ class PresentationService:
                     original_display_name,
                     request.display_name
                 )
+
+            # Check if presentation exists and handle overwrite logic
+            existing_id = self._check_presentation_exists(request.project, request.display_name)
+            was_overwritten = False
+
+            if existing_id and not request.overwrite_existing:
+                # Presentation exists and overwrite not confirmed
+                logger.warning(
+                    "Presentation already exists: %s/%s (ID: %d) - overwrite not confirmed",
+                    request.project,
+                    request.display_name,
+                    existing_id
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Presentation already exists: {request.project}/{request.display_name}"
+                )
+
+            # If exists AND overwrite confirmed, clean it for overwrite (keep ID)
+            overwrite_presentation_id = None
+            if existing_id and request.overwrite_existing:
+                # Presentation exists and overwrite confirmed
+                logger.info(
+                    "Overwriting presentation: %s/%s (ID: %d) by user: %s",
+                    request.project,
+                    request.display_name,
+                    existing_id,
+                    request.user_name
+                )
+                # Clean details and files but KEEP the master record (preserves ID)
+                self._clean_presentation_for_overwrite(existing_id, request.project_type)
+                was_overwritten = True
+                overwrite_presentation_id = existing_id
 
             # 1. Process Excel file (30-40%)
             if progress_callback:
@@ -302,11 +404,16 @@ class PresentationService:
             else:
                 logger.info("Physical PowerPoint backup generation skipped (create_backup=0)")
 
-            # 6. Create presentation in DB (85-95%)
+            # 6. Create or Update presentation in DB (85-95%)
             if progress_callback:
                 progress_callback(85)
-            logger.info("Creating presentation in database")
-            presentation_result = self._create_presentation_in_db(slides_data, request)
+            if was_overwritten:
+                logger.info("Updating presentation in database (ID=%d)", overwrite_presentation_id)
+            else:
+                logger.info("Creating new presentation in database")
+            presentation_result = self._create_presentation_in_db(
+                slides_data, request, overwrite_presentation_id=overwrite_presentation_id
+            )
 
             # presentation_id = presentation_result.get("presentation_id")
             # if presentation_id:
@@ -324,12 +431,13 @@ class PresentationService:
             processing_time = time.time() - start_time
 
             return CreatePresentationResponse(
-                message="Presentation created successfully",
+                message="Presentation created successfully" if not was_overwritten else "Presentation overwritten successfully",
                 presentation_id=presentation_result.get("presentation_id"),
                 total_slides=len(slides_data["details"]),
                 excel_data=excel_data,
                 pptx_data=pptx_data,
                 processing_time_seconds=processing_time,
+                overwritten=was_overwritten,
             )
 
         except Exception as e:
@@ -433,6 +541,211 @@ class PresentationService:
         except Exception as e:
             logger.error("Error checking if presentation exists: %s", e, exc_info=True)
             raise HTTPException(status_code=500, detail="Database error while checking for presentation.") from e
+
+    def _check_presentation_exists(
+        self, project_name: str, display_name: str
+    ) -> Optional[int]:
+        """
+        Check if a presentation exists with EXACT match of project + display_name.
+
+        Args:
+            project_name: The project name to check
+            display_name: The display name to check
+
+        Returns:
+            The presentation ID if exact match exists, None otherwise
+        """
+        try:
+            with create_connection() as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(
+                        "SELECT TOP 1 PresentationId FROM [BI_GUIDELINES].[dbo].[nw_Master] WHERE Project = ? AND DisplayName = ? ORDER BY PresentationId DESC",
+                        (project_name, display_name)
+                    )
+                    result = cursor.fetchone()
+                    if result:
+                        return result[0]
+                    return None
+        except Exception as e:
+            logger.error("Error checking presentation existence: %s", str(e), exc_info=True)
+            return None
+
+    def _clean_presentation_for_overwrite(
+        self, presentation_id: int, project_type: str
+    ) -> str:
+        """
+        Clean NW/NSR/DW presentation details and files for overwrite (keeps master record).
+
+        When overwriting, we want to keep the same presentation ID but replace all content.
+        This function:
+        1. Gets display_name from database
+        2. Deletes physical folders (images, thumbnails)
+        3. Deletes database detail records using stored procedure (but preserves master metadata)
+
+        Args:
+            presentation_id: The ID of the presentation to clean
+            project_type: The project type (NW, NSR, DW, etc.)
+
+        Returns:
+            display_name: The display name (needed for folder operations)
+        """
+        display_name = None
+        try:
+            with create_connection() as conn:
+                with conn.cursor() as cursor:
+                    # Get Project and DisplayName from master
+                    cursor.execute(
+                        "SELECT Project, DisplayName FROM [BI_GUIDELINES].[dbo].[nw_Master] WHERE PresentationId = ?",
+                        (presentation_id,)
+                    )
+                    result = cursor.fetchone()
+                    project_name = None
+                    if result:
+                        project_name = result[0]
+                        display_name = result[1]
+                        logger.info(
+                            "Found presentation to clean for overwrite: ID=%d, Project=%s, DisplayName=%s",
+                            presentation_id,
+                            project_name,
+                            display_name
+                        )
+
+                    # Delete physical folders (images and thumbnails)
+                    if display_name:
+                        try:
+                            deleted = pptx_service.delete_conversion(
+                                conversion_id=display_name,
+                                project_type=project_type
+                            )
+                            if deleted:
+                                logger.info(
+                                    "✅ Deleted physical files for presentation: %s",
+                                    display_name
+                                )
+                        except Exception as e:
+                            logger.warning(
+                                "⚠️ Error deleting physical files for %s: %s (continuing anyway)",
+                                display_name,
+                                str(e)
+                            )
+
+                    # Delete detail records only (keep master)
+                    if project_name and display_name:
+                        # Delete only detail records, not master
+                        cursor.execute(
+                            "DELETE FROM [BI_GUIDELINES].[dbo].[nw_Details] WHERE PresentationId = ?",
+                            (presentation_id,)
+                        )
+                        conn.commit()
+
+                        logger.info(
+                            "✅ Cleaned presentation ID=%d details for overwrite (master record preserved)",
+                            presentation_id
+                        )
+
+                    return display_name or ""
+
+        except Exception as e:
+            logger.error(
+                "Error cleaning presentation ID=%d: %s",
+                presentation_id,
+                str(e),
+                exc_info=True
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to clean existing presentation for overwrite: {str(e)}"
+            ) from e
+
+    def _delete_presentation(
+        self, presentation_id: int, user_name: str, project_type: str
+    ) -> None:
+        """
+        Delete presentation including database records AND physical files.
+
+        Args:
+            presentation_id: The ID of the presentation to delete
+            user_name: The user performing the deletion (for audit purposes)
+            project_type: The project type (NW, NSR, DW, etc.) for determining file paths
+        """
+        display_name = None
+        try:
+            with create_connection() as conn:
+                with conn.cursor() as cursor:
+                    # Get Project and DisplayName BEFORE deleting
+                    cursor.execute(
+                        "SELECT Project, DisplayName FROM [BI_GUIDELINES].[dbo].[nw_Master] WHERE PresentationId = ?",
+                        (presentation_id,)
+                    )
+                    result = cursor.fetchone()
+                    project_name = None
+                    if result:
+                        project_name = result[0]
+                        display_name = result[1]
+                        logger.info(
+                            "Found presentation to delete: ID=%d, Project=%s, DisplayName=%s",
+                            presentation_id,
+                            project_name,
+                            display_name
+                        )
+
+                    # Delete physical folders (images and thumbnails)
+                    if display_name:
+                        try:
+                            deleted = pptx_service.delete_conversion(
+                                conversion_id=display_name,
+                                project_type=project_type
+                            )
+                            if deleted:
+                                logger.info(
+                                    "✅ Deleted physical files for presentation: %s",
+                                    display_name
+                                )
+                            else:
+                                logger.warning(
+                                    "⚠️ No physical files found for presentation: %s (folder may not exist)",
+                                    display_name
+                                )
+                        except Exception as e:
+                            logger.error(
+                                "❌ Error deleting physical files for presentation %s: %s",
+                                display_name,
+                                str(e)
+                            )
+                            # Continue anyway - physical file deletion is not critical
+
+                    # Delete database records using stored procedure
+                    if project_name and display_name:
+                        cursor.execute(
+                            "EXEC [dbo].[nw_DeletePresentation] ?, ?",
+                            (project_name, display_name)
+                        )
+                        conn.commit()
+
+                        logger.info(
+                            "✅ Deleted presentation ID=%d (Project=%s, DisplayName=%s) by user=%s",
+                            presentation_id,
+                            project_name,
+                            display_name,
+                            user_name
+                        )
+                    else:
+                        logger.warning(
+                            "⚠️ Could not delete presentation ID=%d - presentation not found in database",
+                            presentation_id
+                        )
+
+        except Exception as e:
+            logger.error(
+                "Error deleting presentation ID=%d: %s",
+                presentation_id,
+                str(e),
+                exc_info=True
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to delete existing presentation: {str(e)}"
+            ) from e
 
     def generate_backup_presentation(
         self, presentation_id: int, progress_callback=None
@@ -1429,9 +1742,16 @@ class PresentationService:
             logger.error("Error sending notification emails: %s", str(e))
             # Don't raise - emails are not critical for the main flow
     def _create_presentation_in_db(
-        self, slides_data: Dict[str, Any], request: CreatePresentationRequest
+        self, slides_data: Dict[str, Any], request: CreatePresentationRequest,
+        overwrite_presentation_id: Optional[int] = None
     ) -> Dict[str, Any]:
-        """Create presentation in database using BI Guidelines functionality directly."""
+        """Create or update presentation in database.
+
+        Args:
+            slides_data: Slide data dictionary
+            request: Create presentation request
+            overwrite_presentation_id: If provided, updates this existing presentation instead of creating new
+        """
         # Validate supported project types (placeholder for future stricter rules)
         if request.project_type.lower() not in {"nw", "dw"}:
             logger.warning(
@@ -1453,20 +1773,28 @@ class PresentationService:
             cursor = conn.cursor()
             cursor.execute("SET NOCOUNT ON;")
 
-            # Delete existing presentation before inserting new records
-            self._delete_existing_presentation(cursor, slides_data)
+            if overwrite_presentation_id:
+                # UPDATE mode: Update existing master record, then insert new details
+                presentation_id = overwrite_presentation_id
+                logger.info("Updating existing master record ID=%d", presentation_id)
+                self._update_master_record(cursor, presentation_id, slides_data)
+            else:
+                # INSERT mode: Delete any existing, then insert new master
+                self._delete_existing_presentation(cursor, slides_data)
+                logger.info("Inserting new master record")
+                presentation_id = self._insert_master_record(cursor, slides_data)
 
-            # Insert master record
-            presentation_id = self._insert_master_record(cursor, slides_data)
-
-            # Insert detail records
+            # Insert detail records (always new)
             self._insert_detail_records(cursor, presentation_id, slides_data)
 
             conn.commit()
-            logger.info("Presentation created successfully in database: %s", presentation_id)
+            if overwrite_presentation_id:
+                logger.info("Presentation updated successfully in database: %s", presentation_id)
+            else:
+                logger.info("Presentation created successfully in database: %s", presentation_id)
 
             return {
-                "message": "Presentation created successfully.",
+                "message": "Presentation updated successfully." if overwrite_presentation_id else "Presentation created successfully.",
                 "presentation_id": presentation_id,
             }
 
@@ -1497,6 +1825,53 @@ class PresentationService:
         except Exception as exc:
             logger.warning("Error deleting existing presentation: %s", exc)
             # Continue - this is not critical
+
+    def _update_master_record(self, cursor, presentation_id: int, slides_data: Dict[str, Any]) -> None:
+        """Update existing master presentation record for overwrite."""
+        logger.info(
+            "Updating master record ID=%d with excel_file=%s, powerpoint_file=%s",
+            presentation_id,
+            slides_data.get("excel_file"),
+            slides_data.get("powerpoint_file")
+        )
+
+        # Update master record with new values, keeping the same PresentationId
+        # Note: Only updating essential fields that are guaranteed to exist in nw_Master
+        update_sql = """
+            UPDATE [BI_GUIDELINES].[dbo].[nw_Master]
+            SET
+                MainPptFileName = ?,
+                NameCandidateFileName = ?,
+                NameCandidateBGType = ?,
+                NameCandidateBGName = ?,
+                NameCandidateStartingSlide = ?,
+                PresentationType = ?,
+                UploadedBy = ?,
+                BSRDisplayName = ?,
+                isParticipantsVote = ?,
+                isWideScreenPPT = ?,
+                isAWSLinkReq = ?
+            WHERE PresentationId = ?
+        """
+
+        update_params = (
+            slides_data["powerpoint_file"],
+            slides_data["excel_file"],
+            slides_data["background_type"],
+            slides_data["background_name"],
+            slides_data["page_number"],
+            slides_data["presentation_type"],
+            slides_data["user_name"],
+            slides_data["mobile_link_bsr"],
+            slides_data["participant_vote"],
+            slides_data["is_wide_ppt"],
+            slides_data["is_aws_email"],
+            presentation_id,
+        )
+
+        logger.info("Executing master update for ID=%d...", presentation_id)
+        cursor.execute(update_sql, update_params)
+        logger.info("✅ Master record updated: ID=%d", presentation_id)
 
     def _insert_master_record(self, cursor, slides_data: Dict[str, Any]) -> int:
         """Insert the master presentation record with improved handling."""
@@ -1723,25 +2098,322 @@ class PresentationService:
         except Exception as e:
             logger.warning("Error checking BSR presentation existence: %s", str(e))
 
-    def _validate_bsr_display_name_not_used(self, display_name: str) -> None:
-        """Validate that BSR display name hasn't been used."""
+    def _validate_bsr_display_name_not_used(self, project_name: str, display_name: str) -> None:
+        """
+        Validate that BSR display name hasn't been used by ANOTHER project.
+        
+        This follows the original VB.NET logic from DisplayNameHasBeenUsed_BSR():
+        - Calls BSR_CheckIfDisplayNameHasBeenUsed
+        - If display name is used by a DIFFERENT project -> ERROR
+        - If display name is used by the SAME project -> OK (it's ours)
+        
+        Args:
+            project_name: Current project name
+            display_name: Display name to validate
+        """
         try:
             with create_connection() as conn:
                 with conn.cursor() as cursor:
+                    # VALIDATION 2: Check if DisplayName is used by ANOTHER project
+                    # This is equivalent to DisplayNameHasBeenUsed_BSR() in frmMain.vb:837
                     cursor.execute(
                         "EXEC [BI_GUIDELINES].[dbo].[BSR_CheckIfDisplayNameHasBeenUsed] ?",
                         (display_name,)
                     )
                     result = cursor.fetchone()
+                    
+                    # If display name is used
                     if result and result[0]:
-                        raise HTTPException(
-                            status_code=400,
-                            detail=f"Display name already used by another project: {result[0]}"
-                        )
+                        existing_project = result[0]
+                        
+                        # Only error if it's a DIFFERENT project
+                        if existing_project != project_name:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=f"Display name already used by another project: {existing_project}"
+                            )
+                        # If same project, it's OK (we're updating our own project)
         except HTTPException:
             raise
         except Exception as e:
             logger.warning("Error checking BSR display name: %s", str(e))
+
+    def _check_bsr_presentation_exists(
+        self, project_name: str, display_name: str
+    ) -> Optional[int]:
+        """
+        Check if a BSR presentation exists with EXACT match of project_name + display_name.
+        
+        This follows the original VB.NET logic from PresentationExists_BRS():
+        - Calls BSR_CheckIfPresentationExists with BOTH parameters
+        - Only returns ID if EXACT match (same project AND display name)
+        
+        Args:
+            project_name: The project name to check
+            display_name: The display name to check
+            
+        Returns:
+            The presentation ID if exact match exists, None otherwise
+        """
+        try:
+            with create_connection() as conn:
+                with conn.cursor() as cursor:
+                    # VALIDATION 1: Check if EXACT combination exists (ProjectName + DisplayName)
+                    # This is equivalent to PresentationExists_BRS() in frmMain.vb:778
+                    cursor.execute(
+                        "EXEC [BI_GUIDELINES].[dbo].[BSR_CheckIfPresentationExists] ?, ?",
+                        (project_name, display_name)
+                    )
+                    result = cursor.fetchone()
+                    
+                    # If exact match found (count > 0)
+                    if result and result[0] > 0:
+                        # Get the presentation ID
+                        cursor.execute(
+                            "SELECT TOP 1 PresentationId FROM [BI_GUIDELINES].[dbo].[bsr_Master] WHERE project = ? AND displayname = ? ORDER BY PresentationId DESC",
+                            (project_name, display_name)
+                        )
+                        id_result = cursor.fetchone()
+                        if id_result:
+                            return id_result[0]
+                        
+                        # If we can't get the ID, return a placeholder
+                        return -1  # Exists but ID unknown
+                            
+                    return None
+        except Exception as e:
+            logger.error("Error checking BSR presentation existence: %s", str(e), exc_info=True)
+            return None
+
+    def _clean_bsr_presentation_for_overwrite(self, presentation_id: int) -> str:
+        """
+        Clean BSR presentation details and files for overwrite (keeps master record).
+
+        When overwriting, we want to keep the same presentation ID but replace all content.
+        This function:
+        1. Gets display_name from database
+        2. Deletes physical folders (images, thumbnails)
+        3. Deletes database detail records and categories (but NOT master)
+
+        Args:
+            presentation_id: The ID of the presentation to clean
+
+        Returns:
+            display_name: The display name (needed for folder operations)
+        """
+        display_name = None
+        try:
+            with create_connection() as conn:
+                with conn.cursor() as cursor:
+                    # STEP 1: Get display_name from master (needed for folder deletion)
+                    cursor.execute(
+                        """
+                        SELECT displayname FROM [BI_GUIDELINES].[dbo].[bsr_Master]
+                        WHERE PresentationId = ?
+                        """,
+                        (presentation_id,)
+                    )
+                    result = cursor.fetchone()
+                    if result:
+                        display_name = result[0]
+                        logger.info(
+                            "Found BSR presentation to clean for overwrite: ID=%d, DisplayName=%s",
+                            presentation_id,
+                            display_name
+                        )
+
+                    # STEP 2: Delete physical folders (images and thumbnails)
+                    if display_name:
+                        try:
+                            deleted = pptx_service.delete_conversion(
+                                conversion_id=display_name,
+                                project_type="bipresents"
+                            )
+                            if deleted:
+                                logger.info(
+                                    "✅ Deleted physical files for BSR presentation: %s",
+                                    display_name
+                                )
+                        except Exception as e:
+                            logger.warning(
+                                "⚠️ Error deleting physical files for %s: %s (continuing anyway)",
+                                display_name,
+                                str(e)
+                            )
+
+                    # STEP 3: Delete detail records (but NOT master)
+                    cursor.execute(
+                        """
+                        DELETE FROM [BI_GUIDELINES].[dbo].[bsr_Details]
+                        WHERE presentationid = ?
+                        """,
+                        (presentation_id,)
+                    )
+                    logger.info("Deleted BSR detail records for presentation ID=%d", presentation_id)
+
+                    # Delete category elements
+                    cursor.execute(
+                        """
+                        DELETE FROM [BI_GUIDELINES].[dbo].[BSR_CATEGORY_ELEMENTS]
+                        WHERE CATEGORY_ID IN (
+                            SELECT id FROM [BI_GUIDELINES].[dbo].[BSR_CATEGORY]
+                            WHERE BSRPROJECTID = ?
+                        )
+                        """,
+                        (presentation_id,)
+                    )
+                    logger.info("Deleted BSR category elements for presentation ID=%d", presentation_id)
+
+                    # Delete categories
+                    cursor.execute(
+                        """
+                        DELETE FROM [BI_GUIDELINES].[dbo].[BSR_CATEGORY]
+                        WHERE BSRPROJECTID = ?
+                        """,
+                        (presentation_id,)
+                    )
+                    logger.info("Deleted BSR categories for presentation ID=%d", presentation_id)
+
+                    conn.commit()
+                    logger.info(
+                        "✅ Cleaned BSR presentation ID=%d for overwrite (master record preserved)",
+                        presentation_id
+                    )
+
+                    return display_name or ""
+
+        except Exception as e:
+            logger.error(
+                "Error cleaning BSR presentation ID=%d: %s",
+                presentation_id,
+                str(e),
+                exc_info=True
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to clean existing presentation for overwrite: {str(e)}"
+            ) from e
+
+    def _delete_bsr_presentation(self, presentation_id: int, user_name: str) -> None:
+        """
+        Delete BSR presentation including database records AND physical files.
+
+        This follows the original VB.NET logic:
+        1. Get display_name from database
+        2. Delete physical folders (images, thumbnails)
+        3. Delete database records (details, categories, master)
+
+        Args:
+            presentation_id: The ID of the presentation to delete
+            user_name: The user performing the deletion (for audit purposes)
+        """
+        display_name = None
+        try:
+            with create_connection() as conn:
+                with conn.cursor() as cursor:
+                    # STEP 1: Get display_name BEFORE deleting (needed for folder deletion)
+                    cursor.execute(
+                        """
+                        SELECT displayname FROM [BI_GUIDELINES].[dbo].[bsr_Master]
+                        WHERE PresentationId = ?
+                        """,
+                        (presentation_id,)
+                    )
+                    result = cursor.fetchone()
+                    if result:
+                        display_name = result[0]
+                        logger.info(
+                            "Found BSR presentation to delete: ID=%d, DisplayName=%s",
+                            presentation_id,
+                            display_name
+                        )
+                    
+                    # STEP 2: Delete physical folders (images and thumbnails)
+                    if display_name:
+                        try:
+                            # pptx_service is already imported at the top of the file
+                            deleted = pptx_service.delete_conversion(
+                                conversion_id=display_name,
+                                project_type="bipresents"  # BSR uses bipresents directory
+                            )
+                            if deleted:
+                                logger.info(
+                                    "✅ Deleted physical files for BSR presentation: %s",
+                                    display_name
+                                )
+                            else:
+                                logger.warning(
+                                    "⚠️ No physical files found for BSR presentation: %s (folder may not exist)",
+                                    display_name
+                                )
+                        except Exception as e:
+                            logger.error(
+                                "❌ Error deleting physical files for %s: %s",
+                                display_name,
+                                str(e),
+                                exc_info=True
+                            )
+                            # Continue with database deletion even if file deletion fails
+                    
+                    # STEP 3: Delete database records
+                    # Delete detail records first (foreign key constraint)
+                    cursor.execute(
+                        """
+                        DELETE FROM [BI_GUIDELINES].[dbo].[bsr_Details]
+                        WHERE presentationid = ?
+                        """,
+                        (presentation_id,)
+                    )
+                    logger.info("Deleted BSR detail records for presentation ID=%d", presentation_id)
+                    
+                    # Delete category elements (first get category IDs, then delete elements)
+                    cursor.execute(
+                        """
+                        DELETE FROM [BI_GUIDELINES].[dbo].[BSR_CATEGORY_ELEMENTS]
+                        WHERE CATEGORY_ID IN (
+                            SELECT id FROM [BI_GUIDELINES].[dbo].[BSR_CATEGORY]
+                            WHERE BSRPROJECTID = ?
+                        )
+                        """,
+                        (presentation_id,)
+                    )
+                    logger.info("Deleted BSR category elements for presentation ID=%d", presentation_id)
+                    
+                    # Delete categories
+                    cursor.execute(
+                        """
+                        DELETE FROM [BI_GUIDELINES].[dbo].[BSR_CATEGORY]
+                        WHERE BSRPROJECTID = ?
+                        """,
+                        (presentation_id,)
+                    )
+                    logger.info("Deleted BSR categories for presentation ID=%d", presentation_id)
+                    
+                    # Finally delete master record
+                    cursor.execute(
+                        """
+                        DELETE FROM [BI_GUIDELINES].[dbo].[bsr_Master]
+                        WHERE PresentationId = ?
+                        """,
+                        (presentation_id,)
+                    )
+                    conn.commit()
+                    logger.info(
+                        "Hard deleted BSR presentation ID=%d by user=%s",
+                        presentation_id,
+                        user_name
+                    )
+        except Exception as e:
+            logger.error(
+                "Error deleting BSR presentation ID=%d: %s",
+                presentation_id,
+                str(e),
+                exc_info=True
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to delete existing presentation: {str(e)}"
+            ) from e
 
     def _extract_slide_titles(self, pptx_content: bytes, pptx_filename: str) -> List[str]:
         """Extract titles from PowerPoint slides."""
@@ -1761,6 +2433,52 @@ class PresentationService:
             logger.error("Error extracting slide titles: %s", str(e))
 
         return titles
+
+    def _update_bsr_master_record(
+        self,
+        *,
+        presentation_id: int,
+        project_name: str,
+        display_name: str,
+        pptx_filename: str,
+        slide_number: int,
+        presentation_type: str,
+        user_name: str,
+        is_wide_ppt: int,
+    ) -> None:
+        """Update existing BSR master presentation record for overwrite."""
+        try:
+            with create_connection() as conn:
+                with conn.cursor() as cursor:
+                    # Update master record with new values, keeping the same PresentationId
+                    # Note: BSR table uses lowercase column names
+                    update_sql = """
+                        UPDATE [BI_GUIDELINES].[dbo].[bsr_Master]
+                        SET
+                            mainpptfilename = ?,
+                            uploadedby = ?
+                        WHERE PresentationId = ?
+                    """
+
+                    logger.info("Updating BSR master record ID=%d...", presentation_id)
+                    cursor.execute(
+                        update_sql,
+                        (
+                            pptx_filename,
+                            user_name,
+                            presentation_id,
+                        )
+                    )
+
+                    conn.commit()
+                    logger.info("✅ BSR master record updated: ID=%d", presentation_id)
+
+        except Exception as e:
+            logger.error("Error updating BSR master record ID=%d: %s", presentation_id, str(e))
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to update BSR master record: {str(e)}"
+            ) from e
 
     def _insert_bsr_master_record(
         self,

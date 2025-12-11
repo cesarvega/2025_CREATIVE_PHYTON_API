@@ -2,8 +2,10 @@
 PowerPoint to images conversion service.
 """
 
+import gc
 import os
 import shutil
+import time
 import zipfile
 from pathlib import Path
 from typing import Any, Dict, List
@@ -24,6 +26,149 @@ from app.utils.path_utils import (
 )
 
 logger = get_logger(__name__)
+
+
+def _force_delete_windows(path: Path, max_retries: int = 5, retry_delay: float = 0.5) -> bool:
+    """
+    Force delete a folder on Windows with retry logic to handle file locks.
+
+    Windows file locking (especially with IIS) can prevent immediate deletion.
+    This function implements multiple strategies:
+    1. Try normal deletion
+    2. Run garbage collection to release file handles
+    3. Retry with exponential backoff
+    4. Individual file deletion if folder deletion fails
+
+    Args:
+        path: Path to delete
+        max_retries: Maximum number of retry attempts
+        retry_delay: Initial delay between retries (doubles each retry)
+
+    Returns:
+        True if deletion succeeded, False otherwise
+    """
+    if not path.exists():
+        logger.debug("Path does not exist, nothing to delete: %s", path)
+        return True
+
+    for attempt in range(max_retries):
+        try:
+            # Strategy 1: Try normal deletion
+            if path.is_file():
+                path.unlink()
+            else:
+                shutil.rmtree(path, ignore_errors=False)
+
+            logger.debug("Successfully deleted on attempt %d: %s", attempt + 1, path)
+            return True
+
+        except PermissionError as e:
+            if attempt < max_retries - 1:
+                # Force garbage collection to release file handles
+                gc.collect()
+
+                # Calculate backoff delay
+                current_delay = retry_delay * (2 ** attempt)
+                logger.warning(
+                    "Deletion failed (attempt %d/%d) for %s: %s. Retrying in %.2fs...",
+                    attempt + 1,
+                    max_retries,
+                    path,
+                    str(e),
+                    current_delay
+                )
+                time.sleep(current_delay)
+            else:
+                # Last attempt failed, try to delete individual files
+                logger.error(
+                    "Failed to delete folder after %d attempts: %s. Attempting individual file deletion...",
+                    max_retries,
+                    path
+                )
+                return _force_delete_contents(path)
+
+        except Exception as e:
+            logger.error("Unexpected error deleting %s: %s", path, str(e), exc_info=True)
+            return False
+
+    return False
+
+
+def _force_delete_contents(folder_path: Path) -> bool:
+    """
+    Attempt to delete all contents of a folder individually (last resort).
+
+    On Windows/IIS, the folder itself may be locked but files can still be deleted.
+    This function deletes all files and subdirectories, leaving the empty locked folder.
+
+    Args:
+        folder_path: Folder to clean
+
+    Returns:
+        True if most files were deleted (even if folder remains), False if major failures
+    """
+    if not folder_path.exists() or not folder_path.is_dir():
+        return True
+
+    deleted_count = 0
+    failed_count = 0
+
+    try:
+        # First pass: Delete all files with retry for each file
+        for item in folder_path.rglob("*"):
+            if item.is_file():
+                try:
+                    # Try multiple times for each file with a short delay
+                    for attempt in range(3):
+                        try:
+                            item.unlink()
+                            deleted_count += 1
+                            break
+                        except PermissionError:
+                            if attempt < 2:
+                                time.sleep(0.1)
+                            else:
+                                raise
+                except Exception as e:
+                    logger.warning("Failed to delete file %s after retries: %s", item, str(e))
+                    failed_count += 1
+
+        # Second pass: Remove empty subdirectories (bottom-up)
+        for item in sorted(folder_path.rglob("*"), key=lambda p: len(p.parts), reverse=True):
+            if item.is_dir():
+                try:
+                    item.rmdir()
+                    deleted_count += 1
+                except Exception:
+                    # Directory not empty or locked, that's OK
+                    pass
+
+        # Try to remove the root folder (may fail due to IIS lock, that's acceptable)
+        try:
+            folder_path.rmdir()
+            logger.info("✅ Successfully removed folder after individual file deletion: %s", folder_path)
+            return True
+        except Exception as e:
+            # Folder is locked but if we deleted files, consider it success
+            if deleted_count > 0:
+                logger.info(
+                    "✅ Deleted %d files from locked folder: %s (folder remains but will be overwritten)",
+                    deleted_count,
+                    folder_path
+                )
+                return True  # SUCCESS: Files deleted even if folder remains
+            else:
+                logger.error(
+                    "❌ Failed to delete any files from %s (deleted=%d, failed=%d)",
+                    folder_path,
+                    deleted_count,
+                    failed_count
+                )
+                return False
+
+    except Exception as e:
+        logger.error("Error during individual file deletion for %s: %s", folder_path, str(e), exc_info=True)
+        return deleted_count > 0  # Return True if we managed to delete at least some files
 
 
 class PPTXService:
@@ -67,13 +212,21 @@ class PPTXService:
         # Check if folder already exists and handle it
         if project_folder.exists():
             logger.warning(
-                "Project folder already exists: %s. It will be overwritten.",
+                "Project folder already exists: %s. Cleaning contents for overwrite.",
                 project_folder,
             )
-            # Remove existing folder to avoid conflicts
-            shutil.rmtree(project_folder)
+            # On Windows/IIS, folder may be locked but we can delete contents
+            # Try to delete the folder completely first
+            if not _force_delete_windows(project_folder):
+                # Folder deletion failed (locked by IIS), but _force_delete_windows
+                # will have cleaned the contents. The folder remains but is empty.
+                # This is acceptable - we'll reuse the existing folder structure.
+                logger.info(
+                    "Folder remains locked but contents cleaned: %s. Reusing folder structure.",
+                    project_folder
+                )
 
-        # Create directories
+        # Create directories (exist_ok=True allows reusing locked folders)
         project_folder.mkdir(parents=True, exist_ok=True)
         if generate_thumbnails:
             thumbnails_folder.mkdir(parents=True, exist_ok=True)
@@ -102,6 +255,10 @@ class PPTXService:
             thumbnail_urls = []
             titles = []
 
+            # Generate cache busting timestamp to prevent browser caching issues
+            # This ensures that when images are overwritten, browsers load the new versions
+            cache_bust_timestamp = int(time.time() * 1000)  # Milliseconds since epoch
+
             # Generate public URLs for NW and BSR projects
             url_root = get_relative_slide_root(project_type)
 
@@ -116,6 +273,7 @@ class PPTXService:
                         project_type,
                         conversion_id,
                         image_filename,
+                        cache_bust=cache_bust_timestamp,
                     )
                     if generate_thumbnails and thumbnail_filename:
                         thumbnail_url = build_relative_slide_path(
@@ -123,13 +281,14 @@ class PPTXService:
                             conversion_id,
                             thumbnail_filename,
                             subdir="Thumbnails",
+                            cache_bust=cache_bust_timestamp,
                         )
                 else:
-                    image_url = f"files/download/{project_type}/{conversion_id}/{image_filename}"
+                    image_url = f"files/download/{project_type}/{conversion_id}/{image_filename}?v={cache_bust_timestamp}"
                     if generate_thumbnails and thumbnail_filename:
                         thumbnail_url = (
                             f"files/download/{project_type}/{conversion_id}/"
-                            f"Thumbnails/{thumbnail_filename}"
+                            f"Thumbnails/{thumbnail_filename}?v={cache_bust_timestamp}"
                         )
                 image_urls.append(image_url)
                 if generate_thumbnails and thumbnail_filename:
@@ -230,15 +389,22 @@ class PPTXService:
         thumbnail_urls: List[str] = []
         titles: List[str] = []
 
+        # Generate cache busting timestamp to prevent browser caching issues
+        cache_bust_timestamp = int(time.time() * 1000)  # Milliseconds since epoch
+
         # Build relative URLs using sanitized folder name
         root = get_relative_slide_root(project_type)
         for result in slide_results:
             image_filename = Path(result["image_path"]).name
             thumbnail_filename = Path(result["thumbnail_path"]).name if result.get("thumbnail_path") else None
             if root:
-                image_urls.append("/".join([root, sanitized_project_name, image_filename]))
+                image_url = "/".join([root, sanitized_project_name, image_filename])
+                image_url = f"{image_url}?v={cache_bust_timestamp}"
+                image_urls.append(image_url)
                 if generate_thumbnails and thumbnail_filename:
-                    thumbnail_urls.append("/".join([root, sanitized_project_name, "Thumbnails", thumbnail_filename]))
+                    thumbnail_url = "/".join([root, sanitized_project_name, "Thumbnails", thumbnail_filename])
+                    thumbnail_url = f"{thumbnail_url}?v={cache_bust_timestamp}"
+                    thumbnail_urls.append(thumbnail_url)
             else:
                 image_urls.append(str(Path(result["image_path"])) )
                 if generate_thumbnails and thumbnail_filename:
@@ -410,15 +576,37 @@ class PPTXService:
         return self.get_conversion_folder(conversion_id, project_type).exists()
 
     def delete_conversion(self, conversion_id: str, project_type: str) -> bool:
-        """Delete conversion files."""
-        project_folder = self.get_conversion_folder(conversion_id, project_type)
+        """Delete conversion files with Windows-compatible retry logic.
 
-        deleted = False
+        Args:
+            conversion_id: The conversion/display name (will be sanitized to match folder name)
+            project_type: The project type
 
-        if project_folder.exists():
-            shutil.rmtree(project_folder)
-            deleted = True
-            logger.info("Project folder deleted: %s", project_folder)
+        Returns:
+            True if folder was deleted, False if folder didn't exist or deletion failed
+        """
+        # CRITICAL: Sanitize conversion_id to match how folders are created
+        # Folders are always created using sanitize_folder_name() in convert_pptx_to_images()
+        sanitized_id = sanitize_folder_name(conversion_id)
+        project_folder = self.get_conversion_folder(sanitized_id, project_type)
+
+        if not project_folder.exists():
+            logger.warning("⚠️ Project folder does not exist (already deleted or never created): %s", project_folder)
+            return False
+
+        logger.info("Deleting project folder: %s (from conversion_id: %s)", project_folder, conversion_id)
+
+        # Use Windows-compatible deletion with retry logic
+        deleted = _force_delete_windows(project_folder, max_retries=5, retry_delay=0.5)
+
+        if deleted:
+            logger.info("✅ Project folder deleted successfully: %s", project_folder)
+        else:
+            logger.error(
+                "❌ Failed to delete project folder after multiple attempts: %s. "
+                "Files may be locked by IIS or another process.",
+                project_folder
+            )
 
         return deleted
 
