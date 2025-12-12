@@ -187,6 +187,9 @@ class Settings(BaseSettings):
     socketio_cors_origins: str = "http://localhost:4200,https://tools.brandinstitute.com,null"
     socketio_async_mode: str = "asgi"  # asgi mode for FastAPI integration
 
+    # Backup generation settings
+    use_openxml_backup: bool = True  # Feature flag: True = OpenXML (faster), False = COM (legacy)
+
     @property
     def socketio_cors_origins_list(self) -> list[str]:
         """Get Socket.IO CORS origins as a list"""

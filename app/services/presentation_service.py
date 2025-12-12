@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 from fastapi import HTTPException
 
 from app.config.db import DatabaseConnectionError, create_connection
+from app.config.settings import settings
 from app.models.excel_models import (
     ProcessedExcelData,
 )
@@ -24,6 +25,7 @@ from app.models.response_models import PPTXConversionResponse
 from app.services.excel_service import GROUP_MARKERS, process_excel_file
 from app.services.pptx_service import pptx_service
 from app.services.pptx_builder_service import pptx_builder_service
+from app.services.openxml_pptx_service import openxml_pptx_service
 from app.services.word_service import generate_feedback_document
 from app.services.email_service import send_presentation_emails
 from app.utils.logging_utils import get_logger
@@ -932,22 +934,39 @@ class PresentationService:
             logger.info("Processing Excel file for backup generation")
             excel_data = self._process_excel_file(request)
 
-            # 6. Load existing PPTX image data (65-70%)
-            if progress_callback:
-                progress_callback(65)
-            # (reconverting would delete the entire folder including the Excel file)
-            logger.info("Loading existing PPTX images for backup generation")
-            pptx_data = self._load_existing_pptx_images(output_base, pptx_path.name)
+            # 6-7. Skip slide data generation if using OpenXML (it doesn't need it)
+            if settings.use_openxml_backup:
+                logger.info("Skipping slide data generation (using OpenXML mode)")
+                # OpenXML doesn't need DetailItems or PPTX images
+                slides_data = {"details": []}
+                pptx_data = PPTXConversionResponse(
+                    message="OpenXML mode - no conversion needed",
+                    conversion_id="openxml",
+                    project_type=request.project_type,
+                    total_images=0,
+                    images=[],
+                    titles=[],
+                )
+                if progress_callback:
+                    progress_callback(70)
+            else:
+                # Legacy COM mode: Load PPTX images and generate slide data
+                # 6. Load existing PPTX image data (65-70%)
+                if progress_callback:
+                    progress_callback(65)
+                # (reconverting would delete the entire folder including the Excel file)
+                logger.info("Loading existing PPTX images for backup generation")
+                pptx_data = self._load_existing_pptx_images(output_base, pptx_path.name)
 
-            # 7. Generate slides data (70-75%)
-            if progress_callback:
-                progress_callback(70)
-            logger.info("Generating slides data for backup")
-            slides_data = self._generate_slides_from_excel(
-                excel_data=excel_data,
-                pptx_data=pptx_data,
-                request=request,
-            )
+                # 7. Generate slides data (70-75%)
+                if progress_callback:
+                    progress_callback(70)
+                logger.info("Generating slides data for backup")
+                slides_data = self._generate_slides_from_excel(
+                    excel_data=excel_data,
+                    pptx_data=pptx_data,
+                    request=request,
+                )
 
             # 8. Generate physical PowerPoint backup (75-90%)
             if progress_callback:
@@ -1181,24 +1200,41 @@ class PresentationService:
     ) -> Dict[str, str]:
         """
         Generate physical PowerPoint file combining original PPTX slides with template-generated slides.
-        
+
         This method orchestrates the creation of a complete PowerPoint presentation by:
         1. Taking slides from the original uploaded PPTX (converted to images)
         2. Generating slides from Excel data using templates
         3. Combining them in the correct order based on page_number setting
-        
+
+        Feature Flag Support:
+        - settings.use_openxml_backup = False (default): Uses COM-based generation (legacy)
+        - settings.use_openxml_backup = True: Uses OpenXML-based generation (faster, no COM dependency)
+
         Args:
             slides_data: Dictionary containing slide details and metadata
             excel_data: Processed Excel data with candidate information
             request: Original presentation creation request
             pptx_data: Converted PPTX data with image paths
-            
+
         Returns:
             Dictionary with paths to generated files:
             - printable_path: Path to .pptx file
             - macro_path: Path to .pptm file (if generated)
         """
         try:
+            # Check feature flag for OpenXML backup generation
+            if settings.use_openxml_backup:
+                logger.info("Using OpenXML backup generation (feature flag enabled)")
+                return self._generate_physical_powerpoint_openxml(
+                    slides_data=slides_data,
+                    excel_data=excel_data,
+                    request=request,
+                    pptx_data=pptx_data,
+                )
+
+            # Legacy COM-based generation
+            logger.info("Using COM-based backup generation (legacy mode)")
+
             # Build presentation build options with default templates
             build_options = PresentationBuildOptions(
                 template_pack="BackgroundDefaultTemplate",
@@ -1213,7 +1249,7 @@ class PresentationService:
                 include_macro_version=False,  # Default: no macro version
                 return_urls=False,  # Not needed for internal generation
             )
-            
+
             logger.info(
                 "Generating physical PowerPoint: %d original images, %d template slides, insert at position %d",
                 len(pptx_data.images) if pptx_data.images else 0,
@@ -1258,11 +1294,110 @@ class PresentationService:
             if artifacts.warnings:
                 for warning in artifacts.warnings:
                     logger.warning("PowerPoint generation warning: %s", warning)
-            
+
             return result
-            
+
         except Exception as e:
             logger.error("Error generating physical PowerPoint: %s", str(e))
+            raise
+
+    def _generate_physical_powerpoint_openxml(
+        self,
+        *,
+        slides_data: Dict[str, Any],
+        excel_data: ProcessedExcelData,
+        request: CreatePresentationRequest,
+        pptx_data: PPTXConversionResponse,
+    ) -> Dict[str, str]:
+        """
+        Generate physical PowerPoint file using OpenXML (python-pptx).
+
+        This is a faster alternative to COM-based generation that:
+        1. Uses direct XML manipulation for slide creation
+        2. Doesn't require PowerPoint to be installed
+        3. Supports concurrent operations without COM limitations
+
+        Args:
+            slides_data: Dictionary containing slide details and metadata (not used in OpenXML mode)
+            excel_data: Processed Excel data with candidate information
+            request: Original presentation creation request
+            pptx_data: Converted PPTX data with image paths (not used in OpenXML mode)
+
+        Returns:
+            Dictionary with paths to generated files:
+            - printable_path: Path to .pptx file
+            - macro_path: Empty string (macros not supported in OpenXML mode)
+            - total_slides: Total number of slides
+            - warnings: Any warnings during generation
+        """
+        try:
+            from datetime import datetime
+
+            logger.info(
+                "Generating physical PowerPoint using OpenXML: insert at position %d",
+                request.page_number,
+            )
+
+            # Determine if this is a "big Japanese" presentation (Phonetics mode)
+            is_big_japanese = request.presentation_type.lower() == "phonetics"
+            logger.info("Presentation type: %s, is_big_japanese: %s", request.presentation_type, is_big_japanese)
+
+            # Calculate insert position (convert from 1-based to 0-based index)
+            insert_position = max(0, request.page_number - 1)
+            logger.info("Converting page_number %d to zero-based insert position %d", request.page_number, insert_position)
+
+            # Generate the presentation using OpenXML service
+            pptx_bytes = openxml_pptx_service.generate_backup_presentation(
+                pptx_bytes=request.pptx_file,
+                excel_data=excel_data,
+                insert_position=insert_position,
+                is_big_japanese=is_big_japanese,
+            )
+
+            # Save to the Presentations folder
+            output_base, _ = resolve_project_output(
+                request.display_name,
+                request.project_type,
+                fallback_subdir="generated_presentations",
+            )
+
+            # Create Presentations subfolder
+            presentations_folder = output_base / "Presentations"
+            presentations_folder.mkdir(parents=True, exist_ok=True)
+
+            # Generate filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_filename = f"backup_{timestamp}.pptx"
+            backup_path = presentations_folder / backup_filename
+
+            # Write the file
+            with open(backup_path, "wb") as f:
+                f.write(pptx_bytes)
+
+            logger.info("OpenXML backup saved to: %s", backup_path)
+
+            # Count slides (load and count)
+            from pptx import Presentation
+            from io import BytesIO
+            prs = Presentation(BytesIO(pptx_bytes))
+            total_slides = len(prs.slides)
+
+            result = {
+                "printable_path": str(backup_path.resolve()),
+                "macro_path": "",  # OpenXML mode doesn't support macro versions
+                "total_slides": str(total_slides),
+                "warnings": "None",
+            }
+
+            logger.info(
+                "OpenXML PowerPoint generated successfully: %d total slides",
+                total_slides,
+            )
+
+            return result
+
+        except Exception as e:
+            logger.error("Error generating OpenXML PowerPoint: %s", str(e))
             raise
 
     def _generate_slides_from_excel(
