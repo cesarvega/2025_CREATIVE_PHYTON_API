@@ -143,10 +143,10 @@ class CreatePresentationMetadata(BaseModel):
 
     # ===== BACKUP OPTIONS (FROM FRONTEND) =====
     create_backup: int = Field(
-        0,
+        1,
         ge=0,
         le=1,
-        description="Create backup file flag (0 or 1). When 1, creates a full backup of the presentation. Default: 0",
+        description="Create backup file flag (0 or 1). When 1, creates a full backup of the presentation. Default: 1",
     )
 
     # ===== OVERWRITE OPTIONS (FROM FRONTEND) =====
@@ -190,7 +190,7 @@ class CreatePresentationMetadata(BaseModel):
             background_name=self.background_name or "",
             page_number=self.page_number,
             project_type=self.project_type,
-            create_backup=self.create_backup,
+            create_backup=1,  # ALWAYS force create_backup=1 to generate backup PowerPoint
             overwrite_existing=self.overwrite_existing,
         )
 
@@ -276,7 +276,7 @@ class CreatePresentationRequest(BaseModel):
         description="Directory and business unit routing (typically 'bipresents' or 'nw').",
     )
     create_backup: int = Field(
-        0,
+        1,
         ge=0,
         le=1,
         description="Create backup file flag (0 or 1). When 1, creates a full backup copy of the generated presentation.",

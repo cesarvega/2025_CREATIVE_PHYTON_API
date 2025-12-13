@@ -61,6 +61,8 @@ app/
 
 ### Data Flow
 
+### Backup Generation Flow (`/api/presentations/backup`)
+
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │ POST /api/presentations/generate-backup                    │
@@ -101,6 +103,48 @@ app/
                     │ Save to Presentations/     │
                     │ backup_YYYYMMDD_HHMMSS.pptx│
                     └────────────────────────────┘
+```
+
+### Initial Presentation Creation Flow (`/api/presentations/create`)
+
+**IMPORTANT**: When `create_backup=1`, the backup PowerPoint is generated FIRST, then that file is converted to images. This ensures the images folder contains the complete presentation including category slides.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ POST /api/presentations/create                             │
+│ Input: {excel_file, pptx_file, metadata, create_backup}    │
+└───────────────────────┬─────────────────────────────────────┘
+                        │
+                        ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 1. Process Excel → ProcessedExcelData                      │
+│ 2. Save original Excel file                                 │
+│ 3. Convert original PPTX to temp_pptx_data (for metadata)   │
+│ 4. Generate slides metadata from Excel                      │
+└───────────────────────┬─────────────────────────────────────┘
+                        │
+                        ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 5. Generate Physical PowerPoint Backup FIRST               │
+│    (includes category slides with $ separator)              │
+│    └─> Uses OpenXML or COM based on settings                │
+└───────────────────────┬─────────────────────────────────────┘
+                        │
+                        ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 6. Convert PowerPoint to Images                             │
+│    ├─ if backup generated: Convert BACKUP → Images          │
+│    │   └─> Images include category slides ✅                │
+│    └─ if no backup: Convert ORIGINAL → Images               │
+└───────────────────────┬─────────────────────────────────────┘
+                        │
+                        ▼
+┌─────────────────────────────────────────────────────────────┐
+│ 7. Save to Database                                         │
+│    - Master record                                          │
+│    - Detail records (slide metadata)                        │
+│    - Image paths                                            │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ## Key Mappings
@@ -399,6 +443,26 @@ For issues or questions:
 4. Test with feature flag disabled to compare behavior
 
 ## Changelog
+
+### 2025-12-13 - Flow Optimization: Backup-First Image Generation
+
+**Major improvement to initial presentation creation flow:**
+
+- **Changed order of operations** in `create_presentation()` to generate backup PowerPoint BEFORE converting to images
+- When `create_backup=1`, the backup file (which includes category slides) is now used for image generation
+- This ensures the images folder contains the COMPLETE presentation including:
+  - ✅ Category slides (SEQ=A,B,C with `$` separator)
+  - ✅ Group slides (multiple names with checkboxes)
+  - ✅ Individual name/rationale slides
+- Images now perfectly match the final PowerPoint backup file
+- Fallback to original PPTX template if backup generation fails
+- No changes to `/backup` endpoint - still works as before
+
+**Benefits:**
+- Frontend displays complete presentation from images
+- No discrepancy between images and PowerPoint file
+- Category slides visible in image preview
+- Better user experience - see exactly what will be in final PowerPoint
 
 ### 2025-12-12 - Initial Integration
 

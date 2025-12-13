@@ -2457,57 +2457,82 @@ async def download_presentation_file(presentation_id: int) -> FileResponse:
             fallback_subdir="generated_presentations",
         )
 
-        # The file is in the Presentations subdirectory
-        file_path = output_base / "Presentations" / clean_ppt_filename
+        # Try to find the file in multiple locations:
+        # 1. Root directory (new OpenXML backup location)
+        # 2. Presentations subdirectory (legacy location)
+        # 3. Fallback to any backup_*.pptx in root (newest file)
+
+        file_path = None
+        search_locations = []
+
+        # Location 1: Root directory (new location for backup files)
+        root_path = output_base / clean_ppt_filename
+        search_locations.append(("root", root_path))
+
+        # Location 2: Presentations subdirectory (legacy location)
+        presentations_path = output_base / "Presentations" / clean_ppt_filename
+        search_locations.append(("Presentations", presentations_path))
 
         logger.info(
-            "Looking for PowerPoint file: display_name=%s, clean_display_name=%s, output_base=%s, filename_from_db=%s, clean_filename=%s, full_path=%s",
+            "Looking for PowerPoint file: display_name=%s, clean_display_name=%s, output_base=%s, filename_from_db=%s, clean_filename=%s",
             display_name,
             clean_display_name,
             output_base,
             main_ppt_filename,
-            clean_ppt_filename,
-            file_path
+            clean_ppt_filename
         )
 
-        if not file_path.exists():
-            # List all files in Presentations directory to help diagnose
-            presentations_dir = output_base / "Presentations"
-            available_files = []
-            if presentations_dir.exists():
-                available_pptx = list(presentations_dir.glob("*.pptx"))
-                available_files = [f.name for f in available_pptx]
+        # Try each location in order
+        for location_name, candidate_path in search_locations:
+            logger.info("Checking %s: %s", location_name, candidate_path)
+            if candidate_path.exists():
+                file_path = candidate_path
+                logger.info("Found PowerPoint file in %s: %s", location_name, file_path)
+                break
 
-                # Fallback: If there's exactly one PPTX file, use it
-                if len(available_pptx) == 1:
-                    file_path = available_pptx[0]
-                    logger.warning(
-                        "File mismatch detected. Expected: %s, but using: %s (presentation_id=%d)",
-                        clean_ppt_filename,
-                        file_path.name,
-                        presentation_id
-                    )
-                else:
-                    logger.error(
-                        "PowerPoint file not found on disk: %s (presentation_id=%d), available files: %s",
-                        file_path,
-                        presentation_id,
-                        available_files
-                    )
-                    raise HTTPException(
-                        status_code=404,
-                        detail=f"PowerPoint file not found on server. Expected: {clean_ppt_filename}. Available files: {available_files}"
-                    )
-            else:
-                logger.error(
-                    "Presentations directory not found: %s (presentation_id=%d)",
-                    presentations_dir,
+        # If still not found, try fallback: find any backup_*.pptx in root (use newest)
+        if not file_path:
+            logger.warning("File not found in standard locations. Searching for backup_*.pptx in root...")
+            backup_files = list(output_base.glob("backup_*.pptx"))
+            if backup_files:
+                # Sort by modification time, newest first
+                backup_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+                file_path = backup_files[0]
+                logger.warning(
+                    "Using most recent backup file: %s (expected: %s, presentation_id=%d)",
+                    file_path.name,
+                    clean_ppt_filename,
                     presentation_id
                 )
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"PowerPoint file not found on server. Presentations directory does not exist."
-                )
+
+        # If STILL not found, list available files and raise error
+        if not file_path:
+            # List all files in both locations to help diagnose
+            available_in_root = []
+            available_in_presentations = []
+
+            if output_base.exists():
+                available_in_root = [f.name for f in output_base.glob("*.pptx")]
+
+            presentations_dir = output_base / "Presentations"
+            if presentations_dir.exists():
+                available_in_presentations = [f.name for f in presentations_dir.glob("*.pptx")]
+
+            logger.error(
+                "PowerPoint file not found anywhere. Expected: %s (presentation_id=%d)\n"
+                "  Available in root: %s\n"
+                "  Available in Presentations/: %s",
+                clean_ppt_filename,
+                presentation_id,
+                available_in_root,
+                available_in_presentations
+            )
+
+            raise HTTPException(
+                status_code=404,
+                detail=f"PowerPoint file not found on server. Expected: {clean_ppt_filename}. "
+                       f"Available in root: {available_in_root}. Available in Presentations/: {available_in_presentations}"
+            )
 
         # Get file info
         file_size = file_path.stat().st_size

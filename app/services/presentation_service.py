@@ -330,31 +330,32 @@ class PresentationService:
                 was_overwritten = True
                 overwrite_presentation_id = existing_id
 
-            # 1. Process Excel file (30-40%)
+            # 1. Process Excel file (30-35%)
             if progress_callback:
                 progress_callback(30)
             logger.info("Processing Excel file: %s", request.excel_filename)
             excel_data = self._process_excel_file(request)
 
-            # 2. Convert PPTX file (40-50%)
+            # 2. Save original Excel file (35-40%)
             if progress_callback:
-                progress_callback(40)
-            logger.info("Converting PPTX file: %s", request.pptx_filename)
-            pptx_data = self._convert_pptx_file(request)
-
-            # 3. Save original Excel file (50-55%)
-            if progress_callback:
-                progress_callback(50)
+                progress_callback(35)
             logger.info("Saving original Excel file")
             excel_relative_path = self._save_original_excel(request)
 
-            # 4. Generate slides from Excel arrays (55-70%)
+            # 3. Convert original PPTX to temporary pptx_data for slide generation (40-45%)
             if progress_callback:
-                progress_callback(55)
-            logger.info("Generating slides from Excel data")
+                progress_callback(40)
+            logger.info("Loading original PPTX template: %s", request.pptx_filename)
+            # Create temporary pptx_data just for _generate_slides_from_excel
+            temp_pptx_data = self._convert_pptx_file(request)
+
+            # 4. Generate slides metadata from Excel arrays (45-50%)
+            if progress_callback:
+                progress_callback(45)
+            logger.info("Generating slides metadata from Excel data")
             slides_data = self._generate_slides_from_excel(
                 excel_data=excel_data,
-                pptx_data=pptx_data,
+                pptx_data=temp_pptx_data,
                 request=request,
             )
 
@@ -362,34 +363,37 @@ class PresentationService:
             slides_data["excel_file"] = excel_relative_path
 
             logger.info(
-                "Slides data generated: %d detail items, background=%s, excel_file=%s",
+                "Slides metadata generated: %d detail items, background=%s, excel_file=%s",
                 len(slides_data.get("details", [])),
                 slides_data.get("background_name"),
                 slides_data.get("excel_file"),
             )
-            
-            # 5. Generate physical PowerPoint file (70-85%)
+
+            # 5. Generate physical PowerPoint backup file FIRST (50-65%)
             if progress_callback:
-                progress_callback(70)
+                progress_callback(50)
             generated_files = None
+            backup_pptx_path = None
+
             if request.create_backup == 1:
-                logger.info("Generating physical PowerPoint backup file")
+                logger.info("Generating physical PowerPoint backup file (will use this for images)")
                 try:
                     ppt_files = self._generate_physical_powerpoint(
                         slides_data=slides_data,
                         excel_data=excel_data,
                         request=request,
-                        pptx_data=pptx_data,
+                        pptx_data=temp_pptx_data,
                     )
                     generated_files = ppt_files
+                    backup_pptx_path = ppt_files.get("printable_path")
 
                     # Update slides_data with generated file path for DB storage
-                    if ppt_files.get("printable_path"):
-                        slides_data["powerpoint_file"] = ppt_files["printable_path"]
+                    if backup_pptx_path:
+                        slides_data["powerpoint_file"] = backup_pptx_path
 
                     logger.info(
                         "Physical PowerPoint backup generated: %s (total slides: %s)",
-                        ppt_files.get("printable_path", "N/A"),
+                        backup_pptx_path or "N/A",
                         ppt_files.get("total_slides", "0"),
                     )
 
@@ -403,10 +407,78 @@ class PresentationService:
                         "total_slides": "0",
                         "warnings": "Failed to generate",
                     }
+                    backup_pptx_path = None
             else:
                 logger.info("Physical PowerPoint backup generation skipped (create_backup=0)")
 
-            # 6. Create or Update presentation in DB (85-95%)
+            # 6. Convert PowerPoint to images (65-75%)
+            # Use backup PowerPoint if available, otherwise use original template
+            if progress_callback:
+                progress_callback(65)
+
+            if backup_pptx_path:
+                logger.info("Converting backup PowerPoint to images: %s", backup_pptx_path)
+                try:
+                    # Read the backup PowerPoint file from disk
+                    from pathlib import Path
+                    backup_path = Path(backup_pptx_path)
+                    with open(backup_path, "rb") as f:
+                        backup_pptx_bytes = f.read()
+
+                    # Convert backup PowerPoint to images
+                    result_dict = pptx_service.convert_pptx_to_images(
+                        file_content=backup_pptx_bytes,
+                        filename=backup_path.name,
+                        display_name=request.display_name,
+                        project_type=request.project_type,
+                    )
+                    pptx_data = PPTXConversionResponse(**result_dict)
+
+                    logger.info(
+                        "Backup PowerPoint converted to images: %d images generated (includes category slides)",
+                        pptx_data.total_images
+                    )
+
+                    # Update slides_data to use the actual image paths from backup PowerPoint
+                    # This ensures slide_bg_file_name matches the real generated images
+                    if pptx_data.images:
+                        logger.info("Updating slide background file paths to match backup PowerPoint images")
+                        for detail_item in slides_data.get("details", []):
+                            slide_num = detail_item.get("slide_number", 0)
+                            # Images are 0-indexed, slide numbers are 1-indexed
+                            image_index = slide_num - 1
+
+                            if 0 <= image_index < len(pptx_data.images):
+                                old_path = detail_item.get("slide_bg_file_name", "")
+                                new_path = pptx_data.images[image_index]
+
+                                # Update the path
+                                detail_item["slide_bg_file_name"] = new_path
+
+                                # Log only for changed paths
+                                if old_path != new_path and old_path:
+                                    from pathlib import Path
+                                    old_filename = Path(old_path).name if old_path else "N/A"
+                                    new_filename = Path(new_path).name if new_path else "N/A"
+                                    logger.info(
+                                        "  Slide %d: Updated path from '%s' to '%s'",
+                                        slide_num,
+                                        old_filename,
+                                        new_filename
+                                    )
+
+                        logger.info("Slide background paths updated successfully")
+
+                except Exception as img_error:
+                    logger.error("Failed to convert backup PowerPoint to images: %s", str(img_error))
+                    # Fallback to original PPTX conversion
+                    logger.info("Falling back to original PPTX for images")
+                    pptx_data = temp_pptx_data
+            else:
+                logger.info("Converting original PPTX template to images: %s", request.pptx_filename)
+                pptx_data = temp_pptx_data
+
+            # 7. Create or Update presentation in DB (85-95%)
             if progress_callback:
                 progress_callback(85)
             if was_overwritten:
@@ -1406,6 +1478,7 @@ class PresentationService:
         excel_data: ProcessedExcelData,
         pptx_data: PPTXConversionResponse,
         request: CreatePresentationRequest,
+        skip_summary_slide: bool = False,
     ) -> PresentationData:
         details: List[DetailItem] = []
         last_group_name = ""
@@ -1534,8 +1607,8 @@ class PresentationService:
                 details.append(detail)
                 slide_number += 1
 
-    # 3) Summary slide for NW/DW
-        if request.project_type.lower() in {"nw", "dw"}:
+    # 3) Summary slide for NW/DW (skip if using OpenXML backup generation)
+        if request.project_type.lower() in {"nw", "dw"} and not skip_summary_slide:
             summary_slide = self._create_summary_slide(
                 slide_number=slide_number,
                 last_group=last_group_name,
@@ -1545,6 +1618,9 @@ class PresentationService:
             )
             details.append(summary_slide)
             slide_number += 1
+            logger.info("Summary slide added at position %d", slide_number - 1)
+        elif skip_summary_slide:
+            logger.info("Summary slide skipped (OpenXML mode does not support summary slides)")
 
     # 4) Remaining PPTX slides (after the Excel slides)
         if ppt_images and prefix_count < len(ppt_images):
