@@ -178,7 +178,13 @@ class PPTXService:
         self.image_format = settings.pptx_image_format
 
     def convert_pptx_to_images(
-        self, file_content: bytes, filename: str, display_name: str, project_type: str
+        self,
+        file_content: bytes,
+        filename: str,
+        display_name: str,
+        project_type: str,
+        *,
+        skip_cleanup: bool = False,
     ) -> Dict[str, Any]:
         """
         Convert PPTX file to images and extract slide titles.
@@ -188,6 +194,8 @@ class PPTXService:
             filename: Original filename
             display_name: Display name to use as folder name
             project_type: Type of project ('bipresents' or 'nw')
+            skip_cleanup: If True, keep existing files in the project folder (useful when
+                converting a backup PPTX so we don't delete the originally uploaded Excel/PPTX).
 
         Returns:
             Dictionary with conversion results
@@ -211,20 +219,26 @@ class PPTXService:
 
         # Check if folder already exists and handle it
         if project_folder.exists():
-            logger.warning(
-                "Project folder already exists: %s. Cleaning contents for overwrite.",
-                project_folder,
-            )
-            # On Windows/IIS, folder may be locked but we can delete contents
-            # Try to delete the folder completely first
-            if not _force_delete_windows(project_folder):
-                # Folder deletion failed (locked by IIS), but _force_delete_windows
-                # will have cleaned the contents. The folder remains but is empty.
-                # This is acceptable - we'll reuse the existing folder structure.
+            if skip_cleanup:
                 logger.info(
-                    "Folder remains locked but contents cleaned: %s. Reusing folder structure.",
-                    project_folder
+                    "Project folder already exists: %s. Skipping cleanup to preserve existing files.",
+                    project_folder,
                 )
+            else:
+                logger.warning(
+                    "Project folder already exists: %s. Cleaning contents for overwrite.",
+                    project_folder,
+                )
+                # On Windows/IIS, folder may be locked but we can delete contents
+                # Try to delete the folder completely first
+                if not _force_delete_windows(project_folder):
+                    # Folder deletion failed (locked by IIS), but _force_delete_windows
+                    # will have cleaned the contents. The folder remains but is empty.
+                    # This is acceptable - we'll reuse the existing folder structure.
+                    logger.info(
+                        "Folder remains locked but contents cleaned: %s. Reusing folder structure.",
+                        project_folder
+                    )
 
         # Create directories (exist_ok=True allows reusing locked folders)
         project_folder.mkdir(parents=True, exist_ok=True)

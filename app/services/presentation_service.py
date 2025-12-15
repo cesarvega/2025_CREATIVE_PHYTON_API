@@ -297,6 +297,26 @@ class PresentationService:
                     request.display_name
                 )
 
+            # Ensure target folder is clean before writing files (avoids deleting Excel later)
+            output_base, _ = resolve_project_output(
+                request.display_name,
+                request.project_type,
+                fallback_subdir="generated_presentations",
+            )
+            if output_base.exists():
+                logger.info(
+                    "Existing project folder found, deleting before processing to avoid leftover assets: %s",
+                    output_base,
+                )
+                try:
+                    pptx_service.delete_conversion(request.display_name, request.project_type)
+                except Exception as cleanup_error:
+                    logger.warning(
+                        "Failed to delete existing project folder %s: %s (continuing)",
+                        output_base,
+                        str(cleanup_error),
+                    )
+
             # Check if presentation exists and handle overwrite logic
             existing_id = self._check_presentation_exists(request.project, request.display_name)
             was_overwritten = False
@@ -336,18 +356,18 @@ class PresentationService:
             logger.info("Processing Excel file: %s", request.excel_filename)
             excel_data = self._process_excel_file(request)
 
-            # 2. Save original Excel file (35-40%)
+            # 2. Convert original PPTX to temporary pptx_data for slide generation (35-40%)
             if progress_callback:
                 progress_callback(35)
-            logger.info("Saving original Excel file")
-            excel_relative_path = self._save_original_excel(request)
-
-            # 3. Convert original PPTX to temporary pptx_data for slide generation (40-45%)
-            if progress_callback:
-                progress_callback(40)
             logger.info("Loading original PPTX template: %s", request.pptx_filename)
             # Create temporary pptx_data just for _generate_slides_from_excel
             temp_pptx_data = self._convert_pptx_file(request)
+
+            # 3. Save original Excel file AFTER saving the PPTX (40-45%)
+            if progress_callback:
+                progress_callback(40)
+            logger.info("Saving original Excel file (post-PPTX save)")
+            excel_relative_path = self._save_original_excel(request)
 
             # 4. Generate slides metadata from Excel arrays (45-50%)
             if progress_callback:
@@ -431,6 +451,7 @@ class PresentationService:
                         filename=backup_path.name,
                         display_name=request.display_name,
                         project_type=request.project_type,
+                        skip_cleanup=True,  # Preserve original Excel/PPTX when reconverting backup
                     )
                     pptx_data = PPTXConversionResponse(**result_dict)
 
@@ -1141,6 +1162,7 @@ class PresentationService:
                 filename=request.pptx_filename,
                 display_name=request.display_name,
                 project_type=request.project_type,
+                skip_cleanup=True,  # Folder was just prepared; keep the saved Excel intact
             )
 
             # Convert dict to PPTXConversionResponse
