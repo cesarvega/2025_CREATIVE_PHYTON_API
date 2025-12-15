@@ -509,7 +509,16 @@ async def delete_task(task_id: str) -> dict:
     response_model=ReplaceProjectImagesResponse,
 )
 async def replace_project_images(
-    powerpointFile: UploadFile = File(..., description="PowerPoint file (.pptx)"),
+    powerpointFile: UploadFile | None = File(
+        None, description="PowerPoint file (.pptx) - optional, uses latest from project root if omitted"
+    ),
+    excelFile: UploadFile | None = File(
+        None, description="Excel file (.xlsx/.xls) - optional, uses latest from project root if omitted"
+    ),
+    page_number: int | None = Form(
+        None,
+        description="Page number (insert position). Optional; uses existing value if omitted.",
+    ),
     project_name: str = Form(..., description="Existing project folder name"),
     project_type: str = Depends(validate_project_type),
 ):
@@ -521,25 +530,37 @@ async def replace_project_images(
     - Returns backup path and basic info (no legacy image replacement).
     """
     try:
-        # Validate file type and size (50MB default for PPTX)
-        validated_file = await validate_pptx_file(powerpointFile)
-        file_content = await validate_file_size(validated_file, 50)
+        # Validate files if provided
+        validated_ppt = None
+        ppt_bytes = None
+        if powerpointFile:
+            validated_ppt = await validate_pptx_file(powerpointFile)
+            ppt_bytes = await validate_file_size(validated_ppt, 50)
 
-        # Basic validation for project_name (no path separators or whitespace trim changes)
+        validated_excel = None
+        excel_bytes = None
+        if excelFile:
+            validated_excel = await validate_excel_file_with_size(excelFile)
+            excel_bytes = validated_excel[1] if isinstance(validated_excel, tuple) else await excelFile.read()
+
+        # Basic validation for project_name
         if not project_name or project_name.strip() != project_name or ("/" in project_name or "\\" in project_name):
             raise HTTPException(status_code=400, detail="Invalid project name")
 
         from app.utils.path_utils import resolve_project_output, sanitize_folder_name
 
         sanitized_display = sanitize_folder_name(project_name)
-        safe_ppt_name = Path(validated_file.filename).name
 
-        # Locate presentation ID by display_name (original or sanitized)
-        presentation_id = None
+        # Locate presentation ID by display_name (original or sanitized) and fetch metadata
         with get_connection_scope(timeout=30) as cursor:
             cursor.execute(
                 """
-                SELECT TOP 1 PresentationId, DisplayName
+                SELECT TOP 1 PresentationId, Project, DisplayName,
+                       NameCandidateBGType, NameCandidateBGName,
+                       NameCandidateStartingSlide, PresentationType,
+                       UploadedBy, BSRDisplayName, isParticipantsVote,
+                       isWideScreenPPT, isAWSLinkReq, NameCandidateFileName,
+                       MainPptFileName
                 FROM [BI_GUIDELINES].[dbo].[nw_Master]
                 WHERE DisplayName IN (?, ?)
                 ORDER BY PresentationId DESC
@@ -547,40 +568,93 @@ async def replace_project_images(
                 (project_name, sanitized_display),
             )
             row = cursor.fetchone()
-            if row:
-                presentation_id = int(row[0])
 
-        if not presentation_id:
+        if not row:
             raise HTTPException(
                 status_code=404,
                 detail=f"Presentation not found for project_name '{project_name}'",
             )
 
-        # Save PPTX into project root
+        presentation_id = int(row[0])
+        project_db = row[1]
+        display_name_db = row[2]
+        bg_type_db = row[3] or "Default"
+        bg_name_db = row[4] or "Default"
+        page_number_db = row[5] or 1
+        presentation_type_db = row[6] or "Normal"
+        user_name_db = row[7] or ""
+        mobile_link_bsr_db = row[8] or ""
+        participant_vote_db = row[9] or 0
+        is_wide_ppt_db = row[10] or 0
+        is_aws_email_db = row[11] or 0
+        excel_filename_db = row[12] or "original_data.xlsx"
+        main_ppt_filename_db = row[13] or ""
+
+        # Resolve project root
         output_base, _ = resolve_project_output(
             sanitized_display,
             project_type,
             fallback_subdir="generated_presentations",
         )
         output_base.mkdir(parents=True, exist_ok=True)
-        ppt_path = output_base / safe_ppt_name
-        with open(ppt_path, "wb") as f:
-            f.write(file_content)
-        logger.info("Saved new PPTX for project %s at %s", project_name, ppt_path)
 
-        # Update PPT filename in DB to point to the newly uploaded PPTX
+        # Select PPTX: uploaded -> else latest in root -> else DB
+        ppt_path = None
+        if ppt_bytes:
+            safe_ppt_name = Path(validated_ppt.filename).name
+            ppt_path = output_base / safe_ppt_name
+            with open(ppt_path, "wb") as f:
+                f.write(ppt_bytes)
+        else:
+            candidates = sorted(output_base.glob("*.pptx"), key=lambda f: f.stat().st_mtime, reverse=True)
+            if candidates:
+                ppt_path = candidates[0]
+            elif main_ppt_filename_db:
+                candidate = output_base / Path(main_ppt_filename_db).name
+                if candidate.exists():
+                    ppt_path = candidate
+            if not ppt_path:
+                raise HTTPException(status_code=404, detail="No PPTX found or provided")
+            with open(ppt_path, "rb") as f:
+                ppt_bytes = f.read()
+
+        # Select Excel: uploaded -> else latest in root -> else DB/fallback
+        excel_path = None
+        if excel_bytes:
+            safe_excel_name = Path(validated_excel[0].filename if isinstance(validated_excel, tuple) else excelFile.filename).name
+            excel_path = output_base / safe_excel_name
+            with open(excel_path, "wb") as f:
+                f.write(excel_bytes)
+        else:
+            candidates = sorted(output_base.glob("*.xlsx"), key=lambda f: f.stat().st_mtime, reverse=True)
+            if candidates:
+                excel_path = candidates[0]
+            else:
+                candidate = output_base / Path(excel_filename_db).name
+                if candidate.exists():
+                    excel_path = candidate
+        if not excel_path or not excel_path.exists():
+            raise HTTPException(status_code=404, detail="No Excel file found or provided in project root")
+        if not excel_bytes:
+            with open(excel_path, "rb") as f:
+                excel_bytes = f.read()
+
+        # Determine page_number to use
+        final_page_number = page_number if page_number is not None else page_number_db
+
+        # Update DB with filenames and page_number
         with get_connection_scope(timeout=30) as cursor:
             cursor.execute(
                 """
                 UPDATE [BI_GUIDELINES].[dbo].[nw_Master]
-                SET MainPptFileName = ?
+                SET MainPptFileName = ?, NameCandidateFileName = ?, NameCandidateStartingSlide = ?
                 WHERE PresentationId = ?
                 """,
-                (safe_ppt_name, presentation_id),
+                (ppt_path.name, excel_path.name, final_page_number, presentation_id),
             )
             cursor.connection.commit()
 
-        # Regenerate backup (uses Excel from root + new PPTX)
+        # Regenerate backup (uses Excel from root + PPTX)
         backup_info = presentation_service.generate_backup_presentation(presentation_id)
         logger.info(
             "Backup regenerated for PresentationId=%d: %s",
@@ -588,82 +662,24 @@ async def replace_project_images(
             backup_info.get("printable_path"),
         )
 
-        # After regenerating backup, recreate presentation using existing Excel (from project root) + new PPTX
+        # Recreate presentation using selected Excel/PPTX
         create_result = None
         try:
-            # Fetch metadata from DB to rebuild request
-            with get_connection_scope(timeout=30) as cursor:
-                cursor.execute(
-                    """
-                    SELECT
-                        Project,
-                        DisplayName,
-                        NameCandidateBGType,
-                        NameCandidateBGName,
-                        NameCandidateStartingSlide,
-                        PresentationType,
-                        UploadedBy,
-                        BSRDisplayName,
-                        isParticipantsVote,
-                        isWideScreenPPT,
-                        isAWSLinkReq,
-                        NameCandidateFileName
-                    FROM [BI_GUIDELINES].[dbo].[nw_Master]
-                    WHERE PresentationId = ?
-                    """,
-                    (presentation_id,),
-                )
-                row = cursor.fetchone()
-
-                if not row:
-                    raise HTTPException(status_code=404, detail="Presentation metadata not found")
-
-                project = row[0]
-                display_name_db = row[1]
-                bg_type = row[2] or "Default"
-                bg_name = row[3] or "Default"
-                page_number = row[4] or 1
-                presentation_type = row[5] or "Normal"
-                user_name = row[6] or ""
-                mobile_link_bsr = row[7] or ""
-                participant_vote = row[8] or 0
-                is_wide_ppt = row[9] or 0
-                is_aws_email = row[10] or 0
-                excel_filename = row[11] or "original_data.xlsx"
-
-            # Paths for Excel and PPTX (already saved)
-            excel_path = output_base / excel_filename
-            if not excel_path.exists():
-                # fallback to any xlsx in root
-                candidates = list(output_base.glob("*.xlsx"))
-                if candidates:
-                    excel_path = candidates[0]
-                else:
-                    raise HTTPException(
-                        status_code=404,
-                        detail=f"Excel file not found in project root: {output_base}",
-                    )
-
-            ppt_content = file_content  # already saved; reuse uploaded bytes
-
-            with open(excel_path, "rb") as f:
-                excel_content = f.read()
-
             create_request = CreatePresentationRequest(
-                project=project,
+                project=project_db,
                 display_name=display_name_db,
-                background_type=bg_type,
-                background_name=bg_name,
-                page_number=page_number,
-                presentation_type=presentation_type,
-                user_name=user_name,
-                mobile_link_bsr=mobile_link_bsr,
-                participant_vote=participant_vote,
-                is_wide_ppt=is_wide_ppt,
-                is_aws_email=is_aws_email,
-                excel_file=excel_content,
+                background_type=bg_type_db,
+                background_name=bg_name_db,
+                page_number=final_page_number,
+                presentation_type=presentation_type_db,
+                user_name=user_name_db,
+                mobile_link_bsr=mobile_link_bsr_db,
+                participant_vote=participant_vote_db,
+                is_wide_ppt=is_wide_ppt_db,
+                is_aws_email=is_aws_email_db,
+                excel_file=excel_bytes,
                 excel_filename=excel_path.name,
-                pptx_file=ppt_content,
+                pptx_file=ppt_bytes,
                 pptx_filename=ppt_path.name,
                 create_backup=1,
                 has_groups=True,
@@ -686,7 +702,7 @@ async def replace_project_images(
             )
 
         return ReplaceProjectImagesResponse(
-            message="Backup regenerated using existing Excel and new PPTX",
+            message="Project regenerated using OpenXML with existing/new files",
             project_name=project_name,
             project_type=project_type,
             total_images=0,
