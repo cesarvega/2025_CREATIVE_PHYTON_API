@@ -48,6 +48,8 @@ from app.services.report_orchestrator_service import report_orchestrator_service
 from app.services.feedback_template_generator import feedback_template_generator
 from app.services.bi_guidelines_service import bi_guidelines_service
 from app.services.pptx_service import pptx_service
+from app.services.presentation_service import presentation_service
+from app.models.presentation_models import CreatePresentationRequest
 from app.utils.task_manager import task_manager, TaskStatus
 from app.utils.concurrency_manager_v2 import concurrency_manager
 from app.api.background_tasks import (
@@ -511,11 +513,12 @@ async def replace_project_images(
     project_name: str = Form(..., description="Existing project folder name"),
     project_type: str = Depends(validate_project_type),
 ):
-    """Replace images and thumbnails in an existing project folder.
+    """Regenerate project using OpenXML backup flow with existing Excel in project root.
 
-    - project_name: Must match an existing folder under the project type base dir.
-    - project_type: 'bipresents' or 'nw' (used to resolve base directory).
-    - powerpoint file: Uploaded PPTX used to export new slide images.
+    - Saves the uploaded PPTX into the project root.
+    - Looks up existing presentation by display_name.
+    - Regenerates backup with OpenXML using the Excel already stored in the project folder.
+    - Returns backup path and basic info (no legacy image replacement).
     """
     try:
         # Validate file type and size (50MB default for PPTX)
@@ -526,20 +529,171 @@ async def replace_project_images(
         if not project_name or project_name.strip() != project_name or ("/" in project_name or "\\" in project_name):
             raise HTTPException(status_code=400, detail="Invalid project name")
 
-        result = pptx_service.replace_project_images(
-            file_content=file_content,
-            filename=validated_file.filename,
-            project_name=project_name,
-            project_type=project_type,
+        from app.utils.path_utils import resolve_project_output, sanitize_folder_name
+
+        sanitized_display = sanitize_folder_name(project_name)
+        safe_ppt_name = Path(validated_file.filename).name
+
+        # Locate presentation ID by display_name (original or sanitized)
+        presentation_id = None
+        with get_connection_scope(timeout=30) as cursor:
+            cursor.execute(
+                """
+                SELECT TOP 1 PresentationId, DisplayName
+                FROM [BI_GUIDELINES].[dbo].[nw_Master]
+                WHERE DisplayName IN (?, ?)
+                ORDER BY PresentationId DESC
+                """,
+                (project_name, sanitized_display),
+            )
+            row = cursor.fetchone()
+            if row:
+                presentation_id = int(row[0])
+
+        if not presentation_id:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Presentation not found for project_name '{project_name}'",
+            )
+
+        # Save PPTX into project root
+        output_base, _ = resolve_project_output(
+            sanitized_display,
+            project_type,
+            fallback_subdir="generated_presentations",
+        )
+        output_base.mkdir(parents=True, exist_ok=True)
+        ppt_path = output_base / safe_ppt_name
+        with open(ppt_path, "wb") as f:
+            f.write(file_content)
+        logger.info("Saved new PPTX for project %s at %s", project_name, ppt_path)
+
+        # Update PPT filename in DB to point to the newly uploaded PPTX
+        with get_connection_scope(timeout=30) as cursor:
+            cursor.execute(
+                """
+                UPDATE [BI_GUIDELINES].[dbo].[nw_Master]
+                SET MainPptFileName = ?
+                WHERE PresentationId = ?
+                """,
+                (safe_ppt_name, presentation_id),
+            )
+            cursor.connection.commit()
+
+        # Regenerate backup (uses Excel from root + new PPTX)
+        backup_info = presentation_service.generate_backup_presentation(presentation_id)
+        logger.info(
+            "Backup regenerated for PresentationId=%d: %s",
+            presentation_id,
+            backup_info.get("printable_path"),
         )
 
+        # After regenerating backup, recreate presentation using existing Excel (from project root) + new PPTX
+        create_result = None
+        try:
+            # Fetch metadata from DB to rebuild request
+            with get_connection_scope(timeout=30) as cursor:
+                cursor.execute(
+                    """
+                    SELECT
+                        Project,
+                        DisplayName,
+                        NameCandidateBGType,
+                        NameCandidateBGName,
+                        NameCandidateStartingSlide,
+                        PresentationType,
+                        UploadedBy,
+                        BSRDisplayName,
+                        isParticipantsVote,
+                        isWideScreenPPT,
+                        isAWSLinkReq,
+                        NameCandidateFileName
+                    FROM [BI_GUIDELINES].[dbo].[nw_Master]
+                    WHERE PresentationId = ?
+                    """,
+                    (presentation_id,),
+                )
+                row = cursor.fetchone()
+
+                if not row:
+                    raise HTTPException(status_code=404, detail="Presentation metadata not found")
+
+                project = row[0]
+                display_name_db = row[1]
+                bg_type = row[2] or "Default"
+                bg_name = row[3] or "Default"
+                page_number = row[4] or 1
+                presentation_type = row[5] or "Normal"
+                user_name = row[6] or ""
+                mobile_link_bsr = row[7] or ""
+                participant_vote = row[8] or 0
+                is_wide_ppt = row[9] or 0
+                is_aws_email = row[10] or 0
+                excel_filename = row[11] or "original_data.xlsx"
+
+            # Paths for Excel and PPTX (already saved)
+            excel_path = output_base / excel_filename
+            if not excel_path.exists():
+                # fallback to any xlsx in root
+                candidates = list(output_base.glob("*.xlsx"))
+                if candidates:
+                    excel_path = candidates[0]
+                else:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"Excel file not found in project root: {output_base}",
+                    )
+
+            ppt_content = file_content  # already saved; reuse uploaded bytes
+
+            with open(excel_path, "rb") as f:
+                excel_content = f.read()
+
+            create_request = CreatePresentationRequest(
+                project=project,
+                display_name=display_name_db,
+                background_type=bg_type,
+                background_name=bg_name,
+                page_number=page_number,
+                presentation_type=presentation_type,
+                user_name=user_name,
+                mobile_link_bsr=mobile_link_bsr,
+                participant_vote=participant_vote,
+                is_wide_ppt=is_wide_ppt,
+                is_aws_email=is_aws_email,
+                excel_file=excel_content,
+                excel_filename=excel_path.name,
+                pptx_file=ppt_content,
+                pptx_filename=ppt_path.name,
+                create_backup=1,
+                has_groups=True,
+                test_name_order="Default",
+                project_type=project_type,
+                overwrite_existing=True,
+            )
+
+            create_result = presentation_service.create_presentation(create_request)
+            logger.info(
+                "Presentation recreated for project %s (ID from service: %s)",
+                project_name,
+                getattr(create_result, "presentation_id", None),
+            )
+        except Exception as create_exc:
+            logger.warning(
+                "Recreation using existing Excel/PPTX failed for project %s: %s",
+                project_name,
+                str(create_exc),
+            )
+
         return ReplaceProjectImagesResponse(
-            message=result["message"],
-            project_name=result["project_name"],
-            project_type=result["project_type"],
-            total_images=result["total_images"],
-            images=result["images"],
-            thumbnails=result.get("thumbnails", []),
+            message="Backup regenerated using existing Excel and new PPTX",
+            project_name=project_name,
+            project_type=project_type,
+            total_images=0,
+            images=[],
+            thumbnails=[],
+            backup_file=backup_info.get("printable_path"),
+            presentation_id=getattr(create_result, "presentation_id", None) if create_result else presentation_id,
         )
 
     except FileNotFoundError as fnf:
