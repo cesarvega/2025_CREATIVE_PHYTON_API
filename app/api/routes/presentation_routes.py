@@ -14,6 +14,7 @@ from app.api.dependencies import (
     parse_presentation_metadata,
     parse_simple_dw_metadata,
     parse_bsr_metadata,
+    validate_excel_file_with_size,
 )
 from app.config.settings import settings
 from app.models.presentation_models import (

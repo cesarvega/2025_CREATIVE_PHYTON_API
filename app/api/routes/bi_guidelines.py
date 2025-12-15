@@ -265,6 +265,27 @@ async def get_project_info(project_id: int):
         if project_details is not None:
             # Found in NW table
             project_details["project_type"] = "NW"
+            # Add page_number: prefer field from SP, else fetch from nw_Master
+            page_number = None
+            for key, val in project_details.items():
+                if str(key).lower() == "namecandidatestartingslide":
+                    page_number = val
+                    break
+            if page_number is None:
+                # Fallback lookup from nw_Master
+                try:
+                    with get_connection_scope(timeout=30) as cursor:
+                        cursor.execute(
+                            "SELECT NameCandidateStartingSlide FROM [BI_GUIDELINES].[dbo].[nw_Master] WHERE PresentationId = ?",
+                            (project_id,),
+                        )
+                        row = cursor.fetchone()
+                        if row:
+                            page_number = row[0]
+                except Exception:
+                    page_number = page_number  # leave unchanged
+            if page_number is not None:
+                project_details["page_number"] = page_number
             logger.info("Retrieved NW project info for project_id=%d", project_id)
             return project_details
 
@@ -275,6 +296,10 @@ async def get_project_info(project_id: int):
         if project_details is not None:
             # Found in BSR table
             project_details["project_type"] = "BSR"
+            # Add page_number if SlideNumber exists
+            page_number = project_details.get("slidenumber") or project_details.get("SlideNumber")
+            if page_number is not None:
+                project_details["page_number"] = page_number
             logger.info("Retrieved BSR project info for project_id=%d", project_id)
             return project_details
 
