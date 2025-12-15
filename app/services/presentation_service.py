@@ -464,29 +464,44 @@ class PresentationService:
                     # This ensures slide_bg_file_name matches the real generated images
                     if pptx_data.images:
                         logger.info("Updating slide background file paths to match backup PowerPoint images")
+                        image_cursor = 0  # Track position in pptx_data.images independent of slide_number
+                        total_images = len(pptx_data.images)
+
                         for detail_item in slides_data.get("details", []):
-                            slide_num = detail_item.get("slide_number", 0)
-                            # Images are 0-indexed, slide numbers are 1-indexed
-                            image_index = slide_num - 1
+                            slide_type = detail_item.get("slide_type", "")
 
-                            if 0 <= image_index < len(pptx_data.images):
-                                old_path = detail_item.get("slide_bg_file_name", "")
-                                new_path = pptx_data.images[image_index]
+                            # NameSummary is not rendered in the OpenXML backup (currently),
+                            # so keep its existing background and DO NOT advance the cursor.
+                            if slide_type == "NameSummary":
+                                continue
 
-                                # Update the path
-                                detail_item["slide_bg_file_name"] = new_path
+                            if image_cursor >= total_images:
+                                logger.warning(
+                                    "Not enough backup images to map slide %s (cursor=%d, total=%d)",
+                                    detail_item.get("slide_number"),
+                                    image_cursor,
+                                    total_images,
+                                )
+                                continue
 
-                                # Log only for changed paths
-                                if old_path != new_path and old_path:
-                                    from pathlib import Path
-                                    old_filename = Path(old_path).name if old_path else "N/A"
-                                    new_filename = Path(new_path).name if new_path else "N/A"
-                                    logger.info(
-                                        "  Slide %d: Updated path from '%s' to '%s'",
-                                        slide_num,
-                                        old_filename,
-                                        new_filename
-                                    )
+                            old_path = detail_item.get("slide_bg_file_name", "")
+                            new_path = pptx_data.images[image_cursor]
+                            image_cursor += 1
+
+                            # Update the path
+                            detail_item["slide_bg_file_name"] = new_path
+
+                            # Log only for changed paths
+                            if old_path != new_path and old_path:
+                                from pathlib import Path
+                                old_filename = Path(old_path).name if old_path else "N/A"
+                                new_filename = Path(new_path).name if new_path else "N/A"
+                                logger.info(
+                                    "  Slide %s: Updated path from '%s' to '%s'",
+                                    detail_item.get("slide_number", 0),
+                                    old_filename,
+                                    new_filename
+                                )
 
                         logger.info("Slide background paths updated successfully")
 
