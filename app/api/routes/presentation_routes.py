@@ -2450,6 +2450,10 @@ async def download_presentation_file(presentation_id: int) -> FileResponse:
         # Some old records may have full paths like "files/download/NW/Project/file.pptx"
         clean_ppt_filename = PathLib(main_ppt_filename).name
 
+        # Build expected backup filename pattern: backup_[displayname]_*.pptx
+        expected_prefix = f"backup_{clean_display_name}_"
+        expected_suffix = ".pptx"
+
         # Resolve the output base directory
         output_base, _ = resolve_project_output(
             clean_display_name,
@@ -2458,12 +2462,22 @@ async def download_presentation_file(presentation_id: int) -> FileResponse:
         )
 
         # Try to find the file in multiple locations:
-        # 1. Root directory (new OpenXML backup location)
-        # 2. Presentations subdirectory (legacy location)
-        # 3. Fallback to any backup_*.pptx in root (newest file)
+        # 1. Exact path from DB if it's absolute
+        # 2. Root directory (new OpenXML backup location)
+        # 3. Presentations subdirectory (legacy location)
+        # 4. Fallback to any backup_*.pptx in root (newest file)
 
         file_path = None
         search_locations = []
+
+        # Location 0: Absolute path if provided
+        try:
+            from pathlib import Path as PathLib2
+            maybe_abs = PathLib2(main_ppt_filename)
+            if maybe_abs.is_absolute():
+                search_locations.append(("absolute", maybe_abs))
+        except Exception:
+            pass
 
         # Location 1: Root directory (new location for backup files)
         root_path = output_base / clean_ppt_filename
@@ -2490,10 +2504,10 @@ async def download_presentation_file(presentation_id: int) -> FileResponse:
                 logger.info("Found PowerPoint file in %s: %s", location_name, file_path)
                 break
 
-        # If still not found, try fallback: find any backup_*.pptx in root (use newest)
+        # If still not found, try fallback: find any backup_<displayname>_*.pptx in root (use newest)
         if not file_path:
-            logger.warning("File not found in standard locations. Searching for backup_*.pptx in root...")
-            backup_files = list(output_base.glob("backup_*.pptx"))
+            logger.warning("File not found in standard locations. Searching for backup_<displayname>_*.pptx in root...")
+            backup_files = list(output_base.glob(f"{expected_prefix}*{expected_suffix}"))
             if backup_files:
                 # Sort by modification time, newest first
                 backup_files.sort(key=lambda f: f.stat().st_mtime, reverse=True)
@@ -2507,25 +2521,18 @@ async def download_presentation_file(presentation_id: int) -> FileResponse:
 
         # If STILL not found, list available files and raise error
         if not file_path:
-            # List all files in both locations to help diagnose
+            # List all files in the root to help diagnose
             available_in_root = []
-            available_in_presentations = []
 
             if output_base.exists():
                 available_in_root = [f.name for f in output_base.glob("*.pptx")]
 
-            presentations_dir = output_base / "Presentations"
-            if presentations_dir.exists():
-                available_in_presentations = [f.name for f in presentations_dir.glob("*.pptx")]
-
             logger.error(
-                "PowerPoint file not found anywhere. Expected: %s (presentation_id=%d)\n"
-                "  Available in root: %s\n"
-                "  Available in Presentations/: %s",
-                clean_ppt_filename,
+                "PowerPoint file not found. Expected prefix: %s (presentation_id=%d)\n"
+                "  Available in root: %s",
+                expected_prefix,
                 presentation_id,
                 available_in_root,
-                available_in_presentations
             )
 
             raise HTTPException(
@@ -2534,31 +2541,29 @@ async def download_presentation_file(presentation_id: int) -> FileResponse:
                        f"Available in root: {available_in_root}. Available in Presentations/: {available_in_presentations}"
             )
 
-        # Get file info
+        # Get file info and final download name (use actual file name on disk)
         file_size = file_path.stat().st_size
         media_type = guess_media_type(file_path)
+        download_name = file_path.name
 
         logger.info(
             "Serving PowerPoint file: %s (size: %d bytes, presentation_id: %d)",
-            file_path.name,
+            download_name,
             file_size,
             presentation_id
         )
 
-        # Create FileResponse with proper headers
+        # Create FileResponse with explicit Content-Disposition header (frontend expects filename here)
         response = FileResponse(
             path=file_path,
             media_type=media_type,
-            filename=file_path.name,
+            headers={
+                # Keep it simple for the frontend: only filename, no extra encoding params
+                "Content-Disposition": f"attachment; filename={download_name}",
+                "X-Content-Type-Options": "nosniff",
+                "Content-Transfer-Encoding": "binary",
+            },
         )
-
-        # Set headers for download
-        utf8_name = quote(file_path.name)
-        response.headers["Content-Disposition"] = (
-            f"attachment; filename=\"{file_path.name}\"; filename*=UTF-8''{utf8_name}"
-        )
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Content-Transfer-Encoding"] = "binary"
 
         return response
 

@@ -3,6 +3,7 @@ Presentation creation orchestration service.
 """
 
 import time
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -369,6 +370,12 @@ class PresentationService:
             logger.info("Saving original Excel file (post-PPTX save)")
             excel_relative_path = self._save_original_excel(request)
 
+            # 3b. Save original PPTX file for reference/download (after initial parse)
+            if progress_callback:
+                progress_callback(42)
+            logger.info("Saving original PPTX file")
+            self._save_original_pptx(request)
+
             # 4. Generate slides metadata from Excel arrays (45-50%)
             if progress_callback:
                 progress_callback(45)
@@ -381,6 +388,9 @@ class PresentationService:
 
             # Store Excel path in slides_data for database persistence
             slides_data["excel_file"] = excel_relative_path
+
+            # Initialize powerpoint_file to original filename (may be overridden by backup)
+            slides_data["powerpoint_file"] = temp_pptx_data.pptx_file or ""
 
             logger.info(
                 "Slides metadata generated: %d detail items, background=%s, excel_file=%s",
@@ -407,7 +417,7 @@ class PresentationService:
                     generated_files = ppt_files
                     backup_pptx_path = ppt_files.get("printable_path")
 
-                    # Update slides_data with generated file path for DB storage
+                    # Persist backup path for DB storage and downloads
                     if backup_pptx_path:
                         slides_data["powerpoint_file"] = backup_pptx_path
 
@@ -1171,21 +1181,61 @@ class PresentationService:
     ) -> PPTXConversionResponse:
         """Convert PPTX file using the existing PPTX service."""
         try:
-            # Convert PPTX to images
+            # Light parse of PPTX without exporting images (we'll use backup images later)
+            try:
+                from pptx import Presentation  # type: ignore
+            except Exception:
+                Presentation = None
+
+            if Presentation:
+                prs = Presentation(BytesIO(request.pptx_file))
+                total = len(prs.slides)
+
+                # Extract simple titles (fallback to "Slide X")
+                titles: list[str] = []
+                for idx, slide in enumerate(prs.slides, start=1):
+                    title = ""
+                    for shape in getattr(slide, "shapes", []):
+                        try:
+                            if getattr(shape, "has_text_frame", False) and shape.text:
+                                text = shape.text.strip()
+                                if text:
+                                    title = text
+                                    break
+                        except Exception:
+                            continue
+                    if not title:
+                        title = f"Slide {idx}"
+                    titles.append(title)
+
+                # Placeholder image paths (will be replaced after backup generation)
+                images = [f"placeholder://orig/{i:03d}.jpg" for i in range(1, total + 1)]
+
+                result = PPTXConversionResponse(
+                    message="Parsed PPTX without exporting images",
+                    conversion_id=request.display_name,
+                    project_type=request.project_type,
+                    images=images,
+                    thumbnails=[],
+                    titles=titles,
+                    total_images=total,
+                    pptx_file=request.pptx_filename,
+                )
+                logger.info(
+                    "PPTX parsed without image export: %d slides detected", result.total_images
+                )
+                return result
+
+            # Fallback: use existing converter if python-pptx unavailable
+            logger.warning("python-pptx not available; falling back to image export")
             result_dict = pptx_service.convert_pptx_to_images(
                 file_content=request.pptx_file,
                 filename=request.pptx_filename,
                 display_name=request.display_name,
                 project_type=request.project_type,
-                skip_cleanup=True,  # Folder was just prepared; keep the saved Excel intact
+                skip_cleanup=True,
             )
-
-            # Convert dict to PPTXConversionResponse
             result = PPTXConversionResponse(**result_dict)
-
-            logger.info(
-                "PPTX conversion completed: %d images generated", result.total_images
-            )
             return result
 
         except Exception as e:
@@ -1246,6 +1296,53 @@ class PresentationService:
             logger.error("❌ Error saving original Excel file: %s", str(e))
             import traceback
             logger.error("❌ Traceback: %s", traceback.format_exc())
+            raise
+
+    def _save_original_pptx(
+        self, request: CreatePresentationRequest
+    ) -> str:
+        """Save the original PPTX file to the project folder for reference/download."""
+        try:
+            # Resolve project output folder
+            output_base, _ = resolve_project_output(
+                request.display_name,
+                request.project_type,
+                fallback_subdir="generated_presentations",
+            )
+
+            # Ensure the directory exists
+            output_base.mkdir(parents=True, exist_ok=True)
+
+            # Use sanitized filename to prevent path traversal
+            safe_filename = Path(request.pptx_filename).name
+            pptx_path = output_base / safe_filename
+
+            logger.info(
+                "Saving PPTX file: display_name=%s, output_base=%s, filename=%s, full_path=%s",
+                request.display_name,
+                output_base,
+                safe_filename,
+                pptx_path
+            )
+            logger.info("PPTX file size: %d bytes", len(request.pptx_file))
+            logger.info("Directory exists: %s", output_base.exists())
+            logger.info("Directory is writable: %s", output_base.is_dir())
+
+            with open(pptx_path, "wb") as f:
+                bytes_written = f.write(request.pptx_file)
+                logger.info("Bytes written to PPTX file: %d", bytes_written)
+
+            logger.info("Original PPTX file saved successfully to: %s", pptx_path)
+            logger.info("File exists after save: %s", pptx_path.exists())
+            if pptx_path.exists():
+                logger.info("File size on disk: %d bytes", pptx_path.stat().st_size)
+
+            return safe_filename
+
+        except Exception as e:
+            logger.error("Error saving original PPTX file: %s", str(e))
+            import traceback
+            logger.error("Traceback: %s", traceback.format_exc())
             raise
 
     def _load_existing_pptx_images(
@@ -1463,21 +1560,18 @@ class PresentationService:
                 is_big_japanese=is_big_japanese,
             )
 
-            # Save to the Presentations folder
+            # Save backup directly in the project folder (no Presentations subfolder)
             output_base, _ = resolve_project_output(
                 request.display_name,
                 request.project_type,
                 fallback_subdir="generated_presentations",
             )
 
-            # Create Presentations subfolder
-            presentations_folder = output_base / "Presentations"
-            presentations_folder.mkdir(parents=True, exist_ok=True)
-
-            # Generate filename with timestamp
+            # Generate filename with timestamp in the project root
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup_filename = f"backup_{timestamp}.pptx"
-            backup_path = presentations_folder / backup_filename
+            safe_display = Path(request.display_name).name
+            backup_filename = f"backup_{safe_display}_{timestamp}.pptx"
+            backup_path = output_base / backup_filename
 
             # Write the file
             with open(backup_path, "wb") as f:
@@ -1576,12 +1670,7 @@ class PresentationService:
                     notation,
                     kana
                 )
-                image_path = pptx_builder_service.generate_category_slide_image(
-                    category=category,
-                    display_name=request.display_name,
-                    slide_number=slide_number,
-                    project_type=request.project_type,
-                )
+                image_path = self._get_default_group_background(request, slide_number)
                 group_letter = excel_data.lst_group_letters[index] if index < len(excel_data.lst_group_letters) else ""
                 details.append(DetailItem(
                     slide_number=slide_number,
