@@ -439,6 +439,13 @@ class BIGuidelinesService:
             # Convert row to dictionary
             project_details = dict(zip(columns, row))
 
+            # DEBUG: Log what columns the stored procedure actually returns
+            logger.info(
+                "BSR_PresentationInfo SP returned columns for project_id=%d: %s",
+                project_id,
+                list(project_details.keys())
+            )
+
             # Get project ID for categories lookup
             presentation_id = project_details.get("presentationid") or project_id
 

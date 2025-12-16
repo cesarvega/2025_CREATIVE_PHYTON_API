@@ -241,11 +241,11 @@ async def get_bsr_display_names(
 
 @router.get("/project-info/{project_id}")
 async def get_project_info(project_id: int):
-    """Retrieve project information automatically detecting if it's NW or BSR type.
+    """Retrieve project information automatically detecting if it's NW, BSR, or NSR type.
 
     This endpoint intelligently searches for the project in both NW and BSR tables:
     1. First tries to find the project in NW table (nw_PresentationInfo_Nw2_apr2020)
-    2. If not found in NW, tries BSR table (BSR_PresentationInfo)
+    2. If not found in NW, tries BSR table (BSR_PresentationInfo) - includes BSR and NSR
     3. Returns project details if found in either table
 
     Args:
@@ -253,7 +253,9 @@ async def get_project_info(project_id: int):
 
     Returns:
         Dictionary containing all project details returned by the stored procedure.
-        Includes an additional field "project_type" indicating "NW" or "BSR".
+        Includes additional fields:
+        - "project_type": "NW" or "BSR" (BSR includes NSR projects)
+        - "page_number": The starting slide/page number for the project
 
     Raises:
         HTTPException: 404 if project not found in either table, 500 if database error occurs.
@@ -294,13 +296,42 @@ async def get_project_info(project_id: int):
         project_details = bi_guidelines_service.get_bsr_project_info(project_id)
 
         if project_details is not None:
-            # Found in BSR table
+            # Found in BSR table (includes BSR and NSR projects)
             project_details["project_type"] = "BSR"
-            # Add page_number if SlideNumber exists
-            page_number = project_details.get("slidenumber") or project_details.get("SlideNumber")
-            if page_number is not None:
-                project_details["page_number"] = page_number
-            logger.info("Retrieved BSR project info for project_id=%d", project_id)
+            # Add page_number: prefer field from SP, else default to 1
+            page_number = None
+
+            # Try to get from stored procedure result first
+            for key, val in project_details.items():
+                key_lower = str(key).lower()
+                if key_lower in ("slidenumber", "page_number", "pagenumber", "startingslide"):
+                    page_number = val
+                    logger.debug("Found page_number from SP field '%s': %s", key, val)
+                    break
+
+            # If not found in SP, try fallback query to bsr_Master
+            if page_number is None:
+                try:
+                    with get_connection_scope(timeout=30) as cursor:
+                        # Query bsr_Master table for NameCandidateStartingSlide (same field as NW)
+                        cursor.execute(
+                            "SELECT NameCandidateStartingSlide FROM [BI_GUIDELINES].[dbo].[bsr_Master] WHERE PresentationId = ?",
+                            (project_id,),
+                        )
+                        row = cursor.fetchone()
+                        if row and row[0] is not None:
+                            page_number = row[0]
+                            logger.debug("Found page_number from bsr_Master.NameCandidateStartingSlide: %s", page_number)
+                except Exception as e:
+                    logger.warning("Failed to query page_number from bsr_Master for project %d: %s", project_id, str(e))
+
+            # Default to 1 if still not found
+            if page_number is None:
+                page_number = 1
+                logger.debug("Using default page_number=1 for BSR project %d", project_id)
+
+            project_details["page_number"] = page_number
+            logger.info("Retrieved BSR project info for project_id=%d with page_number=%s", project_id, page_number)
             return project_details
 
         # Not found in either table
@@ -384,6 +415,7 @@ async def get_bsr_project_info(project_id: int):
             "lastupdatedate": "2025-01-15T10:30:00",
             "slidenumber": 3,
             "iswideppt": 0,
+            "page_number": 3,
             "categories": [
                 {
                     "category": "Technology",
@@ -405,7 +437,40 @@ async def get_bsr_project_info(project_id: int):
                 detail=f"BSR Project with ID {project_id} not found"
             )
 
-        logger.info("Retrieved BSR project info for project_id=%d", project_id)
+        # Add page_number: prefer field from SP, else fetch from bsr_PresentationMaster, else default to 1
+        page_number = None
+
+        # Try to get from stored procedure result first
+        for key, val in project_details.items():
+            key_lower = str(key).lower()
+            if key_lower in ("slidenumber", "page_number", "pagenumber", "startingslide"):
+                page_number = val
+                logger.debug("Found page_number from SP field '%s': %s", key, val)
+                break
+
+        # If not found in SP, try fallback query to bsr_Master
+        if page_number is None:
+            try:
+                with get_connection_scope(timeout=30) as cursor:
+                    # Query bsr_Master table for NameCandidateStartingSlide (same field as NW)
+                    cursor.execute(
+                        "SELECT NameCandidateStartingSlide FROM [BI_GUIDELINES].[dbo].[bsr_Master] WHERE PresentationId = ?",
+                        (project_id,),
+                    )
+                    row = cursor.fetchone()
+                    if row and row[0] is not None:
+                        page_number = row[0]
+                        logger.debug("Found page_number from bsr_Master.NameCandidateStartingSlide: %s", page_number)
+            except Exception as e:
+                logger.warning("Failed to query page_number from bsr_Master for project %d: %s", project_id, str(e))
+
+        # Default to 1 if still not found
+        if page_number is None:
+            page_number = 1
+            logger.debug("Using default page_number=1 for BSR project %d", project_id)
+
+        project_details["page_number"] = page_number
+        logger.info("Retrieved BSR project info for project_id=%d with page_number=%s", project_id, page_number)
         return project_details
 
     except HTTPException:

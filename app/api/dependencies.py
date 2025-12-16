@@ -161,30 +161,32 @@ async def validate_display_name(
 
 
 async def validate_project_type(
-    project_type: str = Form(..., description="Project type: 'bipresents' or 'nw'")
+    project_type: str = Form(..., description="Project type: 'bipresents', 'nw', 'dw', or 'nsr'")
 ) -> str:
     """Validate project type.
-    
+
     Args:
         project_type: The project type to validate.
-        
+
     Returns:
         The validated project type.
-        
+
     Raises:
         HTTPException: If project type is not valid.
     """
     valid_project_types = [
         settings.PROJECT_TYPE_BIPRESENTS,
         settings.PROJECT_TYPE_NW,
+        settings.PROJECT_TYPE_DW,
+        "nsr",  # NSR support
     ]
-    
+
     if not project_type or project_type not in valid_project_types:
         raise HTTPException(
             status_code=400,
             detail=f"Project type must be one of: {', '.join(valid_project_types)}",
         )
-    
+
     return project_type
 
 

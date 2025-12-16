@@ -22,7 +22,7 @@ def sanitize_folder_name(folder_name: str) -> str:
     """
     sanitized = _SANITIZE_PATTERN.sub("", folder_name)
     sanitized = _REPLACE_PATTERN.sub("_", sanitized)
-    sanitized = sanitized.strip("_.")
+    sanitized = sanitized.strip("_. ")  # Also strip spaces
     if not sanitized:
         sanitized = "unnamed_project"
     return sanitized[:50].upper()

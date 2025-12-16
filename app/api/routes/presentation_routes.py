@@ -553,21 +553,42 @@ async def replace_project_images(
         sanitized_display = sanitize_folder_name(project_name)
 
         # Locate presentation ID by display_name (original or sanitized) and fetch metadata
+        # Try to find in appropriate table based on project_type
         with get_connection_scope(timeout=30) as cursor:
-            cursor.execute(
-                """
-                SELECT TOP 1 PresentationId, Project, DisplayName,
-                       NameCandidateBGType, NameCandidateBGName,
-                       NameCandidateStartingSlide, PresentationType,
-                       UploadedBy, BSRDisplayName, isParticipantsVote,
-                       isWideScreenPPT, isAWSLinkReq, NameCandidateFileName,
-                       MainPptFileName
-                FROM [BI_GUIDELINES].[dbo].[nw_Master]
-                WHERE DisplayName IN (?, ?)
-                ORDER BY PresentationId DESC
-                """,
-                (project_name, sanitized_display),
-            )
+            # Determine which table to query based on project_type
+            if project_type.lower() in ["bsr", "bipresents"]:
+                table_name = "bsr_Master"
+                cursor.execute(
+                    """
+                    SELECT TOP 1 PresentationId, Project, DisplayName,
+                           '' as NameCandidateBGType, '' as NameCandidateBGName,
+                           1 as NameCandidateStartingSlide, PresentationType,
+                           UploadedBy, DisplayName as BSRDisplayName, 0 as isParticipantsVote,
+                           1 as isWideScreenPPT, 0 as isAWSLinkReq, '' as NameCandidateFileName,
+                           MainPptFileName
+                    FROM [BI_GUIDELINES].[dbo].[bsr_Master]
+                    WHERE DisplayName IN (?, ?)
+                    ORDER BY PresentationId DESC
+                    """,
+                    (project_name, sanitized_display),
+                )
+            else:
+                # NW, DW, NSR use nw_Master
+                table_name = "nw_Master"
+                cursor.execute(
+                    """
+                    SELECT TOP 1 PresentationId, Project, DisplayName,
+                           NameCandidateBGType, NameCandidateBGName,
+                           NameCandidateStartingSlide, PresentationType,
+                           UploadedBy, BSRDisplayName, isParticipantsVote,
+                           isWideScreenPPT, isAWSLinkReq, NameCandidateFileName,
+                           MainPptFileName
+                    FROM [BI_GUIDELINES].[dbo].[nw_Master]
+                    WHERE DisplayName IN (?, ?)
+                    ORDER BY PresentationId DESC
+                    """,
+                    (project_name, sanitized_display),
+                )
             row = cursor.fetchone()
 
         if not row:
@@ -620,29 +641,295 @@ async def replace_project_images(
                 ppt_bytes = f.read()
 
         # Select Excel: uploaded -> else latest in root -> else DB/fallback
+        # SPECIAL CASE: BSR, DW, NSR projects don't require Excel, only PPTX for image updates
+        logger.info(f"Processing project_type: {project_type}")
         excel_path = None
-        if excel_bytes:
-            safe_excel_name = Path(validated_excel[0].filename if isinstance(validated_excel, tuple) else excelFile.filename).name
-            excel_path = output_base / safe_excel_name
-            with open(excel_path, "wb") as f:
-                f.write(excel_bytes)
-        else:
-            candidates = sorted(output_base.glob("*.xlsx"), key=lambda f: f.stat().st_mtime, reverse=True)
-            if candidates:
-                excel_path = candidates[0]
+
+        # Only require Excel for NW projects
+        if project_type.lower() not in ["bsr", "bipresents", "dw", "nsr"]:
+            # NW projects REQUIRE Excel
+            if excel_bytes:
+                safe_excel_name = Path(validated_excel[0].filename if isinstance(validated_excel, tuple) else excelFile.filename).name
+                excel_path = output_base / safe_excel_name
+                with open(excel_path, "wb") as f:
+                    f.write(excel_bytes)
             else:
-                candidate = output_base / Path(excel_filename_db).name
-                if candidate.exists():
-                    excel_path = candidate
-        if not excel_path or not excel_path.exists():
-            raise HTTPException(status_code=404, detail="No Excel file found or provided in project root")
-        if not excel_bytes:
-            with open(excel_path, "rb") as f:
-                excel_bytes = f.read()
+                candidates = sorted(output_base.glob("*.xlsx"), key=lambda f: f.stat().st_mtime, reverse=True)
+                if candidates:
+                    excel_path = candidates[0]
+                else:
+                    candidate = output_base / Path(excel_filename_db).name
+                    if candidate.exists():
+                        excel_path = candidate
+
+            if not excel_path or not excel_path.exists():
+                raise HTTPException(status_code=404, detail="No Excel file found or provided in project root (NW projects require Excel)")
+            if not excel_bytes:
+                with open(excel_path, "rb") as f:
+                    excel_bytes = f.read()
+        else:
+            # BSR, DW, NSR: Excel is optional
+            logger.info(f"{project_type.upper()} project - Excel is optional, will use simplified flow")
+            if excel_bytes:
+                safe_excel_name = Path(validated_excel[0].filename if isinstance(validated_excel, tuple) else excelFile.filename).name
+                excel_path = output_base / safe_excel_name
+                with open(excel_path, "wb") as f:
+                    f.write(excel_bytes)
 
         # Determine page_number to use
         final_page_number = page_number if page_number is not None else page_number_db
 
+        # ============ RECREATE FROM SCRATCH FLOW FOR BSR, NSR, DW PROJECTS ============
+        # For these project types, recreate the entire project from scratch using the PPTX
+        # This ensures the database is fully updated like a new project creation
+        if project_type.lower() in ["bsr", "bipresents", "dw", "nsr"]:
+            logger.info("%s project detected - recreating project from scratch with overwrite", project_type.upper())
+
+            # Recreate project from scratch based on project type
+            if project_type.lower() in ["bsr", "bipresents"]:
+                # BSR projects: recreate using create_bsr_presentation
+                logger.info("Recreating BSR project from scratch: %s / %s", project_db, display_name_db)
+
+                result = presentation_service.create_bsr_presentation(
+                    project_name=project_db,
+                    display_name=display_name_db,
+                    slide_number=final_page_number,
+                    presentation_type=presentation_type_db,
+                    user_name=user_name_db,
+                    is_wide_ppt=is_wide_ppt_db,
+                    pptx_content=ppt_bytes,
+                    pptx_filename=ppt_path.name,
+                    categories=None,  # No categories for replace flow
+                    overwrite_existing=True,  # Always overwrite in replace flow
+                    progress_callback=None,
+                )
+
+                logger.info("BSR project recreated successfully: ID=%d, slides=%d", result["presentation_id"], result["total_slides"])
+
+                return ReplaceProjectImagesResponse(
+                    message=f"BSR project recreated successfully from scratch",
+                    project_name=project_name,
+                    project_type=project_type,
+                    total_images=result["total_slides"],
+                    images=[],  # Images are in DB but not returned in this flow
+                    thumbnails=[],
+                    backup_file=None,
+                    presentation_id=result["presentation_id"],
+                )
+
+            else:
+                # NSR and DW projects: recreate without Excel requirement
+                logger.info("Recreating %s project from scratch: %s / %s", project_type.upper(), project_db, display_name_db)
+
+                # For DW, page_number is not needed, use 1 as default
+                if project_type.lower() == "dw":
+                    final_page_number = 1
+
+                # Convert PPTX to images first
+                from app.services.pptx_service import pptx_service
+                pptx_result = pptx_service.convert_pptx_to_images(
+                    file_content=ppt_bytes,
+                    filename=ppt_path.name,
+                    display_name=sanitized_display,
+                    project_type=project_type,
+                )
+
+                images = pptx_result.get("images", [])
+                logger.info("%s PPTX converted to %d images", project_type.upper(), len(images))
+
+                # Delete existing presentation data to recreate from scratch
+                with get_connection_scope(timeout=30) as cursor:
+                    # Delete details first (foreign key constraint)
+                    cursor.execute(
+                        "DELETE FROM [BI_GUIDELINES].[dbo].[nw_Details] WHERE PresentationId = ?",
+                        (presentation_id,)
+                    )
+                    # Delete master record
+                    cursor.execute(
+                        "DELETE FROM [BI_GUIDELINES].[dbo].[nw_Master] WHERE PresentationId = ?",
+                        (presentation_id,)
+                    )
+                    cursor.connection.commit()
+                    logger.info("Deleted existing %s project data for ID=%d", project_type.upper(), presentation_id)
+
+                # Recreate master record using stored procedure
+                with get_connection_scope(timeout=30) as cursor:
+                    master_sql = """
+                        EXEC [dbo].[nw_InsertPresentationMaster_sep2025]
+                            @Project=?, @DisplayName=?, @MainPptFileName=?, @NameCandidateFileName=?,
+                            @NameCandidateBGType=?, @NameCandidateBGName=?, @NameCandidateStartingSlide=?,
+                            @PresentationType=?, @UploadedBy=?, @BSRDisplayName=?,
+                            @isParticipantsVote=?, @isWideScreenPPT=?, @isAWSLinkReq=?;
+                    """
+                    cursor.execute(
+                        master_sql,
+                        (
+                            project_db,                 # @Project
+                            display_name_db,            # @DisplayName
+                            ppt_path.name,              # @MainPptFileName
+                            "",                         # @NameCandidateFileName (no Excel for NSR/DW)
+                            bg_type_db,                 # @NameCandidateBGType
+                            bg_name_db,                 # @NameCandidateBGName
+                            final_page_number,          # @NameCandidateStartingSlide
+                            presentation_type_db,       # @PresentationType
+                            user_name_db,               # @UploadedBy
+                            mobile_link_bsr_db,         # @BSRDisplayName
+                            participant_vote_db,        # @isParticipantsVote
+                            is_wide_ppt_db,             # @isWideScreenPPT
+                            is_aws_email_db,            # @isAWSLinkReq
+                        )
+                    )
+
+                    # Get the new presentation ID
+                    presentation_id_new = None
+                    while True:
+                        try:
+                            row = cursor.fetchone()
+                            if row:
+                                presentation_id_new = int(row[0])
+                                logger.info("%s master record created: ID=%d", project_type.upper(), presentation_id_new)
+                                break
+                        except Exception:
+                            if cursor.nextset():
+                                continue
+                            break
+
+                    if not presentation_id_new:
+                        raise HTTPException(status_code=500, detail="Failed to create master record")
+
+                    cursor.connection.commit()
+
+                # Insert detail records for each slide
+                with get_connection_scope(timeout=30) as cursor:
+                    detail_sql = """
+                        EXEC [dbo].[nw_InsertPresentationDetail_copy]
+                            @PresentationId=?, @SlideNumber=?, @SlideType=?, @SlideBGFileName=?,
+                            @SlideDescription=?, @NameGroup=?, @NameCategory=?, @Name=?,
+                            @NameRationale=?, @NameNotation=?, @KanaNames=?, @NameLogo=?,
+                            @TemplateId=?, @NameSubGroup=?;
+                    """
+
+                    slide_idx = 1
+                    is_dw_project = project_type.lower() == "dw"
+
+                    if is_dw_project:
+                        # DW: Insert all slides as Image (no NameSummary slide)
+                        for pptx_idx in range(len(images)):
+                            image_path = images[pptx_idx]
+                            cursor.execute(
+                                detail_sql,
+                                (
+                                    presentation_id_new,    # @PresentationId
+                                    slide_idx,              # @SlideNumber (DB position)
+                                    "Image",                # @SlideType
+                                    image_path,             # @SlideBGFileName
+                                    f"Slide {pptx_idx + 1}",  # @SlideDescription (PPTX slide number)
+                                    "",                     # @NameGroup
+                                    "",                     # @NameCategory
+                                    "",                     # @Name
+                                    "",                     # @NameRationale
+                                    "",                     # @NameNotation
+                                    "",                     # @KanaNames
+                                    "",                     # @NameLogo
+                                    0,                      # @TemplateId
+                                    "",                     # @NameSubGroup
+                                )
+                            )
+                            slide_idx += 1
+                    else:
+                        # NSR: Insert NameSummary slide at page_number position
+                        # Insert slides BEFORE the summary position
+                        for pptx_idx in range(min(final_page_number - 1, len(images))):
+                            image_path = images[pptx_idx]
+                            cursor.execute(
+                                detail_sql,
+                                (
+                                    presentation_id_new,    # @PresentationId
+                                    slide_idx,              # @SlideNumber (DB position)
+                                    "Image",                # @SlideType
+                                    image_path,             # @SlideBGFileName
+                                    f"Slide {pptx_idx + 1}",  # @SlideDescription (PPTX slide number)
+                                    "",                     # @NameGroup
+                                    "",                     # @NameCategory
+                                    "",                     # @Name
+                                    "",                     # @NameRationale
+                                    "",                     # @NameNotation
+                                    "",                     # @KanaNames
+                                    "",                     # @NameLogo
+                                    0,                      # @TemplateId
+                                    "",                     # @NameSubGroup
+                                )
+                            )
+                            slide_idx += 1
+
+                        # Insert SUMMARY slide at the specified page_number position
+                        if final_page_number - 1 < len(images):
+                            summary_image_path = images[final_page_number - 1]
+                            cursor.execute(
+                                detail_sql,
+                                (
+                                    presentation_id_new,    # @PresentationId
+                                    slide_idx,              # @SlideNumber (DB position)
+                                    "NameSummary",          # @SlideType
+                                    summary_image_path,     # @SlideBGFileName
+                                    "Brainstorm",           # @SlideDescription
+                                    "",                     # @NameGroup
+                                    "",                     # @NameCategory
+                                    "",                     # @Name
+                                    "",                     # @NameRationale
+                                    "",                     # @NameNotation
+                                    "",                     # @KanaNames
+                                    "",                     # @NameLogo
+                                    0,                      # @TemplateId
+                                    "",                     # @NameSubGroup
+                                )
+                            )
+                            slide_idx += 1
+
+                        # Insert slides AFTER the summary position
+                        for pptx_idx in range(final_page_number, len(images)):
+                            image_path = images[pptx_idx]
+                            cursor.execute(
+                                detail_sql,
+                                (
+                                    presentation_id_new,    # @PresentationId
+                                    slide_idx,              # @SlideNumber (DB position)
+                                    "Image",                # @SlideType
+                                    image_path,             # @SlideBGFileName
+                                    f"Slide {pptx_idx + 1}",  # @SlideDescription (PPTX slide number)
+                                    "",                     # @NameGroup
+                                    "",                     # @NameCategory
+                                    "",                     # @Name
+                                    "",                     # @NameRationale
+                                    "",                     # @NameNotation
+                                    "",                     # @KanaNames
+                                    "",                     # @NameLogo
+                                    0,                      # @TemplateId
+                                    "",                     # @NameSubGroup
+                                )
+                            )
+                            slide_idx += 1
+
+                    cursor.connection.commit()
+
+                # Calculate total slides (DW: same as PPTX, NSR: PPTX + 1 NameSummary)
+                total_slides_in_db = len(images) if is_dw_project else len(images) + 1
+                summary_msg = "no NameSummary" if is_dw_project else "+ NameSummary=1"
+                logger.info("%s project recreated successfully: ID=%d, slides=%d (PPTX=%d %s)",
+                           project_type.upper(), presentation_id_new, total_slides_in_db, len(images), summary_msg)
+
+                return ReplaceProjectImagesResponse(
+                    message=f"{project_type.upper()} project recreated successfully from scratch",
+                    project_name=project_name,
+                    project_type=project_type,
+                    total_images=total_slides_in_db,  # Total slides in DB (PPTX + NameSummary)
+                    images=images,
+                    thumbnails=pptx_result.get("thumbnails", []),
+                    backup_file=None,
+                    presentation_id=presentation_id_new,
+                )
+
+        # ============ STANDARD FLOW FOR NW PROJECTS (with Excel) ============
         # Update DB with filenames and page_number
         with get_connection_scope(timeout=30) as cursor:
             cursor.execute(
@@ -651,7 +938,7 @@ async def replace_project_images(
                 SET MainPptFileName = ?, NameCandidateFileName = ?, NameCandidateStartingSlide = ?
                 WHERE PresentationId = ?
                 """,
-                (ppt_path.name, excel_path.name, final_page_number, presentation_id),
+                (ppt_path.name, excel_path.name if excel_path else excel_filename_db, final_page_number, presentation_id),
             )
             cursor.connection.commit()
 
