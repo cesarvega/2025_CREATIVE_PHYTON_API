@@ -78,25 +78,89 @@ def _apply_test_name_order(all_rows: list, test_name_order: TestNameOrder) -> li
         return all_rows
 
     elif test_name_order == TestNameOrder.RANDOMIZE:
-        # Randomize all rows
-        randomized = all_rows.copy()
-        random.shuffle(randomized)
-        logger.info("Applied Randomize: shuffled all %d rows", len(randomized))
-        return randomized
+        # Randomize rows while keeping category separators and group slides together
+        result = []
+        current_block = []
+
+        for row in all_rows:
+            # Extract values
+            raw_type = _clean(str(row[TYPE_COLUMN - 1].value) if len(row) >= TYPE_COLUMN else "")
+            raw_name = _clean(str(row[NAME_COLUMN - 1].value) if len(row) >= NAME_COLUMN else "")
+
+            # Check if this is a category separator (TYPE = "A", "B", "C", etc.)
+            is_separator = bool(raw_type and len(raw_type) == 1 and raw_type.isalpha())
+
+            # Check if this is a group slide (contains ##)
+            is_group = "##" in raw_name
+
+            if is_separator:
+                # Found a separator: randomize previous block and add separator
+                if current_block:
+                    random.shuffle(current_block)
+                    result.extend(current_block)
+                    current_block = []
+                result.append(row)
+            elif is_group:
+                # Group slide: keep it with the current block (will be randomized as a unit)
+                current_block.append(row)
+            else:
+                # Individual name: add to current block for randomization
+                current_block.append(row)
+
+        # Randomize remaining block
+        if current_block:
+            random.shuffle(current_block)
+            result.extend(current_block)
+
+        logger.info("Applied Randomize: shuffled %d rows while preserving category separators and group slides", len(result))
+        return result
 
     elif test_name_order == TestNameOrder.RANDOMIZE_TOP_5:
-        # Randomize only the first 5 rows, keep the rest in order
-        if len(all_rows) <= 5:
-            randomized = all_rows.copy()
-            random.shuffle(randomized)
-            logger.info("Applied Randomize_top_5: shuffled all %d rows (less than 5)", len(randomized))
-            return randomized
-        else:
-            top_5 = all_rows[:5].copy()
-            rest = all_rows[5:]
-            random.shuffle(top_5)
-            logger.info("Applied Randomize_top_5: shuffled first 5 rows, kept %d rows in order", len(rest))
-            return top_5 + rest
+        # Randomize only the first 5 individual names, keeping separators and groups in place
+        result = []
+        individual_names = []
+
+        for row in all_rows:
+            raw_type = _clean(str(row[TYPE_COLUMN - 1].value) if len(row) >= TYPE_COLUMN else "")
+            raw_name = _clean(str(row[NAME_COLUMN - 1].value) if len(row) >= NAME_COLUMN else "")
+
+            is_separator = bool(raw_type and len(raw_type) == 1 and raw_type.isalpha())
+            is_group = "##" in raw_name
+
+            if is_separator or is_group:
+                # Process collected individual names if we have 5 or more
+                if len(individual_names) >= 5:
+                    top_5 = individual_names[:5]
+                    rest = individual_names[5:]
+                    random.shuffle(top_5)
+                    result.extend(top_5)
+                    result.extend(rest)
+                    individual_names = []
+                elif individual_names:
+                    # Less than 5, just add them as-is
+                    result.extend(individual_names)
+                    individual_names = []
+
+                # Add separator or group
+                result.append(row)
+            else:
+                # Collect individual names
+                individual_names.append(row)
+
+        # Process remaining individual names
+        if individual_names:
+            if len(individual_names) >= 5:
+                top_5 = individual_names[:5]
+                rest = individual_names[5:]
+                random.shuffle(top_5)
+                result.extend(top_5)
+                result.extend(rest)
+            else:
+                random.shuffle(individual_names)
+                result.extend(individual_names)
+
+        logger.info("Applied Randomize_top_5: shuffled first 5 individual names in each section", )
+        return result
 
     # Default fallback
     return all_rows
