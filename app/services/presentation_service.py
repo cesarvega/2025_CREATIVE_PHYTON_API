@@ -146,12 +146,12 @@ class PresentationService:
             if not was_overwritten:
                 self._validate_bsr_display_name_not_used(project_name, clean_display_name)
 
-            # 3. Convert PowerPoint to images (40-55%)
+            # 3. Insert Brainstorm slide using OpenXML and convert to images (40-55%)
             if progress_callback:
                 progress_callback(40)
-            
-            logger.info("Converting PowerPoint to images for display_name=%s", clean_display_name)
-            
+
+            logger.info("Inserting Brainstorm slide at position %d for display_name=%s", slide_number, clean_display_name)
+
             # IMPORTANT: Force deletion of existing folder before conversion
             # This ensures old images are completely removed when overwriting
             if was_overwritten:
@@ -160,10 +160,89 @@ class PresentationService:
                     logger.info("🔄 Forced deletion of old image folder before recreating: %s", clean_display_name)
                 except Exception as e:
                     logger.warning("Failed to pre-delete folder (may not exist): %s", str(e))
-            
+
+            # Use OpenXML to insert Brainstorm slide at specified position
+            try:
+                from pptx import Presentation
+                from pptx.util import Inches, Pt
+                from pptx.enum.text import PP_ALIGN
+                from pptx.enum.shapes import MSO_SHAPE
+                from pptx.dml.color import RGBColor
+                from io import BytesIO
+
+                # Load the presentation
+                presentation = Presentation(BytesIO(pptx_content))
+
+                # Calculate insert position (convert from 1-based to 0-based)
+                insert_position = max(0, slide_number - 1)
+
+                # Insert Brainstorm slide
+                if insert_position <= len(presentation.slides):
+                    # Get reference slide for background
+                    reference_index = min(insert_position, len(presentation.slides) - 1)
+                    reference_slide = presentation.slides[reference_index]
+                    layout = reference_slide.slide_layout
+
+                    # Add new slide
+                    new_slide = presentation.slides.add_slide(layout)
+
+                    # Copy background
+                    from copy import deepcopy
+                    source_bg_nodes = reference_slide._element.xpath("./p:cSld/p:bg")
+                    if source_bg_nodes:
+                        target_c_sld = new_slide._element.xpath("./p:cSld")
+                        if target_c_sld:
+                            target_c_sld = target_c_sld[0]
+                            for existing in target_c_sld.xpath("./p:bg"):
+                                target_c_sld.remove(existing)
+                            target_c_sld.insert(0, deepcopy(source_bg_nodes[0]))
+
+                    # Move slide to correct position
+                    slide_id_list = presentation.slides._sldIdLst
+                    new_id = slide_id_list[-1]
+                    slide_id_list.remove(new_id)
+                    target_index = insert_position if insert_position <= len(slide_id_list) else len(slide_id_list)
+                    slide_id_list.insert(target_index, new_id)
+
+                    # Clear placeholders
+                    for shape in list(new_slide.shapes)[::-1]:
+                        try:
+                            if getattr(shape, "is_placeholder", False):
+                                new_slide.shapes._spTree.remove(shape._element)
+                        except Exception:
+                            continue
+
+                    # Add "Brainstorm" title
+                    slide_width = presentation.slide_width
+                    title_box = new_slide.shapes.add_textbox(
+                        Inches(1), Inches(2), slide_width - Inches(2), Inches(1)
+                    )
+                    title_tf = title_box.text_frame
+                    title_tf.clear()
+                    title_para = title_tf.paragraphs[0]
+                    title_para.text = "Brainstorm"
+                    title_para.font.size = Pt(44)
+                    title_para.font.bold = True
+                    title_para.font.color.rgb = RGBColor(0, 0, 139)  # Navy blue
+                    title_para.alignment = PP_ALIGN.CENTER
+
+                    logger.info("✅ Inserted Brainstorm slide at position %d", insert_position + 1)
+
+                # Save modified PPTX
+                buffer = BytesIO()
+                presentation.save(buffer)
+                buffer.seek(0)
+                modified_pptx_content = buffer.read()
+
+            except Exception as e:
+                logger.error("Error inserting Brainstorm slide: %s", str(e))
+                # Fall back to original PPTX if insertion fails
+                modified_pptx_content = pptx_content
+
+            # Convert the modified PowerPoint to images
             # For BSR we store assets under the bipresents (bsr_slides) root
             pptx_data = pptx_service.convert_pptx_to_images(
-                file_content=pptx_content,
+                file_content=modified_pptx_content,
                 filename=pptx_filename,
                 display_name=clean_display_name,  # Use display_name for BSR folder structure
                 project_type="bipresents",  # Ensure URLs resolve to bsr_slides
@@ -480,10 +559,8 @@ class PresentationService:
                         for detail_item in slides_data.get("details", []):
                             slide_type = detail_item.get("slide_type", "")
 
-                            # NameSummary is not rendered in the OpenXML backup (currently),
-                            # so keep its existing background and DO NOT advance the cursor.
-                            if slide_type == "NameSummary":
-                                continue
+                            # NameSummary is now rendered in the OpenXML backup,
+                            # so it should be mapped to an image like other slides
 
                             if image_cursor >= total_images:
                                 logger.warning(
@@ -2925,80 +3002,58 @@ class PresentationService:
 
                     slide_idx = 1
 
-                    # Insert slides BEFORE summary position
-                    for idx in range(min(slide_number - 1, len(images))):
-                        # Use the actual image path from pptx_data, not thumbnails
+                    # Now that we insert the Brainstorm slide using OpenXML,
+                    # the images array includes it at the correct position.
+                    # We just need to identify which image is the NameSummary slide.
+
+                    for idx in range(len(images)):
                         image_path = images[idx]
                         print(image_path)
-                        title = slide_titles[idx] if idx < len(slide_titles) else f"Slide {idx + 1}"
 
-                        cursor.execute(
-                            "EXEC [BI_GUIDELINES].[dbo].[bsr_InsertPresentationDetail] ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?;",
-                            (
-                                presentation_id,
-                                slide_idx,
-                                "Image",
-                                image_path,
-                                title,
-                                "",  # @Param6
-                                "",  # @Param7
-                                "",  # @Param8
-                                "",  # @Param9
-                                "",  # @Param10
-                                "",  # @Param11
-                                "",  # @Param12
-                                0,   # @BGTemplateId
+                        # The NameSummary slide is at position slide_number - 1 (0-based)
+                        if idx == slide_number - 1:
+                            # This is the Brainstorm slide we inserted
+                            cursor.execute(
+                                "EXEC [BI_GUIDELINES].[dbo].[bsr_InsertPresentationDetail] ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?;",
+                                (
+                                    presentation_id,
+                                    slide_idx,
+                                    "NameSummary",
+                                    image_path,
+                                    "Brainstorm",
+                                    "",  # @Param6
+                                    "",  # @Param7
+                                    "",  # @Param8
+                                    "",  # @Param9
+                                    "",  # @Param10
+                                    "",  # @Param11
+                                    "",  # @Param12
+                                    0,   # @BGTemplateId
+                                )
                             )
-                        )
-                        slide_idx += 1
-
-                    # Insert SUMMARY slide at specified position (slide_number - 1 because 0-indexed)
-                    if slide_number - 1 < len(images):
-                        summary_image_path = images[slide_number - 1]
-                        cursor.execute(
-                            "EXEC [BI_GUIDELINES].[dbo].[bsr_InsertPresentationDetail] ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?;",
-                            (
-                                presentation_id,
-                                slide_idx,
-                                "NameSummary",
-                                summary_image_path,
-                                "Brainstorm",
-                                "",  # @Param6
-                                "",  # @Param7
-                                "",  # @Param8
-                                "",  # @Param9
-                                "",  # @Param10
-                                "",  # @Param11
-                                "",  # @Param12
-                                0,   # @BGTemplateId
+                            logger.info(f"Inserted NameSummary slide at position {slide_idx} with image {image_path}")
+                        else:
+                            # Regular image slide
+                            title = slide_titles[idx] if idx < len(slide_titles) else f"Slide {idx + 1}"
+                            cursor.execute(
+                                "EXEC [BI_GUIDELINES].[dbo].[bsr_InsertPresentationDetail] ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?;",
+                                (
+                                    presentation_id,
+                                    slide_idx,
+                                    "Image",
+                                    image_path,
+                                    title,
+                                    "",  # @Param6
+                                    "",  # @Param7
+                                    "",  # @Param8
+                                    "",  # @Param9
+                                    "",  # @Param10
+                                    "",  # @Param11
+                                    "",  # @Param12
+                                    0,   # @BGTemplateId
+                                )
                             )
-                        )
-                        slide_idx += 1
 
-                    # Insert remaining slides AFTER summary
-                    for idx in range(slide_number, len(images)):
-                        # Use the actual image path from pptx_data, not thumbnails
-                        image_path = images[idx]
-                        title = slide_titles[idx] if idx < len(slide_titles) else f"Slide {idx + 1}"
-
-                        cursor.execute(
-                            "EXEC [BI_GUIDELINES].[dbo].[bsr_InsertPresentationDetail] ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?;",
-                            (
-                                presentation_id,
-                                slide_idx,
-                                "Image",
-                                image_path,
-                                title,
-                                "",  # @Param6
-                                "",  # @Param7
-                                "",  # @Param8
-                                "",  # @Param9
-                                "",  # @Param10
-                                "",  # @Param11
-                                "",  # @Param12
-                                0,   # @BGTemplateId
-                            )
-                        )
                         slide_idx += 1
 
                     # Normalize any 'Thumbnails' paths to full-size image paths for this presentation

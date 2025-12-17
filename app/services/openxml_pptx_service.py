@@ -315,6 +315,12 @@ class OpenXMLPPTXService:
             current_position += 1
             inserted += 1
 
+        # Insert Name Summary slide at the end
+        logger.info(f"Adding Name Summary slide at position {current_position}")
+        summary_slide = self.insert_slide_with_background(presentation, current_position)
+        self._render_name_summary_slide(presentation, summary_slide)
+        inserted += 1
+
         return inserted
 
     def _normalize_headers(self, header_row: List[Any]) -> Dict[str, int]:
@@ -635,6 +641,38 @@ class OpenXMLPPTXService:
                 para.font.color.rgb = RGBColor(0, 0, 0)
 
         # Group slides intentionally omit footer/comment boxes and logos to keep them clean.
+
+    def _render_name_summary_slide(self, presentation: Presentation, slide) -> None:
+        """Render Name Summary slide with blue header bar."""
+        slide_width = presentation.slide_width
+
+        # Blue header bar (matching reference image style)
+        header_height = Inches(1.0)
+        header_box = slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE,
+            0,
+            0,
+            slide_width,
+            header_height
+        )
+        header_box.fill.solid()
+        header_box.fill.fore_color.rgb = NAVY_BLUE  # Dark blue like reference image
+        header_box.line.fill.background()
+
+        # Header text "Name Candidates - Summary" in white
+        header_text_box = slide.shapes.add_textbox(
+            Inches(0.5), Inches(0.25), slide_width - Inches(1.0), Inches(0.5)
+        )
+        header_tf = header_text_box.text_frame
+        header_tf.clear()
+        header_para = header_tf.paragraphs[0]
+        header_para.text = "Name Candidates - Summary"
+        header_para.font.size = Pt(36)
+        header_para.font.bold = True
+        header_para.font.color.rgb = RGBColor(255, 255, 255)  # White text
+        header_para.alignment = PP_ALIGN.LEFT
+
+        logger.info("Rendered Name Summary slide")
 
 
 # Singleton instance
