@@ -411,6 +411,171 @@ def _create_feedback_template_background(
         pythoncom.CoUninitialize()
 
 
+def _create_feedback_template_with_backup_background(
+    task_id: str,
+    presentation_id: int,
+    display_name: str,
+):
+    """Background task for generating feedback template and zipping with backup if available."""
+    # Initialize COM for this thread
+    pythoncom.CoInitialize()
+    try:
+        task_manager.update_status(task_id, TaskStatus.PROCESSING, progress=10)
+
+        logger.info(
+            "[Task %s] Starting feedback+backup bundle for presentation_id: %d",
+            task_id,
+            presentation_id,
+        )
+
+        # Create progress callback
+        def progress_callback(progress: int):
+            # Reserve last 10% for backup lookup/zip
+            capped = min(int(progress), 90)
+            task_manager.update_status(task_id, TaskStatus.PROCESSING, progress=capped)
+
+        task_manager.update_status(task_id, TaskStatus.PROCESSING, progress=20)
+
+        from pathlib import Path
+        from datetime import datetime
+        import zipfile
+
+        from app.config.db import get_connection_scope
+        from app.utils.download_utils import create_download_token
+        from app.utils.nw_data_utils import sanitize_filename
+        from app.utils.path_utils import get_nw_downloads_dir, resolve_project_output
+
+        # Generate feedback template with COM concurrency control
+        with com_manager.acquire(f"Feedback Template Bundle - Presentation {presentation_id}"):
+            feedback_path = feedback_template_generator.generate_feedback_template(
+                presentation_id=presentation_id,
+                display_name=display_name,
+                progress_callback=progress_callback,
+            )
+
+        feedback_token = None
+        if feedback_path and feedback_path.exists():
+            feedback_token = create_download_token(feedback_path)
+
+        # Locate backup PPTX if it exists
+        task_manager.update_status(task_id, TaskStatus.PROCESSING, progress=92)
+        backup_path: Path | None = None
+        main_ppt_filename = None
+
+        try:
+            with get_connection_scope(timeout=30) as cursor:
+                cursor.execute(
+                    """
+                    SELECT DisplayName, MainPptFileName
+                    FROM [BI_GUIDELINES].[dbo].[nw_Master]
+                    WHERE PresentationId = ?
+                    """,
+                    (presentation_id,),
+                )
+                row = cursor.fetchone()
+                if row:
+                    display_name_db = row[0] or display_name
+                    main_ppt_filename = row[1] or None
+                else:
+                    display_name_db = display_name
+
+            output_base, _ = resolve_project_output(
+                display_name_db,
+                "NW",
+                fallback_subdir="generated_presentations",
+            )
+
+            if main_ppt_filename:
+                candidate = output_base / Path(main_ppt_filename).name
+                if candidate.exists():
+                    backup_path = candidate
+
+            # Fallback: pick the most recent PPTX in the folder
+            if backup_path is None and output_base.exists():
+                candidates = sorted(
+                    output_base.glob("*.pptx"),
+                    key=lambda p: p.stat().st_mtime,
+                    reverse=True,
+                )
+                if candidates:
+                    backup_path = candidates[0]
+        except Exception as e:
+            logger.warning("[Task %s] Could not locate backup PPTX: %s", task_id, str(e))
+            backup_path = None
+
+        # If backup exists, zip both artifacts; else return feedback only
+        task_manager.update_status(task_id, TaskStatus.PROCESSING, progress=96)
+        output_path: Path = feedback_path
+        download_token = feedback_token
+        bundle_created = False
+        bundle_warning = None
+
+        if backup_path and backup_path.exists():
+            try:
+                downloads_dir = get_nw_downloads_dir()
+                downloads_dir.mkdir(parents=True, exist_ok=True)
+
+                safe_display_name = sanitize_filename(display_name)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                zip_filename = f"Feedback_Backup_{safe_display_name}_{timestamp}.zip"
+                zip_path = downloads_dir / zip_filename
+
+                with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                    zf.write(feedback_path, arcname=feedback_path.name)
+                    zf.write(backup_path, arcname=backup_path.name)
+
+                output_path = zip_path
+                download_token = create_download_token(zip_path)
+                bundle_created = True
+                logger.info("[Task %s] Created feedback+backup ZIP: %s", task_id, zip_path)
+            except Exception as zip_exc:
+                bundle_warning = f"Failed to create ZIP with backup: {str(zip_exc)}"
+                logger.warning("[Task %s] %s", task_id, bundle_warning)
+
+        # Mark as completed
+        task_manager.update_status(
+            task_id,
+            TaskStatus.COMPLETED,
+            progress=100,
+            result={
+                "file_path": str(output_path),
+                "file_name": output_path.name,
+                "download_token": download_token,
+                "feedback_file_path": str(feedback_path) if feedback_path else None,
+                "feedback_file_name": feedback_path.name if feedback_path else None,
+                "feedback_download_token": feedback_token,
+                "backup_file_path": str(backup_path) if backup_path and backup_path.exists() else None,
+                "backup_file_name": backup_path.name if backup_path and backup_path.exists() else None,
+                "backup_included": bundle_created,
+                "warning": bundle_warning,
+            },
+        )
+
+    except asyncio.CancelledError:
+        logger.warning("[Task %s] Background task cancelled during shutdown", task_id)
+        task_manager.update_status(
+            task_id,
+            TaskStatus.FAILED,
+            error="Task cancelled during server shutdown",
+        )
+        return
+    except Exception as e:
+        logger.error(
+            "[Task %s] Error generating feedback+backup bundle: %s",
+            task_id,
+            str(e),
+            exc_info=True,
+        )
+        task_manager.update_status(
+            task_id,
+            TaskStatus.FAILED,
+            error=f"Failed to generate feedback+backup bundle: {str(e)}",
+        )
+    finally:
+        # Uninitialize COM for this thread
+        pythoncom.CoUninitialize()
+
+
 def _generate_bsr_report_background(
     task_id: str,
     presentation_id: int,

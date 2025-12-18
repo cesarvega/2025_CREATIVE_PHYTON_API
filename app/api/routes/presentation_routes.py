@@ -59,6 +59,7 @@ from app.api.background_tasks import (
     _create_bsr_presentation_background,
     _download_results_background,
     _create_feedback_template_background,
+    _create_feedback_template_with_backup_background,
     _generate_bsr_report_background,
     _build_presentation_files_background,
 )
@@ -2635,6 +2636,97 @@ async def create_feedback_template(background_tasks: BackgroundTasks, request: C
         raise HTTPException(
             status_code=500,
             detail=f"Failed to queue feedback template: {str(e)}"
+        ) from e
+
+
+@router.post(
+    "/create-feedback-template-with-backup",
+    response_model=TaskCreatedResponse,
+    summary="Create NW Feedback Template and ZIP with backup (if exists)",
+    description=(
+        "Generates the NW Feedback Template (InputDocumentRationales) and, when a backup PPTX already exists "
+        "for the presentation, returns a ZIP containing both files.\n\n"
+        "If no backup PPTX is found, the endpoint returns the feedback template only.\n\n"
+        "**Output:**\n"
+        "- If backup exists: ZIP (feedback .doc + backup .pptx)\n"
+        "- Else: feedback .doc\n\n"
+        "This runs as a background task; poll `/api/presentations/tasks/{task_id}` for completion and tokens."
+    ),
+    responses={
+        404: {"description": "Presentation not found"},
+        500: {"description": "Unexpected error during generation"},
+        503: {"description": "Service at capacity"},
+    },
+)
+async def create_feedback_template_with_backup(
+    background_tasks: BackgroundTasks,
+    request: CreateFeedbackTemplateRequest,
+) -> TaskCreatedResponse:
+    """Generate feedback template and optionally bundle it with existing backup PPTX in a ZIP."""
+    try:
+        # Check concurrency limit before accepting the task
+        check_concurrency_limit()
+
+        # Get presentation info first
+        presentation_info = bi_guidelines_service.get_project_info(request.presentation_id)
+
+        if not presentation_info:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Presentation with ID {request.presentation_id} not found",
+            )
+
+        display_name = presentation_info.get("DisplayName", "Unknown")
+
+        # Create background task
+        task_id = task_manager.create_task(
+            task_type="create_feedback_template_with_backup",
+            description=f"Creating feedback template bundle for: {display_name}",
+            metadata={
+                "presentation_id": request.presentation_id,
+                "display_name": display_name,
+            },
+        )
+
+        logger.info(
+            "Created background task %s for feedback+backup bundle: presentation_id=%d",
+            task_id,
+            request.presentation_id,
+        )
+
+        # Submit task to concurrency manager
+        submission_result = await concurrency_manager.submit_task(
+            task_id=task_id,
+            task_type="create_feedback_template_with_backup",
+            func=_create_feedback_template_with_backup_background,
+            args=(task_id, request.presentation_id, display_name),
+            priority=TaskPriority.NORMAL,
+        )
+
+        task_info = task_manager.get_task(task_id)
+
+        return TaskCreatedResponse(
+            task_id=task_id,
+            status=submission_result["status"],
+            message=(
+                f"Feedback template bundle task "
+                f"{'started' if submission_result.get('will_start_immediately') else 'queued'} "
+                f"for presentation {request.presentation_id}"
+            ),
+            task_type="create_feedback_template_with_backup",
+            created_at=task_info["created_at"],
+            status_url=f"/api/presentations/tasks/{task_id}",
+            position=submission_result.get("position"),
+            estimated_wait_seconds=submission_result.get("estimated_wait_seconds"),
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Error queueing feedback+backup bundle: %s", str(e), exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to queue feedback+backup bundle: {str(e)}",
         ) from e
 
 @router.post(
