@@ -460,21 +460,21 @@ class FeedbackTemplateGenerator:
         return replacements_made
 
     def _populate_feedback_tables(self, doc, presentation_id: int, is_phonetics: bool) -> None:
-        """Populate the single feedback table with ALL names from all categories.
+        """Populate the feedback table using the correct stored procedure.
 
-        The InputDocumentRationales template has ONE large table that contains all names.
-        We need to gather results from multiple SummaryTypes and combine them into one table.
+        Uses nw_wdToIndicateFeedback SP which returns data already formatted for the Word table.
+        This SP returns columns: ' ', 'Test Name', 'Rationale', 'Positive', 'Neutral', 'Negative', 'Comments/Suggestions'
 
         Args:
             doc: Word Document object
             presentation_id: Presentation ID
-            is_phonetics: If True, use Phonetics summary types (Positive_Phonetics, etc.)
+            is_phonetics: Not used anymore, kept for compatibility
         """
         try:
             # Access tables with retry logic
             def get_table_count():
                 return doc.Tables.Count
-            
+
             total_tables = retry_com_operation(get_table_count, max_retries=5, delay=1.0)
             logger.info("Document has %d tables total", total_tables)
 
@@ -485,55 +485,185 @@ class FeedbackTemplateGenerator:
             # Get the main feedback table (should be table 1)
             def get_main_table():
                 return doc.Tables(1)
-            
+
             main_table = retry_com_operation(get_main_table, max_retries=5, delay=1.0)
             logger.info("Found main table - Rows: %d, Columns: %d", main_table.Rows.Count, main_table.Columns.Count)
 
-            # Gather ALL results from all summary types
-            all_results = []
+            # Call the correct SP: nw_wdToIndicateFeedback
+            # This SP returns all the data in the correct format for the Word table
+            logger.info("Fetching feedback data using nw_wdToIndicateFeedback")
 
-            # Define which summary types to fetch
-            if is_phonetics:
-                summary_types_to_fetch = [
-                    (SummaryType.POSITIVE_PHONETICS, "Positive Names"),
-                    (SummaryType.NEGATIVE_PHONETICS, "Neutral/Negative Names"),
-                    (SummaryType.RECONSIDER_PHONETICS, "Names For Reconsideration"),
-                ]
-            else:
-                summary_types_to_fetch = [
-                    (SummaryType.POSITIVE, "Positive Names"),
-                    (SummaryType.NEUTRAL, "Neutral Names"),
-                    (SummaryType.RECONSIDER, "Names For Reconsideration"),
-                ]
+            from app.config.db import get_connection_scope
 
-            # Fetch results from each summary type and combine
-            for summary_type, type_name in summary_types_to_fetch:
-                logger.info("Fetching data for '%s' (summary_type=%s)", type_name, summary_type.value)
-                try:
-                    results = nw_reports_service.get_word_report_results_phonetics(
-                        presentation_id,
-                        summary_type
-                    )
-                    logger.info("Retrieved %d results for '%s'", len(results), type_name)
+            with get_connection_scope(timeout=30) as cursor:
+                cursor.execute(
+                    "{CALL [BI_GUIDELINES].[dbo].[nw_wdToIndicateFeedback](?)}",
+                    (presentation_id,)
+                )
 
-                    if results:
-                        # Add all results to combined list
-                        all_results.extend(results)
-                        logger.info("Added %d names from '%s'. Total names so far: %d", len(results), type_name, len(all_results))
-                except Exception as e:
-                    logger.error("Error fetching '%s': %s", type_name, str(e), exc_info=True)
+                # Get the result set
+                if cursor.description is None:
+                    logger.warning("nw_wdToIndicateFeedback returned no result set")
+                    return
 
-            # Log total results
-            logger.info("Total names collected from all categories: %d", len(all_results))
+                columns = [column[0] for column in cursor.description]
+                rows = cursor.fetchall()
 
-            # Populate the single table with all results
-            if all_results:
-                self._populate_feedback_table(main_table, all_results, "Main Feedback Table", SummaryType.POSITIVE)
-            else:
-                logger.warning("No data to populate - all SPs returned empty results")
+                logger.info("Retrieved %d rows from nw_wdToIndicateFeedback", len(rows))
+                logger.info("Columns: %s", columns)
+
+                if not rows:
+                    logger.warning("No data to populate - SP returned empty results")
+                    return
+
+                # Populate the table with the data
+                self._populate_feedback_table_from_sp(main_table, columns, rows)
 
         except Exception as e:
             logger.error("Error populating feedback tables: %s", str(e), exc_info=True)
+
+    def _populate_feedback_table_from_sp(self, table, columns, rows) -> None:
+        """Populate feedback table directly from SP results.
+
+        The nw_wdToIndicateFeedback SP returns data in this format:
+        Col 0: ' ' (row number)
+        Col 1: 'Test Name'
+        Col 2: 'Rationale'
+        Col 3: 'Positive' (empty for client)
+        Col 4: 'Neutral' (empty for client)
+        Col 5: 'Negative' (empty for client)
+        Col 6: 'Comments/Suggestions' (empty for client)
+
+        Args:
+            table: Word Table object
+            columns: List of column names from SP
+            rows: List of row tuples from SP
+        """
+        try:
+            logger.info("Starting to populate table with %d rows from SP", len(rows))
+            logger.info("Table before clear - Rows: %d, Columns: %d", table.Rows.Count, table.Columns.Count)
+
+            def split_grouped_text(value: object) -> List[str]:
+                """Split grouped fields (## or $$) into individual entries."""
+                if value is None:
+                    return []
+                text = html.unescape(str(value))
+                delimiter = None
+                if "##" in text:
+                    delimiter = "##"
+                elif "$$" in text:
+                    delimiter = "$$"
+
+                if not delimiter:
+                    cleaned = text.strip()
+                    return [cleaned] if cleaned else []
+
+                return [part.strip() for part in text.split(delimiter) if part and part.strip()]
+
+            def expand_grouped_rows(row_dict: dict) -> List[dict]:
+                """Expand SP row into multiple rows when Test Name/Rationale contain '##'."""
+                test_name_parts = split_grouped_text(row_dict.get("Test Name"))
+                rationale_parts = split_grouped_text(row_dict.get("Rationale"))
+
+                # No grouping: return as-is (but with basic unescape/strip)
+                if len(test_name_parts) <= 1 and len(rationale_parts) <= 1:
+                    return [
+                        {
+                            "Test Name": (test_name_parts[0] if test_name_parts else "").strip(),
+                            "Rationale": (rationale_parts[0] if rationale_parts else "").strip(),
+                        }
+                    ]
+
+                # Align list lengths
+                count = max(len(test_name_parts), len(rationale_parts), 1)
+                if not test_name_parts:
+                    test_name_parts = [""] * count
+                if not rationale_parts:
+                    rationale_parts = [""] * count
+                if len(test_name_parts) == 1 and count > 1:
+                    test_name_parts = test_name_parts * count
+                if len(rationale_parts) == 1 and count > 1:
+                    rationale_parts = rationale_parts * count
+                while len(test_name_parts) < count:
+                    test_name_parts.append(test_name_parts[-1] if test_name_parts else "")
+                while len(rationale_parts) < count:
+                    rationale_parts.append(rationale_parts[-1] if rationale_parts else "")
+
+                expanded = []
+                for i in range(count):
+                    expanded.append(
+                        {
+                            "Test Name": (test_name_parts[i] or "").strip(),
+                            "Rationale": (rationale_parts[i] or "").strip(),
+                        }
+                    )
+                return expanded
+
+            # Delete all rows except header (row 1)
+            rows_deleted = 0
+            while table.Rows.Count > 1:
+                table.Rows(2).Delete()
+                rows_deleted += 1
+
+            logger.info("Cleared %d rows from table, now has %d rows", rows_deleted, table.Rows.Count)
+
+            # Expand grouped rows (##) into 1 row per entry
+            expanded_rows: List[dict] = []
+            for row in rows:
+                row_dict = dict(zip(columns, row))
+                expanded_rows.extend(expand_grouped_rows(row_dict))
+
+            logger.info("Expanded %d SP rows into %d table rows (group delimiter: ##/$$)", len(rows), len(expanded_rows))
+
+            # Add rows for each result from SP (after expansion)
+            for idx, row_dict in enumerate(expanded_rows):
+                try:
+                    # Add new row to table
+                    new_row = table.Rows.Add()
+                    new_row.AllowBreakAcrossPages = 0
+
+                    # Ensure white background for body rows
+                    self._force_row_white_background(new_row)
+
+                    # The SP already provides the data in the correct format
+                    # We just need to copy it to the Word table cells
+
+                    # Column 1: Row number (from ' ' column in SP)
+                    if new_row.Cells.Count >= 1:
+                        cell_range = new_row.Cells(1).Range
+                        cell_range.Text = str(idx + 1)
+                        cell_range.Font.Bold = False
+
+                    # Column 2: Test Name
+                    if new_row.Cells.Count >= 2:
+                        cell_range = new_row.Cells(2).Range
+                        cell_range.Text = str(row_dict.get('Test Name') or '')
+                        cell_range.Font.Bold = False
+
+                    # Column 3: Rationale
+                    if new_row.Cells.Count >= 3:
+                        cell_range = new_row.Cells(3).Range
+                        cell_range.Text = str(row_dict.get('Rationale') or '')
+                        cell_range.Font.Bold = False
+
+                    # Columns 4-7: Positive, Neutral, Negative, Comments/Suggestions
+                    # These are left empty for the client to fill (already empty from SP)
+
+                    # Ensure row font isn't accidentally bolded by style inheritance
+                    try:
+                        new_row.Range.Font.Bold = False
+                    except Exception:
+                        pass
+
+                    logger.debug("Added row %d: %s", idx + 1, row_dict.get('Test Name', ''))
+
+                except Exception as row_error:
+                    logger.error("Error adding row %d: %s", idx + 1, str(row_error), exc_info=True)
+
+            logger.info("Successfully populated table with %d rows", len(expanded_rows))
+
+        except Exception as e:
+            logger.error("Error populating feedback table from SP: %s", str(e), exc_info=True)
 
     def _populate_feedback_table(self, table, results: List, table_name: str, summary_type: SummaryType) -> None:
         """Populate a feedback table with results.

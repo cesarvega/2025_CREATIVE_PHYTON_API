@@ -101,6 +101,9 @@ class WordReportResult(BaseModel):
     """Result for Word report from nw_wdGetResults or nw_wdGetResults_Phonetics SP."""
     name: str
     pronunciation: Optional[str] = None  # For phonetics reports
+    original_name: Optional[str] = None  # When both candidate and original name exist
+    original_rationale: Optional[str] = None  # For refined creative direction
+    direction: Optional[str] = None  # Direction text used in refined creative direction table
     category: Optional[str] = None
     rationale: Optional[str] = None
     vote: Optional[str] = None

@@ -471,37 +471,67 @@ class WordReportGenerator:
 
                 # Populate cells based on table type
                 try:
-                    # Column 1: Candidate/Name
-                    if new_row.Cells.Count >= 1:
-                        new_row.Cells(1).Range.Text = result.name or ""
+                    is_explore_table = table_name == "Roots/Concepts to Explore"
 
-                    if is_new_names:
-                        # NewNames table: Candidate | Pronunciation | Rationale | Original Category
+                    if is_explore_table:
+                        # Refined Creative Direction table: Direction | Original Candidate | Original Rationale
+                        # Data coming from EXPLORE result set packs direction in original_rationale/category fields.
+                        direction_text = (
+                            getattr(result, "original_rationale", None)
+                            or result.category
+                            or getattr(result, "direction", None)
+                            or result.rationale
+                            or ""
+                        )
+                        original_candidate = getattr(result, "original_name", None) or result.name or ""
+                        original_rationale = (
+                            getattr(result, "direction", None)
+                            or result.rationale
+                            or getattr(result, "original_rationale", None)
+                            or result.category
+                            or ""
+                        )
+
+                        if new_row.Cells.Count >= 1:
+                            new_row.Cells(1).Range.Text = direction_text
                         if new_row.Cells.Count >= 2:
-                            # Column 2: Pronunciation (empty for new names)
-                            new_row.Cells(2).Range.Text = result.pronunciation or ""
+                            new_row.Cells(2).Range.Text = original_candidate
                         if new_row.Cells.Count >= 3:
-                            # Column 3: Rationale (size 10)
-                            cell_range = new_row.Cells(3).Range
-                            cell_range.Font.Size = 10
-                            cell_range.Text = result.rationale or ""
-                        if new_row.Cells.Count >= 4:
-                            # Column 4: Original Category (from name_rationale_part2)
-                            new_row.Cells(4).Range.Text = result.name_rationale_part2 or ""
+                            new_row.Cells(3).Range.Text = original_rationale
+
                     else:
-                        # Regular tables: Candidate | Pronunciation | Rationale | Category
-                        if new_row.Cells.Count >= 2:
-                            # Column 2: Pronunciation
-                            pronunciation = result.pronunciation or ""
-                            new_row.Cells(2).Range.Text = pronunciation
-                        if new_row.Cells.Count >= 3:
-                            # Column 3: Rationale (size 10)
-                            cell_range = new_row.Cells(3).Range
-                            cell_range.Font.Size = 10
-                            cell_range.Text = result.rationale or ""
-                        if new_row.Cells.Count >= 4:
-                            # Column 4: Category
-                            new_row.Cells(4).Range.Text = result.category or ""
+                        # Column 1: Candidate/Name (or stays blank for explore table handled above)
+                        if new_row.Cells.Count >= 1:
+                            new_row.Cells(1).Range.Text = result.name or ""
+
+                        if is_new_names:
+                            # NewNames table: Candidate | Original Name | Original Rationale | Original Category
+                            if new_row.Cells.Count >= 2:
+                                original_name = getattr(result, "original_name", None) or result.name or ""
+                                new_row.Cells(2).Range.Text = original_name
+                            if new_row.Cells.Count >= 3:
+                                # Column 3: Rationale (size 10)
+                                cell_range = new_row.Cells(3).Range
+                                cell_range.Font.Size = 10
+                                cell_range.Text = result.rationale or ""
+                            if new_row.Cells.Count >= 4:
+                                # Column 4: Original Category (prefer NameCategory, fallback to part2)
+                                category_text = result.category or result.name_rationale_part2 or ""
+                                new_row.Cells(4).Range.Text = category_text
+                        else:
+                            # Regular tables: Candidate | Pronunciation | Rationale | Category
+                            if new_row.Cells.Count >= 2:
+                                # Column 2: Pronunciation
+                                pronunciation = result.pronunciation or ""
+                                new_row.Cells(2).Range.Text = pronunciation
+                            if new_row.Cells.Count >= 3:
+                                # Column 3: Rationale (size 10)
+                                cell_range = new_row.Cells(3).Range
+                                cell_range.Font.Size = 10
+                                cell_range.Text = result.rationale or ""
+                            if new_row.Cells.Count >= 4:
+                                # Column 4: Category
+                                new_row.Cells(4).Range.Text = result.category or ""
 
                 except Exception as cell_error:
                     logger.warning("Error populating cell in '%s': %s", table_name, str(cell_error))
@@ -521,6 +551,8 @@ class WordReportGenerator:
                             # Set text color to black (0 = wdColorAutomatic/black)
                             row_range.Font.ColorIndex = 0  # wdAuto (black)
                             row_range.Font.Color = 0  # RGB black
+                            # Ensure data rows are not bold
+                            row_range.Font.Bold = False
                         except Exception as row_error:
                             logger.debug("Error cleaning row %d: %s", row_num, str(row_error))
                 except Exception as e:

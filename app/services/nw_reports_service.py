@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 from typing import Dict, List, Optional, Tuple
 
 from app.config.db import get_connection_scope
@@ -282,11 +283,13 @@ class NWReportsService:
                                 break
                         # For other summary types, look for Name, NameRationale, NameCategory
                         elif 'Name' in temp_columns and ('NameRationale' in temp_columns or 'NameCategory' in temp_columns):
-                            # Use result sets that have data OR if we have no data yet
-                            if temp_rows or columns is None:
+                            # Only use result sets that have actual data
+                            if temp_rows:
                                 columns = temp_columns
                                 rows = temp_rows
                                 target_columns_found = True
+                                logger.info("Found data result set #%d with %d rows", result_set_num, len(temp_rows))
+                                break  # Stop after finding first result set with data
 
                     # Try to move to next result set
                     if not cursor.nextset():
@@ -319,6 +322,47 @@ class NWReportsService:
                                 total_count=row_dict.get("TotalNames", 0),
                             )
                         )
+                    elif summary_type == SummaryType.EXPLORE:
+                        # Refined Creative Direction table packs multiple values using $$ or ##
+                        explore_value = row_dict.get("Explore") or row_dict.get("NameCategory") or ""
+                        name_value = row_dict.get("Name", "") or ""
+                        rationale_value = row_dict.get("NameRationale", "") or ""
+
+                        # Detect delimiter used to pack multiple entries
+                        delimiter = None
+                        for candidate in (name_value, rationale_value):
+                            if isinstance(candidate, str) and "##" in candidate:
+                                delimiter = "##"
+                                break
+                        if delimiter is None:
+                            for candidate in (name_value, rationale_value):
+                                if isinstance(candidate, str) and "$$" in candidate:
+                                    delimiter = "$$"
+                                    break
+
+                        names = []
+                        rationales = []
+                        if delimiter:
+                            names = [n.strip() for n in str(name_value).split(delimiter) if n and n.strip()]
+                            rationales = [r.strip() for r in str(rationale_value).split(delimiter) if r is not None]
+                            # Keep list lengths aligned
+                            while len(rationales) < len(names):
+                                rationales.append(rationales[-1] if rationales else "")
+                        else:
+                            names = [name_value]
+                            rationales = [rationale_value]
+
+                        for idx, name_item in enumerate(names):
+                            rationale_item = rationales[idx] if idx < len(rationales) else ""
+                            results.append(
+                                WordReportResult(
+                                    name=name_item,
+                                    direction=rationale_item,
+                                    rationale=rationale_item,
+                                    category=explore_value,
+                                    original_rationale=explore_value,
+                                )
+                            )
                     else:
                         # Regular name results
                         # Columns from SP: Name, Pronunciation (phonetics), NameRationale, NameCategory
@@ -475,37 +519,57 @@ class NWReportsService:
                 for row in rows:
                     row_dict = dict(zip(columns, row))
 
-                    # Get the name value
-                    name_value = row_dict.get("Name") or row_dict.get("NewName", "")
-                    category_value = row_dict.get("NameCategory") or row_dict.get("Category")
-                    rationale_value = row_dict.get("NameRationale") or row_dict.get("Rationale")
+                    def clean_value(value):
+                        if isinstance(value, str):
+                            return html.unescape(value).strip()
+                        return value
+
+                    # Extract and clean fields
+                    name_value = clean_value(row_dict.get("Name") or row_dict.get("NewName", ""))
+                    original_name_value = clean_value(row_dict.get("NewName") or row_dict.get("OriginalName", ""))
+                    category_value = clean_value(row_dict.get("NameCategory") or row_dict.get("Category"))
+                    rationale_value = clean_value(row_dict.get("NameRationale") or row_dict.get("Rationale"))
+
+                    # Detect delimiter used to pack multiple values
+                    delimiter = None
+                    for candidate in (name_value, original_name_value, category_value, rationale_value):
+                        if isinstance(candidate, str) and "##" in candidate:
+                            delimiter = "##"
+                            break
+                    if delimiter is None:
+                        for candidate in (name_value, original_name_value, category_value, rationale_value):
+                            if isinstance(candidate, str) and "$$" in candidate:
+                                delimiter = "$$"
+                                break
 
                     # Check if name contains group delimiters (## or $$)
-                    if name_value and isinstance(name_value, str) and ('##' in name_value or '$$' in name_value):
-                        # Determine delimiter
-                        delimiter = '##' if '##' in name_value else '$$'
-
+                    if delimiter and name_value and isinstance(name_value, str) and delimiter in name_value:
                         # Split all fields by the delimiter
-                        names = [n.strip() for n in name_value.split(delimiter) if n.strip()]
+                        names = [n.strip() for n in str(name_value).split(delimiter) if n and n.strip()]
 
                         # Split category and rationale if they also contain the delimiter
-                        categories = []
                         if category_value and delimiter in str(category_value):
                             categories = [c.strip() for c in str(category_value).split(delimiter)]
                         else:
                             categories = [category_value] * len(names)
 
-                        rationales = []
                         if rationale_value and delimiter in str(rationale_value):
                             rationales = [r.strip() for r in str(rationale_value).split(delimiter)]
                         else:
                             rationales = [rationale_value] * len(names)
+
+                        if original_name_value and isinstance(original_name_value, str) and delimiter in original_name_value:
+                            original_names = [n.strip() for n in str(original_name_value).split(delimiter)]
+                        else:
+                            original_names = [original_name_value] * len(names)
 
                         # Pad arrays to match length
                         while len(categories) < len(names):
                             categories.append(category_value)
                         while len(rationales) < len(names):
                             rationales.append(rationale_value)
+                        while len(original_names) < len(names):
+                            original_names.append(original_name_value)
 
                         # Create a result for each expanded name
                         for i, expanded_name in enumerate(names):
@@ -513,6 +577,7 @@ class NWReportsService:
                                 results.append(
                                     WordReportResult(
                                         name=expanded_name,
+                                        original_name=original_names[i] if i < len(original_names) else original_name_value,
                                         category=categories[i] if i < len(categories) else category_value,
                                         rationale=rationales[i] if i < len(rationales) else rationale_value,
                                         vote=row_dict.get("Vote"),
@@ -523,11 +588,24 @@ class NWReportsService:
                         results.append(
                             WordReportResult(
                                 name=name_value,
+                                original_name=original_name_value,
                                 category=category_value,
                                 rationale=rationale_value,
                                 vote=row_dict.get("Vote"),
                             )
                         )
+
+                # Split rationale into two parts when using "+" convention (keeps original category/rationale)
+                processed_results = []
+                for result in results:
+                    if result.rationale and isinstance(result.rationale, str) and '+' in result.rationale:
+                        parts = result.rationale.split('+', 1)
+                        result.rationale = parts[0].strip()
+                        result.name_rationale_part2 = parts[1].strip() if len(parts) > 1 else ""
+                        if not result.category:
+                            result.category = result.name_rationale_part2
+                    processed_results.append(result)
+                results = processed_results
 
                 logger.info(
                     "Retrieved %d newly created names for Word report for presentation_id=%d",

@@ -43,16 +43,14 @@ class DayMasterService:
             query = """
                 SELECT ProjectName
                 FROM dbo.Projects
-                WHERE creative = 1
-                AND ProjectName LIKE ?
+                WHERE ProjectName LIKE ?
                 ORDER BY ProjectName
                 OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
             """
             count_query = """
                 SELECT COUNT(*) as Total
                 FROM dbo.Projects
-                WHERE creative = 1
-                AND ProjectName LIKE ?
+                WHERE ProjectName LIKE ?
             """
             query_params = (search_pattern, offset, limit)
             count_params = (search_pattern,)
@@ -60,15 +58,13 @@ class DayMasterService:
             # No search filter - get all creative projects
             query = """
                 SELECT ProjectName
-                FROM dbo.Projects
-                WHERE creative = 1
+                FROM dbo.Projects               
                 ORDER BY ProjectName
                 OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
             """
             count_query = """
                 SELECT COUNT(*) as Total
                 FROM dbo.Projects
-                WHERE creative = 1
             """
             query_params = (offset, limit)
             count_params = ()
