@@ -606,36 +606,50 @@ class WordReportGeneratorOpenXML:
                         row = table.add_row()
 
                         # Column 0: Candidate (Name) - IN BOLD
-                        # For REFINED CREATIVE DIRECTION: use original_name if available
                         if len(row.cells) >= 1:
                             cell = row.cells[0]
-                            candidate_name = getattr(result, 'original_name', None) or name or ''
+                            # For NEWLY CREATED NAMES: use name (the new created name)
+                            # For REFINED CREATIVE DIRECTION: use original_name if available
+                            if "Newly Created Names" in table_name:
+                                candidate_name = name or ''
+                            else:
+                                candidate_name = getattr(result, 'original_name', None) or name or ''
                             cell.text = str(candidate_name)
                             # Make candidate name bold
                             for paragraph in cell.paragraphs:
                                 for run in paragraph.runs:
                                     run.font.bold = True
 
-                        # Column 1: Pronounciation OR Direction
-                        # For REFINED CREATIVE DIRECTION: use direction instead of pronunciation
+                        # Column 1: Pronunciation OR Direction OR Original Name
                         if len(row.cells) >= 2:
-                            direction = getattr(result, 'direction', None)
-                            pronunciation = getattr(result, 'pronunciation', None)
-                            col1_value = direction or pronunciation or ''
-                            row.cells[1].text = str(col1_value)
+                            # For NEWLY CREATED NAMES: use original_name (concatenated with $$)
+                            # For REFINED CREATIVE DIRECTION: use direction instead of pronunciation
+                            if "Newly Created Names" in table_name:
+                                original_name = getattr(result, 'original_name', None) or ''
+                                row.cells[1].text = str(original_name)
+                            else:
+                                direction = getattr(result, 'direction', None)
+                                pronunciation = getattr(result, 'pronunciation', None)
+                                col1_value = direction or pronunciation or ''
+                                row.cells[1].text = str(col1_value)
 
-                        # Column 2: Rationale
-                        # For REFINED CREATIVE DIRECTION: may use original_rationale
+                        # Column 2: Rationale OR Original Rationale
                         if len(row.cells) >= 3:
+                            # For NEWLY CREATED NAMES: use original_rationale (concatenated with $$)
+                            # For REFINED CREATIVE DIRECTION: may use original_rationale
                             original_rationale = getattr(result, 'original_rationale', None)
                             rationale = original_rationale or result.rationale or ''
                             # Unescape HTML entities
                             rationale = html.unescape(str(rationale))
                             row.cells[2].text = rationale
 
-                        # Column 3: Category (if applicable)
+                        # Column 3: Category OR Original Category (if applicable)
                         if len(row.cells) >= 4:
-                            category = getattr(result, 'category', None) or ''
+                            # For NEWLY CREATED NAMES: use original_category if available
+                            if "Newly Created Names" in table_name:
+                                category = getattr(result, 'original_category', None) or getattr(result, 'category', None) or ''
+                            else:
+                                category = getattr(result, 'category', None) or ''
                             row.cells[3].text = str(category)
 
                     except Exception as row_error:
