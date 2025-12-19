@@ -15,6 +15,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
+import matplotlib
+matplotlib.use('Agg')  # Use non-GUI backend for thread safety
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from docx import Document
@@ -581,11 +583,15 @@ class FeedbackTemplateGeneratorOpenXML:
                         cell.text = str(idx + 1)
                         self._copy_cell_style(header_row.cells[0], cell, is_header=False)
 
-                    # Column 2: Test Name
+                    # Column 2: Test Name (Candidate) - IN BOLD
                     if len(new_row.cells) >= 2:
                         cell = new_row.cells[1]
                         cell.text = str(row_dict.get('Test Name') or '')
                         self._copy_cell_style(header_row.cells[1], cell, is_header=False)
+                        # Make Test Name bold (candidate name)
+                        for paragraph in cell.paragraphs:
+                            for run in paragraph.runs:
+                                run.font.bold = True
 
                     # Column 3: Rationale
                     if len(new_row.cells) >= 3:
@@ -686,26 +692,38 @@ class FeedbackTemplateGeneratorOpenXML:
             sizes = [positive, neutral, reconsider]
             colors = [COLOR_POSITIVE, COLOR_NEUTRAL, COLOR_RECONSIDER]
 
-            # Create figure
+            # Create figure with optimized size
             fig, ax = plt.subplots(figsize=(6, 4))
 
-            # Create pie chart
-            wedges, texts, autotexts = ax.pie(
+            # Create pie chart without labels on the pie itself (no percentages)
+            wedges, texts = ax.pie(
                 sizes,
-                labels=labels,
                 colors=colors,
-                autopct='%1.1f%%',
                 startangle=90,
-                textprops={'fontsize': 12, 'weight': 'bold'}
+                radius=1.0
+            )
+
+            # Add legend to the right side
+            ax.legend(
+                wedges,
+                labels,
+                title="",
+                loc="center left",
+                bbox_to_anchor=(1.05, 0.5),
+                fontsize=10,
+                frameon=False
             )
 
             # Equal aspect ratio ensures circular pie
             ax.axis('equal')
 
-            # Save to temporary file
+            # Remove extra whitespace
+            plt.tight_layout(pad=0.3)
+
+            # Save to temporary file with minimal padding
             self.temp_dir = Path(tempfile.mkdtemp())
             chart_path = self.temp_dir / "pie_chart.png"
-            fig.savefig(str(chart_path), dpi=150, bbox_inches='tight', facecolor='white')
+            fig.savefig(str(chart_path), dpi=150, bbox_inches='tight', pad_inches=0.1, facecolor='white')
             plt.close(fig)
 
             logger.info("[OpenXML] Pie chart generated successfully")
@@ -718,9 +736,13 @@ class FeedbackTemplateGeneratorOpenXML:
                 if "PieChart" in paragraph.text:
                     # Clear the paragraph text
                     paragraph.clear()
-                    # Insert chart image
+                    # Add spacing before the chart to push it down
+                    paragraph_format = paragraph.paragraph_format
+                    paragraph_format.space_before = Pt(12)  # Add 12pt space before
+
+                    # Insert chart image (reduced width to fit page)
                     run = paragraph.add_run()
-                    run.add_picture(str(chart_path), width=Inches(4.5))
+                    run.add_picture(str(chart_path), width=Inches(3.8))
                     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
                     chart_inserted = True
                     logger.info("[OpenXML] Pie chart inserted in paragraph")
@@ -735,9 +757,13 @@ class FeedbackTemplateGeneratorOpenXML:
                                 if "PieChart" in paragraph.text:
                                     # Clear the paragraph text
                                     paragraph.clear()
-                                    # Insert chart image
+                                    # Add spacing before the chart to push it down
+                                    paragraph_format = paragraph.paragraph_format
+                                    paragraph_format.space_before = Pt(12)  # Add 12pt space before
+
+                                    # Insert chart image (reduced width to fit page)
                                     run = paragraph.add_run()
-                                    run.add_picture(str(chart_path), width=Inches(4.0))
+                                    run.add_picture(str(chart_path), width=Inches(3.5))
                                     paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
                                     chart_inserted = True
                                     logger.info("[OpenXML] Pie chart inserted in table cell")

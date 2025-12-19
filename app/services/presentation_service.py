@@ -23,6 +23,7 @@ from app.models.presentation_models import (
     PresentationData,
 )
 from app.models.response_models import PPTXConversionResponse
+from app.constants import PresentationType
 from app.services.excel_service import GROUP_MARKERS, process_excel_file
 from app.services.pptx_service import pptx_service
 from app.services.pptx_builder_service import pptx_builder_service
@@ -1621,8 +1622,13 @@ class PresentationService:
                 request.page_number,
             )
 
-            # Determine if this is a "big Japanese" presentation (Phonetics mode)
-            is_big_japanese = request.presentation_type.lower() == "phonetics"
+            # Determine if this is a "big Japanese" presentation (Phonetics or Katakana_BigJap modes)
+            normalized_presentation_type = (request.presentation_type or "").strip().lower()
+            big_japanese_types = {
+                PresentationType.PHONETICS.lower(),
+                PresentationType.KATAKANA_BIG_JAP.lower(),
+            }
+            is_big_japanese = normalized_presentation_type in big_japanese_types
             logger.info("Presentation type: %s, is_big_japanese: %s", request.presentation_type, is_big_japanese)
 
             # Calculate insert position (convert from 1-based to 0-based index)

@@ -193,6 +193,9 @@ class Settings(BaseSettings):
     # Feedback template generation settings
     use_openxml_feedback: bool = True  # Feature flag: True = OpenXML (5-10x faster), False = COM (legacy)
 
+    # Word report generation settings
+    use_openxml_word_reports: bool = True  # Feature flag: True = OpenXML (5-10x faster), False = COM (legacy)
+
     @property
     def socketio_cors_origins_list(self) -> list[str]:
         """Get Socket.IO CORS origins as a list"""

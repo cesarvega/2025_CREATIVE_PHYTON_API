@@ -515,85 +515,58 @@ class NWReportsService:
                         name_col_idx = idx
                         break
 
-                results = []
+                def clean_value(value):
+                    if isinstance(value, str):
+                        return html.unescape(value).strip()
+                    return value
+
+                # Group rows by new name (Candidate) and concatenate original names
+                grouped_data = {}
                 for row in rows:
                     row_dict = dict(zip(columns, row))
 
-                    def clean_value(value):
-                        if isinstance(value, str):
-                            return html.unescape(value).strip()
-                        return value
-
                     # Extract and clean fields
-                    name_value = clean_value(row_dict.get("Name") or row_dict.get("NewName", ""))
-                    original_name_value = clean_value(row_dict.get("NewName") or row_dict.get("OriginalName", ""))
+                    # New name (Candidate) - the newly created name
+                    new_name = clean_value(row_dict.get("Name") or row_dict.get("NewName", ""))
+                    # Original name - the name from the original slide this is based on
+                    original_name = clean_value(row_dict.get("OriginalName") or row_dict.get("TestName") or row_dict.get("Name", ""))
                     category_value = clean_value(row_dict.get("NameCategory") or row_dict.get("Category"))
                     rationale_value = clean_value(row_dict.get("NameRationale") or row_dict.get("Rationale"))
 
-                    # Detect delimiter used to pack multiple values
-                    delimiter = None
-                    for candidate in (name_value, original_name_value, category_value, rationale_value):
-                        if isinstance(candidate, str) and "##" in candidate:
-                            delimiter = "##"
-                            break
-                    if delimiter is None:
-                        for candidate in (name_value, original_name_value, category_value, rationale_value):
-                            if isinstance(candidate, str) and "$$" in candidate:
-                                delimiter = "$$"
-                                break
+                    # Group by new name
+                    if new_name not in grouped_data:
+                        grouped_data[new_name] = {
+                            'original_names': [],
+                            'category': category_value,
+                            'rationale': rationale_value,
+                            'vote': row_dict.get("Vote")
+                        }
 
-                    # Check if name contains group delimiters (## or $$)
-                    if delimiter and name_value and isinstance(name_value, str) and delimiter in name_value:
-                        # Split all fields by the delimiter
-                        names = [n.strip() for n in str(name_value).split(delimiter) if n and n.strip()]
+                    # Append original name to the list
+                    if original_name:
+                        grouped_data[new_name]['original_names'].append(original_name)
 
-                        # Split category and rationale if they also contain the delimiter
-                        if category_value and delimiter in str(category_value):
-                            categories = [c.strip() for c in str(category_value).split(delimiter)]
-                        else:
-                            categories = [category_value] * len(names)
+                results = []
+                for new_name, data in grouped_data.items():
+                    # Concatenate all original names with $$ delimiter
+                    concatenated_original_names = '$$'.join(data['original_names']) if data['original_names'] else ""
 
-                        if rationale_value and delimiter in str(rationale_value):
-                            rationales = [r.strip() for r in str(rationale_value).split(delimiter)]
-                        else:
-                            rationales = [rationale_value] * len(names)
+                    name_value = new_name
+                    original_name_value = concatenated_original_names
+                    category_value = data['category']
+                    rationale_value = data['rationale']
 
-                        if original_name_value and isinstance(original_name_value, str) and delimiter in original_name_value:
-                            original_names = [n.strip() for n in str(original_name_value).split(delimiter)]
-                        else:
-                            original_names = [original_name_value] * len(names)
-
-                        # Pad arrays to match length
-                        while len(categories) < len(names):
-                            categories.append(category_value)
-                        while len(rationales) < len(names):
-                            rationales.append(rationale_value)
-                        while len(original_names) < len(names):
-                            original_names.append(original_name_value)
-
-                        # Create a result for each expanded name
-                        for i, expanded_name in enumerate(names):
-                            if expanded_name:  # Skip empty names
-                                results.append(
-                                    WordReportResult(
-                                        name=expanded_name,
-                                        original_name=original_names[i] if i < len(original_names) else original_name_value,
-                                        category=categories[i] if i < len(categories) else category_value,
-                                        rationale=rationales[i] if i < len(rationales) else rationale_value,
-                                        vote=row_dict.get("Vote"),
-                                    )
-                                )
-                    else:
-                        # No grouping, add normally
-                        results.append(
-                            WordReportResult(
-                                name=name_value,
-                                original_name=original_name_value,
-                                category=category_value,
-                                rationale=rationale_value,
-                                vote=row_dict.get("Vote"),
-                            )
+                    # Add one result per grouped new name
+                    # Original names are already concatenated with $$
+                    results.append(
+                        WordReportResult(
+                            name=name_value,
+                            original_name=original_name_value,  # Already concatenated with $$
+                            category=category_value,
+                            rationale=rationale_value,
+                            vote=data['vote'],
                         )
+                    )
 
                 # Split rationale into two parts when using "+" convention (keeps original category/rationale)
                 processed_results = []

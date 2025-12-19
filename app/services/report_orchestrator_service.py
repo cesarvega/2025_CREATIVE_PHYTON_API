@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from app.config.settings import settings
 from app.models.nw_reports_models import (
     DownloadResultsRequest,
     DownloadResultsResponse,
@@ -18,6 +19,7 @@ from app.services.bi_guidelines_service import bi_guidelines_service
 # Original: from app.services.excel_report_generator import excel_report_generator
 from app.services.excel_report_generator_optimized import excel_report_generator_optimized as excel_report_generator
 from app.services.word_report_generator import word_report_generator
+from app.services.word_report_generator_openxml import word_report_generator_openxml
 from app.utils.download_utils import create_download_token
 from app.utils.logging_utils import get_logger
 
@@ -203,7 +205,7 @@ class ReportOrchestratorService:
         request: DownloadResultsRequest,
         display_name: str,
     ) -> Path:
-        """Generate Word report with retry logic for COM errors.
+        """Generate Word report with automatic COM/OpenXML selection.
 
         Args:
             request: Download results request
@@ -213,49 +215,66 @@ class ReportOrchestratorService:
             Path to generated Word file
 
         Raises:
-            Exception: If all retry attempts fail
+            Exception: If generation fails
         """
-        logger.info("Generating Word report")
+        # Determine which generator to use based on feature flag
+        use_openxml = settings.use_openxml_word_reports
 
-        # Retry logic for COM "Call was rejected" errors
-        max_retries = 3
-        retry_delay = 2.0  # seconds
+        logger.info("Generating Word report (mode: %s)", "OpenXML" if use_openxml else "COM")
 
-        for attempt in range(max_retries):
+        if use_openxml:
+            # OpenXML mode: Fast, no COM errors, no retry needed
             try:
-                # Default to phonetics mode (True)
-                # This matches the C# implementation where isPhonetics is typically True
-                file_path = word_report_generator.generate_word_report(
+                file_path = word_report_generator_openxml.generate_word_report(
                     presentation_id=request.presentation_id,
                     display_name=display_name,
                     is_phonetics=True,
                 )
-
-                if attempt > 0:
-                    logger.info("Word report generated successfully on attempt %d", attempt + 1)
-
+                logger.info("Word report generated successfully using OpenXML")
                 return file_path
-
             except Exception as e:
-                error_str = str(e)
-                is_com_busy_error = (
-                    "-2147418111" in error_str or  # RPC_E_CALL_REJECTED
-                    "Call was rejected" in error_str or
-                    "busy" in error_str.lower()
-                )
+                logger.error("OpenXML Word report generation failed: %s", str(e), exc_info=True)
+                raise
 
-                if is_com_busy_error and attempt < max_retries - 1:
-                    logger.warning(
-                        "COM busy error on attempt %d/%d: %s. Retrying in %.1fs...",
-                        attempt + 1, max_retries, error_str, retry_delay
+        else:
+            # COM mode: Legacy with retry logic for COM errors
+            max_retries = 3
+            retry_delay = 2.0  # seconds
+
+            for attempt in range(max_retries):
+                try:
+                    # Default to phonetics mode (True)
+                    file_path = word_report_generator.generate_word_report(
+                        presentation_id=request.presentation_id,
+                        display_name=display_name,
+                        is_phonetics=True,
                     )
-                    import time
-                    time.sleep(retry_delay)
-                    continue
-                else:
-                    # Not a COM busy error, or final attempt failed
-                    logger.error("Word report generation failed after %d attempts", attempt + 1)
-                    raise
+
+                    if attempt > 0:
+                        logger.info("Word report generated successfully on attempt %d", attempt + 1)
+
+                    return file_path
+
+                except Exception as e:
+                    error_str = str(e)
+                    is_com_busy_error = (
+                        "-2147418111" in error_str or  # RPC_E_CALL_REJECTED
+                        "Call was rejected" in error_str or
+                        "busy" in error_str.lower()
+                    )
+
+                    if is_com_busy_error and attempt < max_retries - 1:
+                        logger.warning(
+                            "COM busy error on attempt %d/%d: %s. Retrying in %.1fs...",
+                            attempt + 1, max_retries, error_str, retry_delay
+                        )
+                        import time
+                        time.sleep(retry_delay)
+                        continue
+                    else:
+                        # Not a COM busy error, or final attempt failed
+                        logger.error("Word report generation failed after %d attempts", attempt + 1)
+                        raise
 
     def _create_zip_archive(
         self, file_paths: list[Path], display_name: str
