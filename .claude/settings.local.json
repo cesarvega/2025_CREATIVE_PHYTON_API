@@ -17,7 +17,9 @@
       "Bash(find:*)",
       "Bash(Get-ChildItem \"C:\\inetpub\\wwwroot\\nw2\\nw_slides\\ATEST01_NW_12_12_2025_V127\\Presentations\" -Filter \"*.pptx\")",
       "Bash(Select-Object Name, Length, LastWriteTime)",
-      "Bash(tasklist:*)"
+      "Bash(tasklist:*)",
+      "Bash(git log:*)",
+      "Bash(findstr:*)"
     ],
     "deny": [],
     "ask": []

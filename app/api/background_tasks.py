@@ -9,7 +9,9 @@ from app.models.presentation_models import CreatePresentationMetadata, BSRCreate
 from app.services.presentation_service import presentation_service
 from app.services.report_orchestrator_service import report_orchestrator_service
 from app.services.feedback_template_generator import feedback_template_generator
+from app.services.feedback_template_generator_openxml import feedback_template_generator_openxml
 from app.services.bsr_report_orchestrator_service import bsr_report_orchestrator_service as bsr_report_orchestrator
+from app.config.settings import settings
 from app.utils.task_manager import task_manager, TaskStatus
 from app.utils.logging_utils import get_logger
 from app.utils.com_manager import com_manager
@@ -344,14 +346,20 @@ def _create_feedback_template_background(
     display_name: str,
 ):
     """Background task for generating feedback templates."""
-    # Initialize COM for this thread
-    pythoncom.CoInitialize()
+    # Determine which generator to use based on feature flag
+    use_openxml = settings.use_openxml_feedback
+
+    # Only initialize COM if using legacy COM-based generator
+    if not use_openxml:
+        pythoncom.CoInitialize()
+
     try:
         task_manager.update_status(task_id, TaskStatus.PROCESSING, progress=10)
 
         logger.info(
-            "[Task %s] Starting feedback template generation for presentation_id: %d",
+            "[Task %s] Starting feedback template generation (mode: %s) for presentation_id: %d",
             task_id,
+            "OpenXML" if use_openxml else "COM",
             presentation_id
         )
 
@@ -361,16 +369,27 @@ def _create_feedback_template_background(
 
         task_manager.update_status(task_id, TaskStatus.PROCESSING, progress=20)
 
-        # Generate feedback template with COM concurrency control
+        # Generate feedback template
         from pathlib import Path
         from app.utils.download_utils import create_download_token
 
-        with com_manager.acquire(f"Feedback Template - Presentation {presentation_id}"):
-            file_path = feedback_template_generator.generate_feedback_template(
+        if use_openxml:
+            # OpenXML mode: No COM concurrency control needed (faster, no COM overhead)
+            logger.info("[Task %s] Using OpenXML generator (5-10x faster)", task_id)
+            file_path = feedback_template_generator_openxml.generate_feedback_template(
                 presentation_id=presentation_id,
                 display_name=display_name,
                 progress_callback=progress_callback,
             )
+        else:
+            # COM mode: Use COM concurrency control (legacy)
+            logger.info("[Task %s] Using COM generator (legacy mode)", task_id)
+            with com_manager.acquire(f"Feedback Template - Presentation {presentation_id}"):
+                file_path = feedback_template_generator.generate_feedback_template(
+                    presentation_id=presentation_id,
+                    display_name=display_name,
+                    progress_callback=progress_callback,
+                )
 
         # Create download token
         download_token = None
@@ -388,6 +407,7 @@ def _create_feedback_template_background(
                 "file_path": str(file_path),
                 "file_name": file_path.name,
                 "download_token": download_token,
+                "generation_mode": "OpenXML" if use_openxml else "COM",
             }
         )
 
@@ -407,8 +427,9 @@ def _create_feedback_template_background(
             error=f"Failed to generate feedback template: {str(e)}"
         )
     finally:
-        # Uninitialize COM for this thread
-        pythoncom.CoUninitialize()
+        # Only uninitialize COM if we initialized it
+        if not use_openxml:
+            pythoncom.CoUninitialize()
 
 
 def _create_feedback_template_with_backup_background(
@@ -417,14 +438,20 @@ def _create_feedback_template_with_backup_background(
     display_name: str,
 ):
     """Background task for generating feedback template and zipping with backup if available."""
-    # Initialize COM for this thread
-    pythoncom.CoInitialize()
+    # Determine which generator to use based on feature flag
+    use_openxml = settings.use_openxml_feedback
+
+    # Only initialize COM if using legacy COM-based generator
+    if not use_openxml:
+        pythoncom.CoInitialize()
+
     try:
         task_manager.update_status(task_id, TaskStatus.PROCESSING, progress=10)
 
         logger.info(
-            "[Task %s] Starting feedback+backup bundle for presentation_id: %d",
+            "[Task %s] Starting feedback+backup bundle (mode: %s) for presentation_id: %d",
             task_id,
+            "OpenXML" if use_openxml else "COM",
             presentation_id,
         )
 
@@ -445,13 +472,24 @@ def _create_feedback_template_with_backup_background(
         from app.utils.nw_data_utils import sanitize_filename
         from app.utils.path_utils import get_nw_downloads_dir, resolve_project_output
 
-        # Generate feedback template with COM concurrency control
-        with com_manager.acquire(f"Feedback Template Bundle - Presentation {presentation_id}"):
-            feedback_path = feedback_template_generator.generate_feedback_template(
+        # Generate feedback template
+        if use_openxml:
+            # OpenXML mode: No COM concurrency control needed (faster)
+            logger.info("[Task %s] Using OpenXML generator for feedback template", task_id)
+            feedback_path = feedback_template_generator_openxml.generate_feedback_template(
                 presentation_id=presentation_id,
                 display_name=display_name,
                 progress_callback=progress_callback,
             )
+        else:
+            # COM mode: Use COM concurrency control (legacy)
+            logger.info("[Task %s] Using COM generator for feedback template (legacy)", task_id)
+            with com_manager.acquire(f"Feedback Template Bundle - Presentation {presentation_id}"):
+                feedback_path = feedback_template_generator.generate_feedback_template(
+                    presentation_id=presentation_id,
+                    display_name=display_name,
+                    progress_callback=progress_callback,
+                )
 
         feedback_token = None
         if feedback_path and feedback_path.exists():
@@ -548,6 +586,7 @@ def _create_feedback_template_with_backup_background(
                 "backup_file_name": backup_path.name if backup_path and backup_path.exists() else None,
                 "backup_included": bundle_created,
                 "warning": bundle_warning,
+                "generation_mode": "OpenXML" if use_openxml else "COM",
             },
         )
 
@@ -572,8 +611,9 @@ def _create_feedback_template_with_backup_background(
             error=f"Failed to generate feedback+backup bundle: {str(e)}",
         )
     finally:
-        # Uninitialize COM for this thread
-        pythoncom.CoUninitialize()
+        # Only uninitialize COM if we initialized it
+        if not use_openxml:
+            pythoncom.CoUninitialize()
 
 
 def _generate_bsr_report_background(

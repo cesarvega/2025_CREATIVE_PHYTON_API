@@ -190,6 +190,9 @@ class Settings(BaseSettings):
     # Backup generation settings
     use_openxml_backup: bool = True  # Feature flag: True = OpenXML (faster), False = COM (legacy)
 
+    # Feedback template generation settings
+    use_openxml_feedback: bool = True  # Feature flag: True = OpenXML (5-10x faster), False = COM (legacy)
+
     @property
     def socketio_cors_origins_list(self) -> list[str]:
         """Get Socket.IO CORS origins as a list"""
