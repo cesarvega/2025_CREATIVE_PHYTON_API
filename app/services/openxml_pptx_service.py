@@ -546,22 +546,23 @@ class OpenXMLPPTXService:
         sentiment_para.font.color.rgb = RGBColor(50, 50, 50)
         sentiment_para.alignment = PP_ALIGN.LEFT
 
-        # Notation in bottom-right corner (e.g., "(C)", "(T)", "(CB)")
+        # Notation aligned with sentiment circles, positioned on the right (e.g., "(C)", "(T)", "(CB)")
         if notation_text:
             # Format notation with parentheses
             formatted_notation = f"({notation_text})" if not notation_text.startswith("(") else notation_text
 
-            # Position in bottom-right corner
+            # Position aligned vertically with sentiment labels, on the right side
             notation_width = Inches(0.8)
-            notation_height = Inches(0.4)
+            notation_height = Inches(0.6)
             notation_left = slide_width - notation_width - Inches(0.4)
-            notation_top = slide_height - notation_height - Inches(0.4)
+            notation_top = sentiment_top  # Align with sentiment circles
 
             notation_box = slide.shapes.add_textbox(
                 notation_left, notation_top, notation_width, notation_height
             )
             notation_tf = notation_box.text_frame
             notation_tf.clear()
+            notation_tf.vertical_anchor = MSO_ANCHOR.MIDDLE  # Center vertically within box
             notation_para = notation_tf.paragraphs[0]
             notation_para.text = formatted_notation
             notation_para.font.size = Pt(18)
