@@ -19,7 +19,11 @@
       "Bash(Select-Object Name, Length, LastWriteTime)",
       "Bash(tasklist:*)",
       "Bash(git log:*)",
-      "Bash(findstr:*)"
+      "Bash(findstr:*)",
+      "Bash(git add:*)",
+      "Bash(git reset:*)",
+      "Bash(git commit -m \"$(cat <<''EOF''\nfeat: Implement OpenXML Word report generator with feature flag and integrate with report orchestrator\n\n- Add WordReportGeneratorOpenXML class using python-docx and matplotlib for 5-10x performance improvement\n- Implement complete Word report generation: bookmarks, tables, pie charts, document structure\n- Add use_openxml_word_reports feature flag to settings (default: True)\n- Update report_orchestrator_service to support both OpenXML and COM generators\n- Enhance nw_reports_service to properly group and concatenate newly created names with original names\n- Fix presentation_service to correctly identify Katakana_BigJap as big Japanese presentation type\n- Update feedback_template_generator_openxml with improved .doc to .docx conversion and cleanup\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude Sonnet 4.5 <noreply@anthropic.com>\nEOF\n)\")",
+      "Bash(git commit:*)"
     ],
     "deny": [],
     "ask": []

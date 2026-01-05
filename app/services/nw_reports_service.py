@@ -507,6 +507,11 @@ class NWReportsService:
                     )
                     return []
 
+                # Log columns for debugging
+                logger.info("[NEWLY CREATED NAMES] Columns from nw_CombineNewNames: %s", columns)
+                if rows and len(rows) > 0:
+                    logger.info("[NEWLY CREATED NAMES] First row sample: %s", dict(zip(columns, rows[0])))
+
                 # Find the name column index
                 name_col_idx = None
                 for idx, col in enumerate(columns):
@@ -526,10 +531,11 @@ class NWReportsService:
                     row_dict = dict(zip(columns, row))
 
                     # Extract and clean fields
-                    # New name (Candidate) - the newly created name
-                    new_name = clean_value(row_dict.get("Name") or row_dict.get("NewName", ""))
+                    # New name (Candidate) - the newly created name from the slide
+                    # Try TestName first (newly created name), then fall back to NewName or Name
+                    new_name = clean_value(row_dict.get("TestName") or row_dict.get("NewName") or row_dict.get("Name", ""))
                     # Original name - the name from the original slide this is based on
-                    original_name = clean_value(row_dict.get("OriginalName") or row_dict.get("TestName") or row_dict.get("Name", ""))
+                    original_name = clean_value(row_dict.get("Name") or row_dict.get("OriginalName", ""))
                     category_value = clean_value(row_dict.get("NameCategory") or row_dict.get("Category"))
                     rationale_value = clean_value(row_dict.get("NameRationale") or row_dict.get("Rationale"))
 
