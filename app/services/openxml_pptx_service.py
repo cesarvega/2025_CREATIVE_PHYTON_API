@@ -215,6 +215,8 @@ class OpenXMLPPTXService:
             missing = exc.args[0]
             raise ValueError(f"Missing expected column: {missing}") from exc
 
+        # Note: pronunciation_idx contains notation data (e.g., "C", "T", "CB")
+        # We'll extract and display it separately in the bottom-right corner
         pronunciation_idx = headers.get("pronunciation")
         katakana_idx = headers.get("katakana")
         group1_idx = headers.get("group1")
@@ -238,11 +240,14 @@ class OpenXMLPPTXService:
             name_text = str(self._get_cell(row, name_idx) or "").strip()
             rationale_text = str(self._get_cell(row, rationale_idx) or "").strip()
             category_text = str(self._get_cell(row, category_idx) or "").strip()
-            pronunciation_text = (
+
+            # Extract notation (e.g., "C", "T", "CB") from pronunciation column
+            notation_text = (
                 str(self._get_cell(row, pronunciation_idx) or "").strip()
                 if pronunciation_idx is not None
                 else ""
             )
+
             katakana_text = (
                 str(self._get_cell(row, katakana_idx) or "").strip()
                 if katakana_idx is not None
@@ -281,7 +286,7 @@ class OpenXMLPPTXService:
                     "category_text": category_text,
                     "name_text": name_text,
                     "rationale_text": rationale_text,
-                    "pronunciation_text": pronunciation_text,
+                    "notation_text": notation_text,
                     "katakana_text": katakana_text,
                 }
                 slide_items.append({"type": "single", "row": row_payload})
@@ -308,7 +313,7 @@ class OpenXMLPPTXService:
                     category_text=row["category_text"],
                     name_text=row["name_text"],
                     rationale_text=row["rationale_text"],
-                    pronunciation_text=row["pronunciation_text"],
+                    notation_text=row["notation_text"],
                     katakana_text=row["katakana_text"],
                     is_big_japanese=is_big_japanese,
                 )
@@ -425,12 +430,13 @@ class OpenXMLPPTXService:
         category_text: str,
         name_text: str,
         rationale_text: str,
-        pronunciation_text: str = "",
+        notation_text: str = "",
         katakana_text: str = "",
         is_big_japanese: bool = False,
     ) -> None:
         """Render name/rationale slide with a simple layout similar to the provided design."""
         slide_width = presentation.slide_width
+        slide_height = presentation.slide_height
 
         # Category heading (text only, no bar)
         header_top = Inches(0.35)
@@ -446,7 +452,7 @@ class OpenXMLPPTXService:
         header_para.font.color.rgb = NAVY_BLUE
         header_para.alignment = PP_ALIGN.LEFT
 
-        # Name and pronunciation block
+        # Name and katakana block
         top_block = header_top + Inches(0.8)
         block_width = slide_width - Inches(1.5)
         left = Inches(0.75)
@@ -468,15 +474,12 @@ class OpenXMLPPTXService:
         name_para.alignment = PP_ALIGN.LEFT
         name_para.font.color.rgb = RGBColor(0, 0, 0)
 
+        # Show name/katakana text below the main display name
         small_parts: List[str] = []
         if is_big_japanese and katakana_text:
             if name_text:
                 small_parts.append(name_text)
-            if pronunciation_text:
-                small_parts.append(pronunciation_text)
         else:
-            if pronunciation_text:
-                small_parts.append(pronunciation_text)
             if katakana_text:
                 small_parts.append(katakana_text)
         if small_parts:
@@ -542,6 +545,29 @@ class OpenXMLPPTXService:
         sentiment_para.font.size = Pt(14)
         sentiment_para.font.color.rgb = RGBColor(50, 50, 50)
         sentiment_para.alignment = PP_ALIGN.LEFT
+
+        # Notation in bottom-right corner (e.g., "(C)", "(T)", "(CB)")
+        if notation_text:
+            # Format notation with parentheses
+            formatted_notation = f"({notation_text})" if not notation_text.startswith("(") else notation_text
+
+            # Position in bottom-right corner
+            notation_width = Inches(0.8)
+            notation_height = Inches(0.4)
+            notation_left = slide_width - notation_width - Inches(0.4)
+            notation_top = slide_height - notation_height - Inches(0.4)
+
+            notation_box = slide.shapes.add_textbox(
+                notation_left, notation_top, notation_width, notation_height
+            )
+            notation_tf = notation_box.text_frame
+            notation_tf.clear()
+            notation_para = notation_tf.paragraphs[0]
+            notation_para.text = formatted_notation
+            notation_para.font.size = Pt(18)
+            notation_para.font.bold = True
+            notation_para.alignment = PP_ALIGN.RIGHT
+            notation_para.font.color.rgb = RGBColor(0, 0, 0)
 
     def _render_group_slide(
         self,
