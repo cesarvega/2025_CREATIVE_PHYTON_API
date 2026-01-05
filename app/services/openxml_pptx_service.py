@@ -576,19 +576,10 @@ class OpenXMLPPTXService:
         heading_para.font.color.rgb = NAVY_BLUE
         heading_para.alignment = PP_ALIGN.LEFT
 
-        group_top = heading_top + Inches(0.45)
-        group_box = slide.shapes.add_textbox(
-            margin_left, group_top, available_width, Inches(0.3)
-        )
-        group_tf = group_box.text_frame
-        group_tf.clear()
-        group_para = group_tf.paragraphs[0]
-        group_para.text = f"Group {group_label}" if group_label else ""
-        group_para.font.size = Pt(12)
-        group_para.font.color.rgb = NAVY_BLUE
-        group_para.alignment = PP_ALIGN.LEFT
+        # Note: Group label (e.g., "Group a1") is intentionally not shown in backup presentations
+        # to keep slides clean and avoid cluttering the view
 
-        content_top = group_top + Inches(0.35)
+        content_top = heading_top + Inches(0.8)
         footer_reserved = Inches(1.6)
         content_height = max(Inches(1.0), slide_height - content_top - footer_reserved)
 
