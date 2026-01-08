@@ -25,6 +25,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.table import WD_ALIGN_VERTICAL
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.oxml.shared import qn as qn_helper
 
 from app.config.settings import settings
 from app.constants import TemplateFilename
@@ -452,8 +453,8 @@ class FeedbackTemplateGeneratorOpenXML:
                             first_table = header.tables[0]
                             if first_table.rows:
                                 first_cell = first_table.rows[0].cells[0]
-                                # Set vertical alignment for the cell (bottom to align with text baseline)
-                                first_cell.vertical_alignment = WD_ALIGN_VERTICAL.BOTTOM
+                                # Set vertical alignment for the cell (center)
+                                first_cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
                                 # Get the first paragraph in the cell
                                 if first_cell.paragraphs:
                                     logo_para = first_cell.paragraphs[0]
@@ -461,24 +462,42 @@ class FeedbackTemplateGeneratorOpenXML:
                                     existing_text = logo_para.text
                                     # Clear the paragraph
                                     logo_para.clear()
-                                    # Set paragraph alignment and spacing
+                                    
+                                    # CRITICAL: Set paragraph spacing to zero
                                     logo_para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
                                     logo_para.paragraph_format.space_before = Pt(0)
                                     logo_para.paragraph_format.space_after = Pt(0)
                                     logo_para.paragraph_format.line_spacing = 1.0
-                                    # Add logo as first run (inline with text)
+                                    
+                                    # Set paragraph to align elements at bottom (baseline alignment)
+                                    try:
+                                        pPr = logo_para._element.get_or_add_pPr()
+                                        # Remove any existing textAlignment
+                                        for textAlign in pPr.findall(qn('w:textAlignment')):
+                                            pPr.remove(textAlign)
+                                        # Add textAlignment = bottom (aligns at baseline)
+                                        textAlignment = OxmlElement('w:textAlignment')
+                                        textAlignment.set(qn('w:val'), 'bottom')
+                                        pPr.append(textAlignment)
+                                    except Exception as e:
+                                        logger.debug("[OpenXML] Could not set baseline alignment: %s", str(e))
+                                    
+                                    # Add logo inline - height matched to text size
                                     logo_run = logo_para.add_run()
-                                    # Set logo dimensions: width=0.67", height=0.38"
-                                    picture = logo_run.add_picture(str(logo_path), width=Inches(0.67), height=Inches(0.38))
-                                    # Add small space after logo
-                                    space_run = logo_para.add_run(" ")
+                                    # Very small logo: 12pt height (same as text size approximately)
+                                    picture = logo_run.add_picture(str(logo_path), height=Pt(12))
+                                    
+                                    # Add non-breaking space after logo for better spacing
+                                    space_run = logo_para.add_run("\u00A0\u00A0")  # Two non-breaking spaces
                                     space_run.font.size = Pt(8.5)
                                     space_run.font.bold = True
+                                    
                                     # Add back the existing text with proper formatting
                                     text_run = logo_para.add_run(existing_text)
                                     text_run.font.size = Pt(8.5)
                                     text_run.font.bold = True
-                                    logger.info("[OpenXML] Logo inserted in header table")
+                                    
+                                    logger.info("[OpenXML] Logo inserted inline at 12pt height with baseline alignment")
                         else:
                             # Insert logo in first paragraph if no table
                             if header.paragraphs:
@@ -700,65 +719,97 @@ class FeedbackTemplateGeneratorOpenXML:
                     # Add new row to table
                     new_row = table.add_row()
 
-                    # Get reference to header row for styling
-                    header_row = table.rows[0]
-
-                    # FIRST: Set vertical center alignment and white background for ALL cells BEFORE filling content
-                    for cell in new_row.cells:
-                        cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
-                        self._set_cell_white_background(cell)
+                    # Set minimum row height to make vertical centering visible
+                    tr = new_row._element
+                    trPr = tr.get_or_add_trPr()
+                    
+                    # Remove existing height if present
+                    for existing_height in trPr.findall(qn('w:trHeight')):
+                        trPr.remove(existing_height)
+                    
+                    # Set row height to at least 0.4 inches (~1 cm) to make centering visible
+                    trHeight = OxmlElement('w:trHeight')
+                    trHeight.set(qn('w:val'), '576')  # 576 twips = 0.4 inches
+                    trHeight.set(qn('w:hRule'), 'atLeast')  # Allow expansion if needed
+                    trPr.append(trHeight)
 
                     # Column 1: Row number - CENTER aligned
-                    if len(new_row.cells) >= 1:
-                        cell = new_row.cells[0]
-                        cell.text = str(idx + 1)
-                        para = cell.paragraphs[0]
-                        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        for run in para.runs:
-                            run.font.size = Pt(10)
-                            run.font.bold = False
-                            run.font.name = "Calibri"
+                    cell = new_row.cells[0]
+                    cell.text = str(idx + 1)
+                    para = cell.paragraphs[0]
+                    para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    for run in para.runs:
+                        run.font.size = Pt(10)
+                        run.font.bold = False
+                        run.font.name = "Calibri"
+                    # Apply vertical center using XML
+                    self._set_cell_vertical_center(cell)
 
-                    # Column 2: Test Name (Candidate) - IN BOLD, LEFT ALIGNED
-                    if len(new_row.cells) >= 2:
-                        cell = new_row.cells[1]
-                        cell.text = str(row_dict.get('Test Name') or '')
-                        para = cell.paragraphs[0]
-                        para.alignment = WD_ALIGN_PARAGRAPH.LEFT
-                        for run in para.runs:
-                            run.font.size = Pt(10)
-                            run.font.bold = True
-                            run.font.name = "Calibri"
+                    # Column 2: Test Name (Candidate) - IN BOLD, CENTER ALIGNED
+                    cell = new_row.cells[1]
+                    cell.text = str(row_dict.get('Test Name') or '')
+                    para = cell.paragraphs[0]
+                    para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    for run in para.runs:
+                        run.font.size = Pt(10)
+                        run.font.bold = True
+                        run.font.name = "Calibri"
+                    # Apply vertical center using XML
+                    self._set_cell_vertical_center(cell)
 
-                    # Column 3: Pronunciation - LEFT ALIGNED
-                    if len(new_row.cells) >= 3:
-                        cell = new_row.cells[2]
-                        cell.text = str(row_dict.get('Pronunciation') or '')
-                        para = cell.paragraphs[0]
-                        para.alignment = WD_ALIGN_PARAGRAPH.LEFT
-                        for run in para.runs:
-                            run.font.size = Pt(10)
-                            run.font.bold = False
-                            run.font.name = "Calibri"
+                    # Column 3: Pronunciation - CENTER ALIGNED
+                    cell = new_row.cells[2]
+                    cell.text = str(row_dict.get('Pronunciation') or '')
+                    para = cell.paragraphs[0]
+                    para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    for run in para.runs:
+                        run.font.size = Pt(10)
+                        run.font.bold = False
+                        run.font.name = "Calibri"
+                    # Apply vertical center using XML
+                    self._set_cell_vertical_center(cell)
 
-                    # Column 4: Rationale - LEFT ALIGNED
-                    if len(new_row.cells) >= 4:
-                        cell = new_row.cells[3]
-                        cell.text = str(row_dict.get('Rationale') or '')
-                        para = cell.paragraphs[0]
-                        para.alignment = WD_ALIGN_PARAGRAPH.LEFT
-                        for run in para.runs:
-                            run.font.size = Pt(10)
-                            run.font.bold = False
-                            run.font.name = "Calibri"
+                    # Column 4: Rationale - CENTER ALIGNED
+                    cell = new_row.cells[3]
+                    cell.text = str(row_dict.get('Rationale') or '')
+                    para = cell.paragraphs[0]
+                    para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    for run in para.runs:
+                        run.font.size = Pt(10)
+                        run.font.bold = False
+                        run.font.name = "Calibri"
+                    # Apply vertical center using XML
+                    self._set_cell_vertical_center(cell)
 
                     # Columns 5-8: Positive, Neutral, Negative, Comments/Suggestions - CENTER aligned
-                    # These are left empty for the client to fill
                     for col_idx in range(4, min(8, len(new_row.cells))):
                         cell = new_row.cells[col_idx]
                         cell.text = ""
                         para = cell.paragraphs[0]
                         para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        # Ensure font formatting even for empty cells
+                        if para.runs:
+                            for run in para.runs:
+                                run.font.size = Pt(10)
+                                run.font.bold = False
+                                run.font.name = "Calibri"
+                        else:
+                            # Add a run with proper formatting for empty cells
+                            run = para.add_run()
+                            run.font.size = Pt(10)
+                            run.font.bold = False
+                            run.font.name = "Calibri"
+                        # Apply vertical center using XML
+                        self._set_cell_vertical_center(cell)
+
+                    # Set white background for ALL cells using XML
+                    for cell in new_row.cells:
+                        tcPr = cell._element.get_or_add_tcPr()
+                        for shd in tcPr.findall(qn('w:shd')):
+                            tcPr.remove(shd)
+                        shading_elm = OxmlElement('w:shd')
+                        shading_elm.set(qn('w:fill'), 'FFFFFF')
+                        tcPr.append(shading_elm)
 
                     logger.debug("[OpenXML] Added row %d: %s", idx + 1, row_dict.get('Test Name', ''))
 
@@ -788,6 +839,30 @@ class FeedbackTemplateGeneratorOpenXML:
             vAlign = OxmlElement('w:vAlign')
             vAlign.set(qn('w:val'), 'center')
             tcPr.insert(0, vAlign)
+
+            # Set cell margins to provide space for vertical centering
+            tcMar = tcPr.find(qn('w:tcMar'))
+            if tcMar is None:
+                tcMar = OxmlElement('w:tcMar')
+                tcPr.append(tcMar)
+            else:
+                # Clear existing margins
+                for child in list(tcMar):
+                    tcMar.remove(child)
+            
+            # Set balanced top/bottom margins (100 twips = ~7pt padding)
+            for margin_name in ['top', 'bottom']:
+                margin = OxmlElement(f'w:{margin_name}')
+                margin.set(qn('w:w'), '100')  # 100 twips = ~7pt
+                margin.set(qn('w:type'), 'dxa')
+                tcMar.append(margin)
+            
+            # Smaller left/right margins
+            for margin_name in ['left', 'right']:
+                margin = OxmlElement(f'w:{margin_name}')
+                margin.set(qn('w:w'), '50')  # 50 twips = ~3.5pt
+                margin.set(qn('w:type'), 'dxa')
+                tcMar.append(margin)
 
         except Exception as e:
             logger.debug("[OpenXML] Error setting vertical alignment: %s", str(e))
