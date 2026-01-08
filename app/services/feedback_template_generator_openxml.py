@@ -22,6 +22,7 @@ import matplotlib.patches as mpatches
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_ALIGN_VERTICAL
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
@@ -244,6 +245,10 @@ class FeedbackTemplateGeneratorOpenXML:
             if progress_callback:
                 progress_callback(70)
 
+            # Format header with correct font size and style
+            logger.info("[OpenXML] Formatting header")
+            self._format_document_header(doc)
+
             # PHASE 2: Populate tables with results (70-80%)
             logger.info("[OpenXML] Phase 2: Populating tables")
             self._populate_feedback_tables(doc, presentation_id)
@@ -425,6 +430,117 @@ class FeedbackTemplateGeneratorOpenXML:
             else:
                 paragraph.add_run(new_text)
 
+    def _format_document_header(self, doc: Document) -> None:
+        """Format document header with correct font size (8.5pt) and bold, and add logo if available.
+
+        Args:
+            doc: python-docx Document object
+        """
+        try:
+            logger.info("[OpenXML] Formatting document header")
+
+            for section in doc.sections:
+                header = section.header
+
+                # Insert logo at the beginning of the header if logo file exists
+                logo_path = settings.app_dir / "templates" / "bi_logo.png"
+                if logo_path.exists():
+                    try:
+                        # Check if header has a table (common structure for Word headers)
+                        if header.tables:
+                            # Insert logo in first cell of first table
+                            first_table = header.tables[0]
+                            if first_table.rows:
+                                first_cell = first_table.rows[0].cells[0]
+                                # Set vertical alignment for the cell (bottom to align with text baseline)
+                                first_cell.vertical_alignment = WD_ALIGN_VERTICAL.BOTTOM
+                                # Get the first paragraph in the cell
+                                if first_cell.paragraphs:
+                                    logo_para = first_cell.paragraphs[0]
+                                    # Save existing text
+                                    existing_text = logo_para.text
+                                    # Clear the paragraph
+                                    logo_para.clear()
+                                    # Set paragraph alignment and spacing
+                                    logo_para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                                    logo_para.paragraph_format.space_before = Pt(0)
+                                    logo_para.paragraph_format.space_after = Pt(0)
+                                    logo_para.paragraph_format.line_spacing = 1.0
+                                    # Add logo as first run (inline with text)
+                                    logo_run = logo_para.add_run()
+                                    # Set logo dimensions: width=0.67", height=0.38"
+                                    picture = logo_run.add_picture(str(logo_path), width=Inches(0.67), height=Inches(0.38))
+                                    # Add small space after logo
+                                    space_run = logo_para.add_run(" ")
+                                    space_run.font.size = Pt(8.5)
+                                    space_run.font.bold = True
+                                    # Add back the existing text with proper formatting
+                                    text_run = logo_para.add_run(existing_text)
+                                    text_run.font.size = Pt(8.5)
+                                    text_run.font.bold = True
+                                    logger.info("[OpenXML] Logo inserted in header table")
+                        else:
+                            # Insert logo in first paragraph if no table
+                            if header.paragraphs:
+                                first_para = header.paragraphs[0]
+                                # Save existing text
+                                existing_text = first_para.text
+                                # Clear the paragraph
+                                first_para.clear()
+                                # Set paragraph alignment and spacing
+                                first_para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                                first_para.paragraph_format.space_before = Pt(0)
+                                first_para.paragraph_format.space_after = Pt(0)
+                                # Add logo as first run (inline with text)
+                                logo_run = first_para.add_run()
+                                # Set logo dimensions: width=0.67", height=0.38"
+                                logo_run.add_picture(str(logo_path), width=Inches(0.67), height=Inches(0.38))
+                                # Add small space after logo
+                                space_run = first_para.add_run("  ")
+                                space_run.font.size = Pt(8.5)
+                                space_run.font.bold = True
+                                # Add back the existing text with proper formatting
+                                text_run = first_para.add_run(existing_text)
+                                text_run.font.size = Pt(8.5)
+                                text_run.font.bold = True
+                                logger.info("[OpenXML] Logo inserted in header paragraph")
+                    except Exception as logo_error:
+                        logger.warning("[OpenXML] Error inserting logo: %s", str(logo_error))
+                else:
+                    logger.debug("[OpenXML] Logo file not found at: %s", logo_path)
+
+                # Format all paragraphs in header
+                for paragraph in header.paragraphs:
+                    for run in paragraph.runs:
+                        # Skip image runs (don't format logo)
+                        if hasattr(run, '_element') and run._element.xpath('.//w:drawing'):
+                            continue
+                        # Set font size to 8.5pt
+                        run.font.size = Pt(8.5)
+                        # Set bold
+                        run.font.bold = True
+                        logger.debug("[OpenXML] Formatted header paragraph: %s", paragraph.text[:50])
+
+                # Format text in header tables (if any)
+                for table in header.tables:
+                    for row in table.rows:
+                        for cell in row.cells:
+                            for paragraph in cell.paragraphs:
+                                for run in paragraph.runs:
+                                    # Skip image runs (don't format logo)
+                                    if hasattr(run, '_element') and run._element.xpath('.//w:drawing'):
+                                        continue
+                                    # Set font size to 8.5pt
+                                    run.font.size = Pt(8.5)
+                                    # Set bold
+                                    run.font.bold = True
+                                    logger.debug("[OpenXML] Formatted header table cell: %s", paragraph.text[:50])
+
+            logger.info("[OpenXML] Header formatting completed")
+
+        except Exception as e:
+            logger.warning("[OpenXML] Error formatting header: %s", str(e))
+
     def _populate_feedback_tables(self, doc: Document, presentation_id: int) -> None:
         """Populate the feedback table using the nw_wdToIndicateFeedback SP.
 
@@ -485,6 +601,16 @@ class FeedbackTemplateGeneratorOpenXML:
         Col 4: 'Neutral' (empty for client)
         Col 5: 'Negative' (empty for client)
         Col 6: 'Comments/Suggestions' (empty for client)
+
+        But the Word template table has this structure:
+        Col 1: # (row number)
+        Col 2: Test Name
+        Col 3: Pronunciation (left empty - SP doesn't return this field)
+        Col 4: Rationale
+        Col 5: Positive (empty checkbox)
+        Col 6: Neutral (empty checkbox)
+        Col 7: Negative (empty checkbox)
+        Col 8: Comments/Suggestions (empty)
 
         Args:
             table: python-docx Table object
@@ -577,34 +703,62 @@ class FeedbackTemplateGeneratorOpenXML:
                     # Get reference to header row for styling
                     header_row = table.rows[0]
 
-                    # Column 1: Row number
+                    # FIRST: Set vertical center alignment and white background for ALL cells BEFORE filling content
+                    for cell in new_row.cells:
+                        cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+                        self._set_cell_white_background(cell)
+
+                    # Column 1: Row number - CENTER aligned
                     if len(new_row.cells) >= 1:
                         cell = new_row.cells[0]
                         cell.text = str(idx + 1)
-                        self._copy_cell_style(header_row.cells[0], cell, is_header=False)
+                        para = cell.paragraphs[0]
+                        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        for run in para.runs:
+                            run.font.size = Pt(10)
+                            run.font.bold = False
+                            run.font.name = "Calibri"
 
-                    # Column 2: Test Name (Candidate) - IN BOLD
+                    # Column 2: Test Name (Candidate) - IN BOLD, LEFT ALIGNED
                     if len(new_row.cells) >= 2:
                         cell = new_row.cells[1]
                         cell.text = str(row_dict.get('Test Name') or '')
-                        self._copy_cell_style(header_row.cells[1], cell, is_header=False)
-                        # Make Test Name bold (candidate name)
-                        for paragraph in cell.paragraphs:
-                            for run in paragraph.runs:
-                                run.font.bold = True
+                        para = cell.paragraphs[0]
+                        para.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                        for run in para.runs:
+                            run.font.size = Pt(10)
+                            run.font.bold = True
+                            run.font.name = "Calibri"
 
-                    # Column 3: Rationale
+                    # Column 3: Pronunciation - LEFT ALIGNED
                     if len(new_row.cells) >= 3:
                         cell = new_row.cells[2]
-                        cell.text = str(row_dict.get('Rationale') or '')
-                        self._copy_cell_style(header_row.cells[2], cell, is_header=False)
+                        cell.text = str(row_dict.get('Pronunciation') or '')
+                        para = cell.paragraphs[0]
+                        para.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                        for run in para.runs:
+                            run.font.size = Pt(10)
+                            run.font.bold = False
+                            run.font.name = "Calibri"
 
-                    # Columns 4-7: Positive, Neutral, Negative, Comments/Suggestions
+                    # Column 4: Rationale - LEFT ALIGNED
+                    if len(new_row.cells) >= 4:
+                        cell = new_row.cells[3]
+                        cell.text = str(row_dict.get('Rationale') or '')
+                        para = cell.paragraphs[0]
+                        para.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                        for run in para.runs:
+                            run.font.size = Pt(10)
+                            run.font.bold = False
+                            run.font.name = "Calibri"
+
+                    # Columns 5-8: Positive, Neutral, Negative, Comments/Suggestions - CENTER aligned
                     # These are left empty for the client to fill
-                    for col_idx in range(3, min(7, len(new_row.cells))):
+                    for col_idx in range(4, min(8, len(new_row.cells))):
                         cell = new_row.cells[col_idx]
                         cell.text = ""
-                        self._copy_cell_style(header_row.cells[col_idx], cell, is_header=False)
+                        para = cell.paragraphs[0]
+                        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
                     logger.debug("[OpenXML] Added row %d: %s", idx + 1, row_dict.get('Test Name', ''))
 
@@ -615,6 +769,49 @@ class FeedbackTemplateGeneratorOpenXML:
 
         except Exception as e:
             logger.error("[OpenXML] Error populating feedback table from SP: %s", str(e), exc_info=True)
+
+    def _set_cell_vertical_center(self, cell) -> None:
+        """Set cell vertical alignment to center using XML manipulation.
+
+        Args:
+            cell: python-docx Cell object
+        """
+        try:
+            tc = cell._element
+            tcPr = tc.get_or_add_tcPr()
+
+            # Remove existing vAlign elements
+            for vAlign in tcPr.findall(qn('w:vAlign')):
+                tcPr.remove(vAlign)
+
+            # Add new vAlign element at the beginning for higher precedence
+            vAlign = OxmlElement('w:vAlign')
+            vAlign.set(qn('w:val'), 'center')
+            tcPr.insert(0, vAlign)
+
+        except Exception as e:
+            logger.debug("[OpenXML] Error setting vertical alignment: %s", str(e))
+
+    def _set_cell_white_background(self, cell) -> None:
+        """Set cell background to white using XML manipulation.
+
+        Args:
+            cell: python-docx Cell object
+        """
+        try:
+            tcPr = cell._element.get_or_add_tcPr()
+
+            # Remove existing shading if present
+            for shd in tcPr.findall(qn('w:shd')):
+                tcPr.remove(shd)
+
+            # Add white background
+            shading_elm = OxmlElement('w:shd')
+            shading_elm.set(qn('w:fill'), 'FFFFFF')
+            tcPr.append(shading_elm)
+
+        except Exception as e:
+            logger.debug("[OpenXML] Error setting white background: %s", str(e))
 
     def _copy_cell_style(self, source_cell, target_cell, is_header: bool = False) -> None:
         """Copy cell styling from source to target cell.
@@ -627,17 +824,32 @@ class FeedbackTemplateGeneratorOpenXML:
         try:
             # Set background to white for body cells
             if not is_header:
+                tcPr = target_cell._element.get_or_add_tcPr()
+
+                # Remove existing shading if present to avoid duplicates
+                existing_shd = tcPr.findall(qn('w:shd'))
+                for shd in existing_shd:
+                    tcPr.remove(shd)
+
+                # Add white background
                 shading_elm = OxmlElement('w:shd')
                 shading_elm.set(qn('w:fill'), 'FFFFFF')  # White background
-                target_cell._element.get_or_add_tcPr().append(shading_elm)
+                tcPr.append(shading_elm)
+
+            # Note: Vertical alignment is set separately by calling code
+            # Don't set it here to avoid conflicts
 
             # Copy paragraph formatting
             if source_cell.paragraphs and target_cell.paragraphs:
                 source_para = source_cell.paragraphs[0]
                 target_para = target_cell.paragraphs[0]
 
-                # Copy alignment
-                target_para.alignment = source_para.alignment
+                # Set left alignment for body cells
+                if not is_header:
+                    target_para.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                else:
+                    # Copy alignment for header
+                    target_para.alignment = source_para.alignment
 
                 # Copy font formatting (but not bold for body cells)
                 if source_para.runs and target_para.runs:
@@ -646,8 +858,14 @@ class FeedbackTemplateGeneratorOpenXML:
 
                     if source_run.font.name:
                         target_run.font.name = source_run.font.name
-                    if source_run.font.size:
-                        target_run.font.size = source_run.font.size
+
+                    # Set font size: 10pt for body cells, keep header size for header cells
+                    if is_header:
+                        if source_run.font.size:
+                            target_run.font.size = source_run.font.size
+                    else:
+                        # Body cells always use 10pt
+                        target_run.font.size = Pt(10)
 
                     # Only copy bold if it's a header cell
                     if is_header and source_run.font.bold:

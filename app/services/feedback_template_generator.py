@@ -197,6 +197,10 @@ class FeedbackTemplateGenerator:
                         replacement.value
                     )
 
+            # Format header with correct font size and style
+            logger.info("Formatting header")
+            self._format_document_header(doc)
+
             # PHASE 2: Populate tables with results (70-80%)
             if progress_callback:
                 progress_callback(70)
@@ -459,6 +463,75 @@ class FeedbackTemplateGenerator:
 
         return replacements_made
 
+    def _format_document_header(self, doc) -> None:
+        """Format document header with correct font size (8.5pt) and bold, and add logo if available.
+
+        Args:
+            doc: Word Document COM object
+        """
+        try:
+            logger.info("Formatting document header")
+
+            # Iterate through all sections in the document
+            for section_idx in range(1, doc.Sections.Count + 1):
+                section = doc.Sections(section_idx)
+
+                # Get the header for this section
+                # wdHeaderFooterPrimary = 1
+                WD_HEADER_FOOTER_PRIMARY = 1
+                try:
+                    header = section.Headers(WD_HEADER_FOOTER_PRIMARY)
+
+                    # Check if logo file exists
+                    logo_path = settings.app_dir / "templates" / "bi_logo.png"
+                    if logo_path.exists():
+                        try:
+                            # Insert logo at the beginning of header if table exists
+                            if header.Range.Tables.Count > 0:
+                                first_table = header.Range.Tables(1)
+                                if first_table.Rows.Count > 0:
+                                    first_cell = first_table.Rows(1).Cells(1)
+                                    # Set vertical alignment for the cell (center)
+                                    # wdCellAlignVerticalCenter = 1
+                                    first_cell.VerticalAlignment = 1
+                                    # Insert logo inline shape at the very beginning
+                                    logo_range = first_cell.Range
+                                    # Move to start of cell (before any text)
+                                    logo_range.Collapse(Direction=1)  # wdCollapseStart = 1
+                                    # Insert picture
+                                    logo_shape = logo_range.InlineShapes.AddPicture(
+                                        FileName=str(logo_path.absolute()),
+                                        LinkToFile=False,
+                                        SaveWithDocument=True
+                                    )
+                                    # Set logo dimensions: width=0.67", height=0.38"
+                                    # 0.67 inches = 48.24 points, 0.38 inches = 27.36 points
+                                    logo_shape.Width = 48.24
+                                    logo_shape.Height = 27.36
+                                    # Add space after logo
+                                    logo_range.Collapse(Direction=0)  # wdCollapseEnd = 0
+                                    logo_range.InsertAfter("  ")
+                                    logger.info("Logo inserted in header table")
+                        except Exception as logo_error:
+                            logger.warning("Error inserting logo: %s", str(logo_error))
+                    else:
+                        logger.debug("Logo file not found at: %s", logo_path)
+
+                    # Format all text in header to 8.5pt and bold
+                    header_range = header.Range
+                    # Format font
+                    header_range.Font.Size = 8.5
+                    header_range.Font.Bold = True
+                    logger.debug("Formatted header section %d", section_idx)
+
+                except Exception as header_error:
+                    logger.warning("Error formatting header in section %d: %s", section_idx, str(header_error))
+
+            logger.info("Header formatting completed")
+
+        except Exception as e:
+            logger.warning("Error formatting header: %s", str(e))
+
     def _populate_feedback_tables(self, doc, presentation_id: int, is_phonetics: bool) -> None:
         """Populate the feedback table using the correct stored procedure.
 
@@ -533,6 +606,16 @@ class FeedbackTemplateGenerator:
         Col 4: 'Neutral' (empty for client)
         Col 5: 'Negative' (empty for client)
         Col 6: 'Comments/Suggestions' (empty for client)
+
+        But the Word template table has this structure:
+        Col 1: # (row number)
+        Col 2: Test Name
+        Col 3: Pronunciation (left empty - SP doesn't return this field)
+        Col 4: Rationale
+        Col 5: Positive (empty checkbox)
+        Col 6: Neutral (empty checkbox)
+        Col 7: Negative (empty checkbox)
+        Col 8: Comments/Suggestions (empty)
 
         Args:
             table: Word Table object
@@ -628,29 +711,66 @@ class FeedbackTemplateGenerator:
                     # The SP already provides the data in the correct format
                     # We just need to copy it to the Word table cells
 
-                    # Column 1: Row number (from ' ' column in SP)
+                    # Set vertical alignment for all cells in the row (center)
+                    # wdCellAlignVerticalCenter = 1
+                    for cell_idx in range(1, new_row.Cells.Count + 1):
+                        new_row.Cells(cell_idx).VerticalAlignment = 1
+
+                    # Column 1: Row number - CENTER aligned
                     if new_row.Cells.Count >= 1:
                         cell_range = new_row.Cells(1).Range
                         cell_range.Text = str(idx + 1)
+                        cell_range.Font.Size = 10
                         cell_range.Font.Bold = False
+                        cell_range.Font.Name = "Calibri"
+                        cell_range.ParagraphFormat.Alignment = 1  # wdAlignParagraphCenter
+                        new_row.Cells(1).VerticalAlignment = 1  # wdCellAlignVerticalCenter
 
-                    # Column 2: Test Name
+                    # Column 2: Test Name - LEFT aligned, BOLD
                     if new_row.Cells.Count >= 2:
                         cell_range = new_row.Cells(2).Range
                         cell_range.Text = str(row_dict.get('Test Name') or '')
-                        cell_range.Font.Bold = False
+                        cell_range.Font.Size = 10
+                        cell_range.Font.Bold = True  # Test Name should be bold
+                        cell_range.Font.Name = "Calibri"
+                        cell_range.ParagraphFormat.Alignment = 0  # wdAlignParagraphLeft
+                        new_row.Cells(2).VerticalAlignment = 1  # wdCellAlignVerticalCenter
 
-                    # Column 3: Rationale
+                    # Column 3: Pronunciation - LEFT aligned
                     if new_row.Cells.Count >= 3:
                         cell_range = new_row.Cells(3).Range
-                        cell_range.Text = str(row_dict.get('Rationale') or '')
+                        cell_range.Text = str(row_dict.get('Pronunciation') or '')
+                        cell_range.Font.Size = 10
                         cell_range.Font.Bold = False
+                        cell_range.Font.Name = "Calibri"
+                        cell_range.ParagraphFormat.Alignment = 0  # wdAlignParagraphLeft
+                        new_row.Cells(3).VerticalAlignment = 1  # wdCellAlignVerticalCenter
 
-                    # Columns 4-7: Positive, Neutral, Negative, Comments/Suggestions
-                    # These are left empty for the client to fill (already empty from SP)
+                    # Column 4: Rationale - LEFT aligned
+                    if new_row.Cells.Count >= 4:
+                        cell_range = new_row.Cells(4).Range
+                        cell_range.Text = str(row_dict.get('Rationale') or '')
+                        cell_range.Font.Size = 10
+                        cell_range.Font.Bold = False
+                        cell_range.Font.Name = "Calibri"
+                        cell_range.ParagraphFormat.Alignment = 0  # wdAlignParagraphLeft
+                        new_row.Cells(4).VerticalAlignment = 1  # wdCellAlignVerticalCenter
 
-                    # Ensure row font isn't accidentally bolded by style inheritance
+                    # Columns 5-8: Positive, Neutral, Negative, Comments/Suggestions - CENTER aligned
+                    # These are left empty for the client to fill
+                    for col_idx in range(5, min(9, new_row.Cells.Count + 1)):
+                        if new_row.Cells.Count >= col_idx:
+                            cell_range = new_row.Cells(col_idx).Range
+                            cell_range.Text = ""
+                            cell_range.Font.Size = 10
+                            cell_range.Font.Bold = False
+                            cell_range.Font.Name = "Calibri"
+                            cell_range.ParagraphFormat.Alignment = 1  # wdAlignParagraphCenter
+                            new_row.Cells(col_idx).VerticalAlignment = 1  # wdCellAlignVerticalCenter
+
+                    # Ensure row font is 10pt and not bolded by style inheritance
                     try:
+                        new_row.Range.Font.Size = 10
                         new_row.Range.Font.Bold = False
                     except Exception:
                         pass
