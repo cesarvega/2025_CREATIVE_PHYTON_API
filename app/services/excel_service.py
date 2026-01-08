@@ -227,6 +227,15 @@ def process_excel_file(
 
             name, notation = _split_name_and_notation(raw_name)
 
+            # For NW projects, keep notation in the name and leave notation field empty
+            if notation:
+                name_with_notation = f"{name} ({notation})"
+                final_name = name_with_notation
+                final_notation = ""
+            else:
+                final_name = name
+                final_notation = ""
+
             # Extract group letter from Grupo1/Grupo2 (e.g., "a1" -> "A", "b2" -> "B")
             if raw_name_sub_group and len(raw_name_sub_group) > 0:
                 # Take the first character and uppercase it
@@ -240,9 +249,9 @@ def process_excel_file(
 
             lst_types.append(marker)
             lst_categories.append(raw_category)
-            lst_names.append(name)
+            lst_names.append(final_name)
             lst_rationales.append(raw_rationale)
-            lst_notations.append(notation)
+            lst_notations.append(final_notation)
             lst_kana.append(raw_kana)
             lst_logos.append(raw_logo)
             lst_name_sub_groups.append(raw_name_sub_group)
@@ -277,6 +286,15 @@ def process_excel_file(
 
             name, notation = _split_name_and_notation(raw_name)
 
+            # For NW projects, keep notation in the name and leave notation field empty
+            if notation:
+                name_with_notation = f"{name} ({notation})"
+                final_name = name_with_notation
+                final_notation = ""
+            else:
+                final_name = name
+                final_notation = ""
+
             # Extract group letter from Grupo1/Grupo2 (e.g., "a1" -> "A", "b2" -> "B")
             if raw_name_sub_group and len(raw_name_sub_group) > 0:
                 # Take the first character and uppercase it
@@ -290,14 +308,14 @@ def process_excel_file(
                 marker = m.group(1).upper() if m else ""
             else:
                 marker = ""
-            
+
             if not raw_name_sub_group:
                 # Single row, no grouping
                 lst_types.append(marker)
                 lst_categories.append(raw_category)
-                lst_names.append(name)
+                lst_names.append(final_name)
                 lst_rationales.append(raw_rationale)
-                lst_notations.append(notation)
+                lst_notations.append(final_notation)
                 lst_kana.append(raw_kana)
                 lst_logos.append(raw_logo)
                 lst_name_sub_groups.append("")
@@ -305,15 +323,15 @@ def process_excel_file(
                 processed_indices.add(i)
             else:
                 # Group multiple rows with same sub_group
-                grouped_names = [name]
+                grouped_names = [final_name]
                 grouped_rationales = [raw_rationale] if raw_rationale else []
                 processed_indices.add(i)
-                
+
                 # Look for other rows with same sub_group
                 for j in range(i + 1, len(all_rows)):
                     if j in processed_indices:
                         continue
-                    
+
                     other_row = all_rows[j]
                     # Extract subgroup from other row: Check column G (Group1) first
                     other_sub_group = _clean(
@@ -322,16 +340,22 @@ def process_excel_file(
                     # If column G is empty, fallback to column H (Group2)
                     if not other_sub_group and len(other_row) >= NAME_SUBGROUP_COLUMN + 1:
                         other_sub_group = _clean(str(other_row[NAME_SUBGROUP_COLUMN].value))
-                    
+
                     if other_sub_group == raw_name_sub_group:
                         other_name = _clean(str(other_row[NAME_COLUMN - 1].value) if len(other_row) >= NAME_COLUMN else "")
                         other_rationale = _clean(str(other_row[RATIONALE_COLUMN - 1].value) if len(other_row) >= RATIONALE_COLUMN else "")
-                        other_name_clean, _ = _split_name_and_notation(other_name)
-                        
-                        grouped_names.append(other_name_clean)
+                        other_name_clean, other_notation = _split_name_and_notation(other_name)
+
+                        # Keep notation in the name for grouped items as well
+                        if other_notation:
+                            other_final_name = f"{other_name_clean} ({other_notation})"
+                        else:
+                            other_final_name = other_name_clean
+
+                        grouped_names.append(other_final_name)
                         grouped_rationales.append(other_rationale)
                         processed_indices.add(j)
-                
+
                 # Combine with delimiter
                 combined_name = delimiter.join(grouped_names) + delimiter
                 combined_rationale = delimiter.join(grouped_rationales) + delimiter
@@ -340,7 +364,7 @@ def process_excel_file(
                 lst_categories.append(raw_category)
                 lst_names.append(combined_name)
                 lst_rationales.append(combined_rationale)
-                lst_notations.append(notation)
+                lst_notations.append(final_notation)
                 lst_kana.append(raw_kana)
                 lst_logos.append(raw_logo)
                 lst_name_sub_groups.append(raw_name_sub_group)

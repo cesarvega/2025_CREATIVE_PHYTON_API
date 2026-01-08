@@ -1928,6 +1928,12 @@ class PresentationService:
         group_name = current_group or excel_data.lst_categories[index]
         group_letter = excel_data.lst_group_letters[index] if index < len(excel_data.lst_group_letters) else ""
 
+        # For NW projects with notation in the name, add suffix to group_name
+        # Check if name has notation by looking for parentheses pattern
+        name = excel_data.lst_names[index]
+        if "(" in name and ")" in name and request.project_type.upper() == "NW":
+            group_name = f"{group_name} $ Name Candidate Evaluation"
+
         return DetailItem(
             slide_number=slide_number,
             slide_type=slide_type,
