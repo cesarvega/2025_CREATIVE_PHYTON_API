@@ -246,9 +246,14 @@ class FeedbackTemplateGeneratorOpenXML:
             if progress_callback:
                 progress_callback(70)
 
-            # Format header with correct font size and style
-            logger.info("[OpenXML] Formatting header")
-            self._format_document_header(doc)
+            # Format header with correct font size and style (includes logo insertion)
+            logger.info("[OpenXML] Formatting header and inserting logo")
+            try:
+                self._format_document_header_modern(doc)
+                logger.info("[OpenXML] Modern header applied successfully")
+            except Exception as header_error:
+                logger.warning("[OpenXML] Modern header failed, falling back to legacy layout: %s", str(header_error))
+                self._format_document_header_OLD(doc)
 
             # PHASE 2: Populate tables with results (70-80%)
             logger.info("[OpenXML] Phase 2: Populating tables")
@@ -431,7 +436,346 @@ class FeedbackTemplateGeneratorOpenXML:
             else:
                 paragraph.add_run(new_text)
 
-    def _format_document_header(self, doc: Document) -> None:
+    def _get_section_headers(self, section) -> List:
+        """Return all header parts for a section (default, first-page, even), de-duplicated."""
+        headers = []
+        seen = set()
+        for hdr in [section.header, getattr(section, "first_page_header", None), getattr(section, "even_page_header", None)]:
+            if hdr is None:
+                continue
+            # Use id to avoid duplicate processing of shared parts
+            hdr_id = id(hdr)
+            if hdr_id in seen:
+                continue
+            seen.add(hdr_id)
+            headers.append(hdr)
+        return headers
+
+    def _format_document_header_with_logo(self, doc: Document) -> None:
+        """Format document header with logo in a clean table layout.
+
+        This method is called AFTER placeholders are replaced, so all text is final.
+        Creates a 2-column borderless table: logo on left, all header content on right.
+
+        Args:
+            doc: python-docx Document object
+        """
+        try:
+            logger.info("[OpenXML] === Starting header formatting with logo ===")
+            logo_path = settings.app_dir / "templates" / "bi_logo.png"
+
+            for section_idx, section in enumerate(doc.sections):
+                logger.info(f"[OpenXML] Processing section {section_idx + 1}")
+                for header in self._get_section_headers(section):
+                    # Step 1: Collect ALL text from the header (from all sources)
+                    all_text_parts = []
+
+                    logger.info(f"[OpenXML] Header has {len(header.paragraphs)} paragraphs and {len(header.tables)} tables")
+
+                    # Collect from paragraphs
+                    for idx, para in enumerate(header.paragraphs):
+                        text = para.text.strip()
+                        logger.debug(f"[OpenXML] Paragraph {idx}: '{text}'")
+                        if text:
+                            all_text_parts.append(text)
+
+                    # Collect from tables
+                    for table_idx, table in enumerate(header.tables):
+                        logger.debug(f"[OpenXML] Processing table {table_idx}")
+                        for row_idx, row in enumerate(table.rows):
+                            for cell_idx, cell in enumerate(row.cells):
+                                for para_idx, para in enumerate(cell.paragraphs):
+                                    text = para.text.strip()
+                                    logger.debug(f"[OpenXML] Table {table_idx}, Row {row_idx}, Cell {cell_idx}, Para {para_idx}: '{text}'")
+                                    if text:
+                                        all_text_parts.append(text)
+
+                    # Combine all text with spaces
+                    combined_header_text = "     ".join(all_text_parts)
+                    logger.info(f"[OpenXML] Collected {len(all_text_parts)} text parts")
+                    logger.info(f"[OpenXML] Combined text (first 200 chars): '{combined_header_text[:200]}'")
+
+                    if not combined_header_text.strip():
+                        logger.warning("[OpenXML] No text found in header! Skipping header reconstruction.")
+                        # Don't clear the header if there's no text
+                        continue
+
+                    # Step 2: Clear the entire header
+                    logger.info("[OpenXML] Clearing existing header content...")
+
+                    # Remove all paragraphs
+                    paragraphs_to_remove = list(header.paragraphs)
+                    logger.info(f"[OpenXML] Removing {len(paragraphs_to_remove)} paragraphs")
+                    for para in paragraphs_to_remove:
+                        p_element = para._element
+                        p_element.getparent().remove(p_element)
+
+                    # Remove all tables
+                    tables_to_remove = list(header.tables)
+                    logger.info(f"[OpenXML] Removing {len(tables_to_remove)} tables")
+                    for table in tables_to_remove:
+                        t_element = table._element
+                        t_element.getparent().remove(t_element)
+
+                    logger.info("[OpenXML] Header cleared successfully")
+
+                    # Step 3: Create new clean table structure
+                    logger.info("[OpenXML] Creating new table structure...")
+                    new_table = header.add_table(rows=1, cols=2)
+                    new_table.autofit = False
+                    logger.info("[OpenXML] New table created")
+
+                    # Get cells
+                    logo_cell = new_table.rows[0].cells[0]
+                    text_cell = new_table.rows[0].cells[1]
+
+                    # Set column widths
+                    logo_cell.width = Inches(0.9)
+                    text_cell.width = Inches(5.6)
+                    logger.info("[OpenXML] Cell widths set")
+
+                    # Configure logo cell
+                    logo_cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+
+                    # Add logo if available
+                    if logo_path.exists():
+                        logger.info("[OpenXML] Adding logo to first cell...")
+                        logo_para = logo_cell.paragraphs[0]
+                        logo_para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                        logo_para.paragraph_format.space_before = Pt(0)
+                        logo_para.paragraph_format.space_after = Pt(0)
+                        logo_para.paragraph_format.left_indent = Pt(0)
+
+                        logo_run = logo_para.add_run()
+                        logo_run.add_picture(
+                            str(logo_path),
+                            width=Inches(0.67),
+                            height=Inches(0.38)
+                        )
+                        logger.info("[OpenXML] Logo added successfully")
+                    else:
+                        logger.warning(f"[OpenXML] Logo file not found at: {logo_path}")
+
+                    # Configure text cell
+                    logger.info("[OpenXML] Adding text to second cell...")
+                    text_cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+                    text_para = text_cell.paragraphs[0]
+                    text_para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                    text_para.paragraph_format.space_before = Pt(0)
+                    text_para.paragraph_format.space_after = Pt(0)
+
+                    # Add the collected text
+                    text_run = text_para.add_run(combined_header_text)
+                    text_run.font.size = Pt(8.5)
+                    text_run.font.bold = True
+                    text_run.font.name = "Calibri"
+                    logger.info(f"[OpenXML] Text added: '{combined_header_text[:100]}...'")
+
+                    # Remove all borders to make table invisible
+                    logger.info("[OpenXML] Removing table borders...")
+                    self._remove_table_borders(new_table)
+
+                    logger.info("[OpenXML] Header formatted successfully with borderless table layout")
+
+        except Exception as e:
+            logger.error(f"[OpenXML] ERROR in header formatting: {str(e)}", exc_info=True)
+            logger.error(f"[OpenXML] Error type: {type(e).__name__}")
+
+    def _format_document_header_modern(self, doc: Document) -> None:
+        """Rebuild header with simple single-row layout: Logo | Project Info | Company/Date."""
+        try:
+            logo_path = settings.app_dir / "templates" / "bi_logo.png"
+
+            for section_idx, section in enumerate(doc.sections):
+                for header in self._get_section_headers(section):
+
+                    # Collect existing header text - CAREFULLY from cell by cell in tables
+                    text_parts = []
+                    
+                    # First, check if header already has a table structure
+                    if header.tables:
+                        # Extract text from each cell separately to preserve structure
+                        for table in header.tables:
+                            for row in table.rows:
+                                for cell_idx, cell in enumerate(row.cells):
+                                    cell_texts = []
+                                    for para in cell.paragraphs:
+                                        text = para.text.strip()
+                                        if text:
+                                            cell_texts.append(text)
+                                    if cell_texts:
+                                        # Join texts within same cell with newline
+                                        text_parts.append('\n'.join(cell_texts))
+                    
+                    # Also collect from paragraphs (if no table)
+                    for para in header.paragraphs:
+                        text = para.text.strip()
+                        if text and text not in text_parts:  # Avoid duplicates
+                            text_parts.append(text)
+
+                    if not text_parts:
+                        # Trigger fallback so header is never left empty
+                        raise RuntimeError(f"No header text found for section {section_idx + 1}")
+
+                    logger.info(f"[OpenXML] DEBUG - All collected text_parts: {text_parts}")
+
+                    # Split text parts that contain tabs (original header has tab-separated columns)
+                    left_parts = []  # Project info, Proprietary & Confidential
+                    right_parts = []  # Company name, Date
+
+                    for part in text_parts:
+                        # Check if part contains tab - this means left and right text are in same string
+                        if '\t' in part:
+                            # Split by tab to separate left and right content
+                            split_parts = part.split('\t')
+                            if len(split_parts) >= 2:
+                                left_parts.append(split_parts[0].strip())
+                                right_parts.append(split_parts[1].strip())
+                                logger.info(f"[OpenXML] DEBUG - Split by TAB - LEFT: '{split_parts[0].strip()}', RIGHT: '{split_parts[1].strip()}'")
+                            else:
+                                # Only one part after split, classify it
+                                left_parts.append(split_parts[0].strip())
+                                logger.info(f"[OpenXML] DEBUG - Added to LEFT: '{split_parts[0].strip()}'")
+                        else:
+                            # No tab, classify by content
+                            part_lower = part.lower()
+                            
+                            # Skip if empty
+                            if not part.strip():
+                                continue
+                                
+                            # RIGHT COLUMN: Company names (with "pharmaceutical") or dates (with month names)
+                            if 'pharmaceutical' in part_lower or \
+                               any(month in part_lower for month in ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december']):
+                                right_parts.append(part)
+                                logger.info(f"[OpenXML] DEBUG - Added to RIGHT: '{part}'")
+                            # LEFT COLUMN: Everything else (project name, proprietary, confidential, etc.)
+                            else:
+                                left_parts.append(part)
+                                logger.info(f"[OpenXML] DEBUG - Added to LEFT: '{part}'")
+
+                    # Build the strings
+                    left_text = "\n".join(left_parts) if left_parts else ""
+                    right_text = "\n".join(right_parts) if right_parts else ""
+
+                    logger.info(f"[OpenXML] DEBUG - LEFT TEXT: '{left_text}'")
+                    logger.info(f"[OpenXML] DEBUG - RIGHT TEXT: '{right_text}'")
+
+                    # Check if we have valid content
+                    if not left_text and not right_text:
+                        # Trigger fallback so header is never left empty
+                        raise RuntimeError(f"No valid header text after parsing for section {section_idx + 1}")
+
+                    # Clear existing content
+                    for para in list(header.paragraphs):
+                        p_element = para._element
+                        p_element.getparent().remove(p_element)
+
+                    for table in list(header.tables):
+                        t_element = table._element
+                        t_element.getparent().remove(t_element)
+
+                    # Build simple single-row header
+                    col_widths = [Inches(1.1), Inches(3.5), Inches(2.0)]
+                    total_width = sum(col_widths)
+
+                    header_table = header.add_table(rows=1, cols=3, width=total_width)
+                    header_table.autofit = False
+
+                    # Set individual column widths
+                    for col_idx, width in enumerate(col_widths):
+                        header_table.rows[0].cells[col_idx].width = width
+
+                    row = header_table.rows[0]
+
+                    # Configure all cells
+                    for cell in row.cells:
+                        self._set_cell_vertical_center(cell)
+                        if cell.paragraphs:
+                            para = cell.paragraphs[0]
+                            para.paragraph_format.space_before = Pt(2)
+                            para.paragraph_format.space_after = Pt(2)
+
+                    # Logo cell
+                    logo_cell = row.cells[0]
+                    logo_para = logo_cell.paragraphs[0]
+                    logo_para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                    if logo_path.exists():
+                        logo_run = logo_para.add_run()
+                        logo_run.add_picture(str(logo_path), width=Inches(0.8))
+                    else:
+                        logger.warning(f"[OpenXML] Logo file not found at: {logo_path}")
+
+                    # Left text cell (Project info + Confidential)
+                    left_cell = row.cells[1]
+                    left_para = left_cell.paragraphs[0]
+                    left_para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                    left_run = left_para.add_run(left_text)
+                    left_run.font.size = Pt(9)
+                    left_run.font.bold = True
+                    left_run.font.name = "Calibri"
+
+                    # Right text cell (Company + Date) - use separate paragraphs for more spacing
+                    right_cell = row.cells[2]
+
+                    # Split right_text into separate parts for better spacing
+                    right_text_lines = right_text.split('\n') if right_text else []
+
+                    if right_text_lines:
+                        # First line (Company name)
+                        right_para = right_cell.paragraphs[0]
+                        right_para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                        right_para.paragraph_format.space_after = Pt(2)  # Minimal space after first line
+                        right_para.paragraph_format.right_indent = Pt(6)  # Indent from right edge
+                        right_run = right_para.add_run(right_text_lines[0])
+                        right_run.font.size = Pt(9)
+                        right_run.font.bold = True
+                        right_run.font.name = "Calibri"
+
+                        # Additional lines (Date, etc.)
+                        for line in right_text_lines[1:]:
+                            right_para2 = right_cell.add_paragraph()
+                            right_para2.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                            right_para2.paragraph_format.space_before = Pt(0)
+                            right_para2.paragraph_format.space_after = Pt(0)  # No extra space
+                            right_para2.paragraph_format.right_indent = Pt(6)  # Indent from right edge
+                            right_run2 = right_para2.add_run(line)
+                            right_run2.font.size = Pt(9)
+                            right_run2.font.bold = True
+                            right_run2.font.name = "Calibri"
+                    else:
+                        # Fallback: no text
+                        right_para = right_cell.paragraphs[0]
+                        right_para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+                        right_para.paragraph_format.right_indent = Pt(6)
+
+                    # Remove all borders to make table invisible
+                    self._remove_table_borders(header_table)
+
+                    # Add spacing after the header table to separate it from body content
+                    # Set space after on the table itself
+                    tbl = header_table._element
+                    tblPr = tbl.tblPr
+                    if tblPr is None:
+                        tblPr = OxmlElement('w:tblPr')
+                        tbl.insert(0, tblPr)
+                    
+                    # Remove existing spacing if present
+                    for existing_spacing in tblPr.findall(qn('w:tblCellSpacing')):
+                        tblPr.remove(existing_spacing)
+                    
+                    # Add paragraph after table for spacing
+                    spacing_para = header.add_paragraph()
+                    spacing_para.paragraph_format.space_after = Pt(12)  # 12pt space after header
+
+            logger.info("[OpenXML] Modern header formatting completed")
+
+        except Exception as e:
+            logger.error("[OpenXML] Error building modern header: %s", str(e), exc_info=True)
+            # Bubble up so caller can trigger legacy fallback
+            raise
+
+    def _format_document_header_OLD(self, doc: Document) -> None:
         """Format document header with correct font size (8.5pt) and bold, and add logo if available.
 
         Args:
@@ -441,125 +785,133 @@ class FeedbackTemplateGeneratorOpenXML:
             logger.info("[OpenXML] Formatting document header")
 
             for section in doc.sections:
-                header = section.header
+                for header in self._get_section_headers(section):
 
-                # Insert logo at the beginning of the header if logo file exists
-                logo_path = settings.app_dir / "templates" / "bi_logo.png"
-                if logo_path.exists():
-                    try:
-                        # Check if header has a table (common structure for Word headers)
-                        if header.tables:
-                            # Insert logo in first cell of first table
-                            first_table = header.tables[0]
-                            if first_table.rows:
-                                first_cell = first_table.rows[0].cells[0]
-                                # Set vertical alignment for the cell (center)
-                                first_cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
-                                # Get the first paragraph in the cell
-                                if first_cell.paragraphs:
-                                    logo_para = first_cell.paragraphs[0]
-                                    # Save existing text
-                                    existing_text = logo_para.text
-                                    # Clear the paragraph
-                                    logo_para.clear()
-                                    
-                                    # CRITICAL: Set paragraph spacing to zero
-                                    logo_para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                    # Insert logo at the beginning of the header if logo file exists
+                    logo_path = settings.app_dir / "templates" / "bi_logo.png"
+                    if logo_path.exists():
+                        try:
+                            # Check if header has existing table
+                            if header.tables:
+                                # Work with existing table - add logo to first cell
+                                first_table = header.tables[0]
+                                if first_table.rows:
+                                    first_row = first_table.rows[0]
+
+                                    # Check if we need to add a column or use existing structure
+                                    if len(first_row.cells) >= 2:
+                                        # Use existing 2-column structure
+                                        logo_cell = first_row.cells[0]
+                                        text_cell = first_row.cells[1]
+                                    else:
+                                        # Single column - add logo to same cell as text (inline)
+                                        logo_cell = first_row.cells[0]
+                                        text_cell = None
+
+                                    # Clear first cell
+                                    for para in logo_cell.paragraphs:
+                                        para.clear()
+
+                                    # Configure logo cell
+                                    logo_cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+                                    logo_cell.width = Inches(0.8)
+
+                                    # Add logo to first cell
+                                    if logo_cell.paragraphs:
+                                        logo_para = logo_cell.paragraphs[0]
+                                    else:
+                                        logo_para = logo_cell.add_paragraph()
+
+                                    logo_para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
                                     logo_para.paragraph_format.space_before = Pt(0)
                                     logo_para.paragraph_format.space_after = Pt(0)
-                                    logo_para.paragraph_format.line_spacing = 1.0
-                                    
-                                    # Set paragraph to align elements at bottom (baseline alignment)
-                                    try:
-                                        pPr = logo_para._element.get_or_add_pPr()
-                                        # Remove any existing textAlignment
-                                        for textAlign in pPr.findall(qn('w:textAlignment')):
-                                            pPr.remove(textAlign)
-                                        # Add textAlignment = bottom (aligns at baseline)
-                                        textAlignment = OxmlElement('w:textAlignment')
-                                        textAlignment.set(qn('w:val'), 'bottom')
-                                        pPr.append(textAlignment)
-                                    except Exception as e:
-                                        logger.debug("[OpenXML] Could not set baseline alignment: %s", str(e))
-                                    
-                                    # Add logo inline - height matched to text size
+
                                     logo_run = logo_para.add_run()
-                                    # Very small logo: 12pt height (same as text size approximately)
-                                    picture = logo_run.add_picture(str(logo_path), height=Pt(12))
-                                    
-                                    # Add non-breaking space after logo for better spacing
-                                    space_run = logo_para.add_run("\u00A0\u00A0")  # Two non-breaking spaces
-                                    space_run.font.size = Pt(8.5)
-                                    space_run.font.bold = True
-                                    
-                                    # Add back the existing text with proper formatting
-                                    text_run = logo_para.add_run(existing_text)
-                                    text_run.font.size = Pt(8.5)
-                                    text_run.font.bold = True
-                                    
-                                    logger.info("[OpenXML] Logo inserted inline at 12pt height with baseline alignment")
-                        else:
-                            # Insert logo in first paragraph if no table
-                            if header.paragraphs:
-                                first_para = header.paragraphs[0]
-                                # Save existing text
-                                existing_text = first_para.text
-                                # Clear the paragraph
-                                first_para.clear()
-                                # Set paragraph alignment and spacing
-                                first_para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
-                                first_para.paragraph_format.space_before = Pt(0)
-                                first_para.paragraph_format.space_after = Pt(0)
-                                # Add logo as first run (inline with text)
-                                logo_run = first_para.add_run()
-                                # Set logo dimensions: width=0.67", height=0.38"
-                                logo_run.add_picture(str(logo_path), width=Inches(0.67), height=Inches(0.38))
-                                # Add small space after logo
-                                space_run = first_para.add_run("  ")
-                                space_run.font.size = Pt(8.5)
-                                space_run.font.bold = True
-                                # Add back the existing text with proper formatting
-                                text_run = first_para.add_run(existing_text)
-                                text_run.font.size = Pt(8.5)
-                                text_run.font.bold = True
-                                logger.info("[OpenXML] Logo inserted in header paragraph")
-                    except Exception as logo_error:
-                        logger.warning("[OpenXML] Error inserting logo: %s", str(logo_error))
-                else:
-                    logger.debug("[OpenXML] Logo file not found at: %s", logo_path)
+                                    logo_run.add_picture(
+                                        str(logo_path),
+                                        width=Inches(0.67),
+                                        height=Inches(0.38)
+                                    )
 
-                # Format all paragraphs in header
-                for paragraph in header.paragraphs:
-                    for run in paragraph.runs:
-                        # Skip image runs (don't format logo)
-                        if hasattr(run, '_element') and run._element.xpath('.//w:drawing'):
-                            continue
-                        # Set font size to 8.5pt
-                        run.font.size = Pt(8.5)
-                        # Set bold
-                        run.font.bold = True
-                        logger.debug("[OpenXML] Formatted header paragraph: %s", paragraph.text[:50])
+                                    # If there's a separate text cell, configure it
+                                    if text_cell:
+                                        text_cell.vertical_alignment = WD_ALIGN_VERTICAL.CENTER
+                                        # Keep existing text - don't modify it
 
-                # Format text in header tables (if any)
-                for table in header.tables:
-                    for row in table.rows:
-                        for cell in row.cells:
-                            for paragraph in cell.paragraphs:
-                                for run in paragraph.runs:
-                                    # Skip image runs (don't format logo)
-                                    if hasattr(run, '_element') and run._element.xpath('.//w:drawing'):
-                                        continue
-                                    # Set font size to 8.5pt
-                                    run.font.size = Pt(8.5)
-                                    # Set bold
-                                    run.font.bold = True
-                                    logger.debug("[OpenXML] Formatted header table cell: %s", paragraph.text[:50])
+                                    # Remove borders from the table to make it look seamless
+                                    self._remove_table_borders(first_table)
+
+                                    logger.info("[OpenXML] Logo inserted in existing table structure")
+                            else:
+                                # No table in header - add logo inline in first paragraph
+                                if header.paragraphs:
+                                    first_para = header.paragraphs[0]
+
+                                    # Save existing text
+                                    existing_text = first_para.text
+
+                                    # Clear paragraph
+                                    first_para.clear()
+
+                                    # Configure paragraph
+                                    first_para.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                                    first_para.paragraph_format.space_before = Pt(0)
+                                    first_para.paragraph_format.space_after = Pt(0)
+
+                                    # Add logo inline
+                                    logo_run = first_para.add_run()
+                                    logo_run.add_picture(
+                                        str(logo_path),
+                                        width=Inches(0.67),
+                                        height=Inches(0.38)
+                                    )
+
+                                    # Add space
+                                    space_run = first_para.add_run("  ")
+
+                                    # Add text back
+                                    if existing_text.strip():
+                                        text_run = first_para.add_run(existing_text)
+                                        text_run.font.size = Pt(8.5)
+                                        text_run.font.bold = True
+
+                                    logger.info("[OpenXML] Logo inserted inline in header paragraph")
+
+                        except Exception as logo_error:
+                            logger.warning("[OpenXML] Error inserting logo: %s", str(logo_error), exc_info=True)
+                    else:
+                        logger.debug("[OpenXML] Logo file not found at: %s", logo_path)
+
+                    # Format all paragraphs in header
+                    for paragraph in header.paragraphs:
+                        for run in paragraph.runs:
+                            # Skip image runs (don't format logo)
+                            if hasattr(run, '_element') and run._element.xpath('.//w:drawing'):
+                                continue
+                            # Set font size to 8.5pt
+                            run.font.size = Pt(8.5)
+                            # Set bold
+                            run.font.bold = True
+
+                    # Format text in header tables (if any)
+                    for table in header.tables:
+                        for row in table.rows:
+                            for cell in row.cells:
+                                for paragraph in cell.paragraphs:
+                                    for run in paragraph.runs:
+                                        # Skip image runs (don't format logo)
+                                        if hasattr(run, '_element') and run._element.xpath('.//w:drawing'):
+                                            continue
+                                        # Set font size to 8.5pt
+                                        run.font.size = Pt(8.5)
+                                        # Set bold
+                                        run.font.bold = True
 
             logger.info("[OpenXML] Header formatting completed")
 
         except Exception as e:
             logger.warning("[OpenXML] Error formatting header: %s", str(e))
-
+        
     def _populate_feedback_tables(self, doc: Document, presentation_id: int) -> None:
         """Populate the feedback table using the nw_wdToIndicateFeedback SP.
 
@@ -821,6 +1173,62 @@ class FeedbackTemplateGeneratorOpenXML:
         except Exception as e:
             logger.error("[OpenXML] Error populating feedback table from SP: %s", str(e), exc_info=True)
 
+    def _remove_table_borders(self, table) -> None:
+        """Remove all borders from a table to make it invisible.
+
+        Args:
+            table: python-docx Table object
+        """
+        try:
+            tbl = table._element
+            tblPr = tbl.tblPr
+            if tblPr is None:
+                tblPr = OxmlElement('w:tblPr')
+                tbl.insert(0, tblPr)
+
+            # Remove existing borders
+            for borders in tblPr.findall(qn('w:tblBorders')):
+                tblPr.remove(borders)
+
+            # Create new borders element with all borders set to 'none'
+            tblBorders = OxmlElement('w:tblBorders')
+
+            border_types = ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']
+            for border_type in border_types:
+                border = OxmlElement(f'w:{border_type}')
+                border.set(qn('w:val'), 'none')
+                border.set(qn('w:sz'), '0')
+                border.set(qn('w:space'), '0')
+                border.set(qn('w:color'), 'auto')
+                tblBorders.append(border)
+
+            tblPr.append(tblBorders)
+
+            # Also remove borders from each cell
+            for row in table.rows:
+                for cell in row.cells:
+                    tcPr = cell._element.get_or_add_tcPr()
+
+                    # Remove existing cell borders
+                    for tcBorders in tcPr.findall(qn('w:tcBorders')):
+                        tcPr.remove(tcBorders)
+
+                    # Add cell borders set to 'none'
+                    tcBorders = OxmlElement('w:tcBorders')
+                    for border_type in ['top', 'left', 'bottom', 'right']:
+                        border = OxmlElement(f'w:{border_type}')
+                        border.set(qn('w:val'), 'none')
+                        border.set(qn('w:sz'), '0')
+                        border.set(qn('w:space'), '0')
+                        border.set(qn('w:color'), 'auto')
+                        tcBorders.append(border)
+                    tcPr.append(tcBorders)
+
+            logger.debug("[OpenXML] Removed all borders from table")
+
+        except Exception as e:
+            logger.warning("[OpenXML] Error removing table borders: %s", str(e))
+
     def _set_cell_vertical_center(self, cell) -> None:
         """Set cell vertical alignment to center using XML manipulation.
 
@@ -849,14 +1257,14 @@ class FeedbackTemplateGeneratorOpenXML:
                 # Clear existing margins
                 for child in list(tcMar):
                     tcMar.remove(child)
-            
+
             # Set balanced top/bottom margins (100 twips = ~7pt padding)
             for margin_name in ['top', 'bottom']:
                 margin = OxmlElement(f'w:{margin_name}')
                 margin.set(qn('w:w'), '100')  # 100 twips = ~7pt
                 margin.set(qn('w:type'), 'dxa')
                 tcMar.append(margin)
-            
+
             # Smaller left/right margins
             for margin_name in ['left', 'right']:
                 margin = OxmlElement(f'w:{margin_name}')
@@ -866,6 +1274,19 @@ class FeedbackTemplateGeneratorOpenXML:
 
         except Exception as e:
             logger.debug("[OpenXML] Error setting vertical alignment: %s", str(e))
+
+    def _set_cell_shading(self, cell, color_hex: str) -> None:
+        """Apply background shading to a cell."""
+        try:
+            tcPr = cell._element.get_or_add_tcPr()
+            for shd in tcPr.findall(qn('w:shd')):
+                tcPr.remove(shd)
+
+            shading_elm = OxmlElement('w:shd')
+            shading_elm.set(qn('w:fill'), color_hex)
+            tcPr.append(shading_elm)
+        except Exception as e:
+            logger.debug("[OpenXML] Error setting cell shading: %s", str(e))
 
     def _set_cell_white_background(self, cell) -> None:
         """Set cell background to white using XML manipulation.
