@@ -626,7 +626,9 @@ class WordReportGeneratorOpenXML:
                             # For REFINED CREATIVE DIRECTION: use direction instead of pronunciation
                             if "Newly Created Names" in table_name:
                                 original_name = getattr(result, 'original_name', None) or ''
-                                row.cells[1].text = str(original_name)
+                                # Format grouped text (replace ## and $$ with commas)
+                                formatted_name = self._format_grouped_text(original_name)
+                                row.cells[1].text = formatted_name
                             else:
                                 direction = getattr(result, 'direction', None)
                                 pronunciation = getattr(result, 'pronunciation', None)
@@ -641,7 +643,9 @@ class WordReportGeneratorOpenXML:
                             rationale = original_rationale or result.rationale or ''
                             # Unescape HTML entities
                             rationale = html.unescape(str(rationale))
-                            row.cells[2].text = rationale
+                            # Format grouped text (replace ## and $$ with commas)
+                            formatted_rationale = self._format_grouped_text(rationale)
+                            row.cells[2].text = formatted_rationale
 
                         # Column 3: Category OR Original Category (if applicable)
                         if len(row.cells) >= 4:
@@ -652,6 +656,9 @@ class WordReportGeneratorOpenXML:
                                 category = getattr(result, 'category', None) or ''
                             row.cells[3].text = str(category)
 
+                        # Prevent row from splitting across pages
+                        self._prevent_row_split(row)
+
                     except Exception as row_error:
                         logger.error("[OpenXML Word Report] Error adding row to table '%s': %s",
                                    table_name, str(row_error), exc_info=True)
@@ -659,9 +666,160 @@ class WordReportGeneratorOpenXML:
             logger.info("[OpenXML Word Report] Successfully populated table '%s' with %d rows",
                        table_name, len(results))
 
+            # Set column widths for better distribution
+            self._set_table_column_widths(table, table_name)
+
+            # Keep header row with next row to avoid orphaned headers
+            self._keep_header_with_data(table)
+
         except Exception as e:
             logger.error("[OpenXML Word Report] Error populating table '%s': %s",
                        table_name, str(e), exc_info=True)
+
+    def _prevent_row_split(self, row) -> None:
+        """Prevent table row from splitting across pages.
+
+        Sets the cantSplit property on the row to keep all row content together.
+
+        Args:
+            row: python-docx table row object
+        """
+        try:
+            from docx.oxml import OxmlElement
+            from docx.oxml.ns import qn
+
+            # Get the row's XML element
+            tr = row._element
+
+            # Get or create table row properties (trPr)
+            trPr = tr.get_or_add_trPr()
+
+            # Create cantSplit element and set it to prevent row splitting
+            cantSplit = OxmlElement('w:cantSplit')
+            trPr.append(cantSplit)
+
+        except Exception as e:
+            logger.debug("[OpenXML Word Report] Error setting cantSplit on row: %s", str(e))
+
+    def _keep_header_with_data(self, table) -> None:
+        """Configure table header to stay with first data row.
+
+        Prevents orphaned table headers at the bottom of pages by ensuring
+        the header row moves to the next page if there's no room for at least
+        one data row.
+
+        Args:
+            table: python-docx Table object
+        """
+        try:
+            from docx.oxml import OxmlElement
+            from docx.oxml.ns import qn
+
+            if len(table.rows) < 2:  # Need at least header + 1 data row
+                return
+
+            # Get the header row (first row)
+            header_row = table.rows[0]
+            tr = header_row._element
+
+            # Get or create table row properties (trPr)
+            trPr = tr.get_or_add_trPr()
+
+            # Set cantSplit to prevent header from breaking
+            cantSplit = OxmlElement('w:cantSplit')
+            trPr.append(cantSplit)
+
+            # Set tblHeader to mark as header row (will repeat on each page)
+            tblHeader = OxmlElement('w:tblHeader')
+            tblHeader.set(qn('w:val'), '1')
+            trPr.append(tblHeader)
+
+            # Apply "Keep with next" to all paragraphs in header cells
+            # This ensures the header stays with the first data row
+            for cell in header_row.cells:
+                for paragraph in cell.paragraphs:
+                    pPr = paragraph._element.get_or_add_pPr()
+                    keepNext = OxmlElement('w:keepNext')
+                    pPr.append(keepNext)
+
+            logger.debug("[OpenXML Word Report] Configured header row to stay with data")
+
+        except Exception as e:
+            logger.debug("[OpenXML Word Report] Error configuring header row: %s", str(e))
+
+    def _format_grouped_text(self, text: str, separator: str = ", ") -> str:
+        """Format grouped text by replacing ## and $$ delimiters with a readable separator.
+
+        Only adds separators between non-empty text segments. Empty segments are filtered out.
+
+        Args:
+            text: Text potentially containing ## or $$ delimiters
+            separator: The separator to use (default: ", ")
+
+        Returns:
+            Formatted text with delimiters replaced, or empty string if no valid content
+        """
+        if not text:
+            return ""
+
+        # Replace $$ with ## to normalize delimiters
+        normalized = str(text).replace('$$', '##')
+
+        # Split by ## delimiter and filter out empty/whitespace-only parts
+        parts = [part.strip() for part in normalized.split('##')]
+        valid_parts = [part for part in parts if part]
+
+        # Join only non-empty parts with the separator
+        if not valid_parts:
+            return ""
+
+        return separator.join(valid_parts)
+
+    def _set_table_column_widths(self, table, table_name: str) -> None:
+        """Set column widths for better distribution in Word tables.
+
+        Args:
+            table: python-docx Table object
+            table_name: Name of the table to determine appropriate widths
+        """
+        try:
+            # Define column widths based on table type
+            if "Newly Created Names" in table_name:
+                # Column widths for NEWLY CREATED NAMES table:
+                # Col 0: Candidate (1.5")
+                # Col 1: Original Name (1.5")
+                # Col 2: Rationale (2.5") - widest for longer text
+                # Col 3: Category (1.0")
+                col_widths = [Inches(1.5), Inches(1.5), Inches(2.5), Inches(1.0)]
+            else:
+                # Default column widths for other tables
+                # Adjust as needed based on typical content
+                num_cols = len(table.columns)
+                if num_cols == 4:
+                    col_widths = [Inches(1.5), Inches(1.5), Inches(2.5), Inches(1.0)]
+                elif num_cols == 3:
+                    col_widths = [Inches(1.5), Inches(3.0), Inches(1.5)]
+                elif num_cols == 2:
+                    col_widths = [Inches(2.0), Inches(4.0)]
+                else:
+                    # Equal distribution for other cases
+                    width_per_col = Inches(6.0 / num_cols)
+                    col_widths = [width_per_col] * num_cols
+
+            # Disable autofit to ensure our widths are respected
+            table.autofit = False
+
+            # Apply column widths to all rows
+            for row in table.rows:
+                for col_idx, width in enumerate(col_widths):
+                    if col_idx < len(row.cells):
+                        row.cells[col_idx].width = width
+
+            logger.debug("[OpenXML Word Report] Set column widths for table '%s'", table_name)
+
+        except Exception as e:
+            logger.warning("[OpenXML Word Report] Error setting column widths for table '%s': %s",
+                         table_name, str(e))
 
     def _generate_and_insert_pie_chart(self, doc: Document, by_the_numbers: List) -> None:
         """Generate pie chart using matplotlib and insert into Word document at PieChart bookmark.

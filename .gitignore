@@ -485,6 +485,16 @@ test_results/
 *.orig
 
 # ===================================
+# Node.js / MCP Server
+# ===================================
+
+# Dependencies
+node_modules/
+
+# npm debug logs
+npm-debug.log*
+
+# ===================================
 # Project Specific
 # ===================================
 

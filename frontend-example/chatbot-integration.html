@@ -1,0 +1,626 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Creative API Chatbot</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .chat-container {
+            width: 90%;
+            max-width: 800px;
+            height: 90vh;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.3);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        .chat-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            text-align: center;
+        }
+
+        .chat-header h1 {
+            font-size: 24px;
+            margin-bottom: 5px;
+        }
+
+        .chat-header p {
+            font-size: 14px;
+            opacity: 0.9;
+        }
+
+        .chat-messages {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+            background: #f5f7fa;
+        }
+
+        .message {
+            margin-bottom: 15px;
+            display: flex;
+            animation: slideIn 0.3s ease;
+        }
+
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .message.user {
+            justify-content: flex-end;
+        }
+
+        .message-content {
+            max-width: 70%;
+            padding: 12px 16px;
+            border-radius: 18px;
+            word-wrap: break-word;
+        }
+
+        .message.user .message-content {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .message.bot .message-content {
+            background: white;
+            color: #333;
+            border: 1px solid #e0e0e0;
+        }
+
+        .message.system .message-content {
+            background: #fff3cd;
+            color: #856404;
+            border: 1px solid #ffeeba;
+            max-width: 100%;
+            font-size: 13px;
+        }
+
+        .chat-input-area {
+            padding: 20px;
+            background: white;
+            border-top: 1px solid #e0e0e0;
+        }
+
+        .api-key-setup {
+            margin-bottom: 15px;
+            display: flex;
+            gap: 10px;
+        }
+
+        .api-key-setup input {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #e0e0e0;
+            border-radius: 10px;
+            font-size: 14px;
+        }
+
+        .api-key-setup button {
+            padding: 10px 20px;
+            background: #28a745;
+            color: white;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            font-weight: 600;
+        }
+
+        .api-key-setup button:hover {
+            background: #218838;
+        }
+
+        .input-container {
+            display: flex;
+            gap: 10px;
+        }
+
+        .input-container input {
+            flex: 1;
+            padding: 12px 16px;
+            border: 1px solid #e0e0e0;
+            border-radius: 25px;
+            font-size: 15px;
+            outline: none;
+        }
+
+        .input-container input:focus {
+            border-color: #667eea;
+        }
+
+        .input-container button {
+            padding: 12px 24px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 25px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: transform 0.2s;
+        }
+
+        .input-container button:hover {
+            transform: scale(1.05);
+        }
+
+        .input-container button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .typing-indicator {
+            display: none;
+            align-items: center;
+            gap: 5px;
+            padding: 12px 16px;
+            background: white;
+            border: 1px solid #e0e0e0;
+            border-radius: 18px;
+            width: fit-content;
+        }
+
+        .typing-indicator.active {
+            display: flex;
+        }
+
+        .typing-indicator span {
+            width: 8px;
+            height: 8px;
+            background: #667eea;
+            border-radius: 50%;
+            animation: bounce 1.4s infinite;
+        }
+
+        .typing-indicator span:nth-child(2) {
+            animation-delay: 0.2s;
+        }
+
+        .typing-indicator span:nth-child(3) {
+            animation-delay: 0.4s;
+        }
+
+        @keyframes bounce {
+            0%, 60%, 100% {
+                transform: translateY(0);
+            }
+            30% {
+                transform: translateY(-10px);
+            }
+        }
+
+        .error {
+            color: #dc3545;
+            font-weight: 600;
+        }
+
+        .success {
+            color: #28a745;
+            font-weight: 600;
+        }
+
+        pre {
+            background: #f4f4f4;
+            padding: 10px;
+            border-radius: 5px;
+            overflow-x: auto;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="chat-container">
+        <div class="chat-header">
+            <h1>🎨 Creative API Assistant</h1>
+            <p>Powered by Gemini AI</p>
+        </div>
+
+        <div class="chat-messages" id="chatMessages">
+            <div class="message bot">
+                <div class="message-content">
+                    👋 Hello! I'm your Creative API assistant. I can help you:
+                    <br><br>
+                    • List and search projects<br>
+                    • Create NW presentations<br>
+                    • Create BSR reports<br>
+                    • Generate analytics reports<br>
+                    • Check task status<br>
+                    • And much more!
+                    <br><br>
+                    Please enter your Gemini API key below to get started.
+                </div>
+            </div>
+        </div>
+
+        <div class="chat-input-area">
+            <div class="api-key-setup" id="apiKeySetup">
+                <input
+                    type="password"
+                    id="apiKeyInput"
+                    placeholder="Enter your Gemini API Key (AIza...)"
+                    autocomplete="off"
+                >
+                <button onclick="saveApiKey()">Save Key</button>
+            </div>
+
+            <div class="input-container">
+                <input
+                    type="text"
+                    id="messageInput"
+                    placeholder="Ask me anything about your presentations..."
+                    onkeypress="handleKeyPress(event)"
+                    disabled
+                >
+                <button onclick="sendMessage()" id="sendButton" disabled>Send</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Configuration
+        const API_BASE_URL = 'http://localhost:50100'; // Your FastAPI URL
+        const GEMINI_API_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent';
+
+        let GEMINI_API_KEY = '';
+        let conversationHistory = [];
+
+        // MCP Tools definitions (matching your MCP server)
+        const MCP_TOOLS = [
+            {
+                name: 'list_projects',
+                description: 'List projects from DayMaster database with pagination and search. Returns project information including names, codes, and details.',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        page: { type: 'integer', description: 'Page number (default: 1)' },
+                        limit: { type: 'integer', description: 'Items per page (default: 10, max: 100)' },
+                        search: { type: 'string', description: 'Search term to filter projects by name or code' }
+                    }
+                }
+            },
+            {
+                name: 'list_nw_presentations',
+                description: 'List active Name Evaluation (NW) presentations with pagination and search capabilities.',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        page: { type: 'integer', description: 'Page number' },
+                        limit: { type: 'integer', description: 'Items per page' },
+                        search: { type: 'string', description: 'Search term' }
+                    }
+                }
+            },
+            {
+                name: 'check_nw_presentation_exists',
+                description: 'Check if a Name Evaluation presentation already exists for a specific project.',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        display_name: { type: 'string', description: 'Display name of the project to check' }
+                    },
+                    required: ['display_name']
+                }
+            },
+            {
+                name: 'check_task_status',
+                description: 'Check the status of a background task (like presentation creation) using its task ID.',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        task_id: { type: 'string', description: 'Task ID returned from creation operations' }
+                    },
+                    required: ['task_id']
+                }
+            },
+            {
+                name: 'get_queue_status',
+                description: 'Get current system queue status including running tasks, queue length, and capacity.',
+                parameters: {
+                    type: 'object',
+                    properties: {}
+                }
+            },
+            {
+                name: 'get_analytics_report',
+                description: 'Generate comprehensive analytics Excel report for NW or BSR projects with optional date filtering.',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        project_type: {
+                            type: 'string',
+                            enum: ['NW', 'BSR'],
+                            description: 'Type of project report to generate'
+                        },
+                        start_date: { type: 'string', description: 'Start date in YYYY-MM-DD format (optional)' },
+                        end_date: { type: 'string', description: 'End date in YYYY-MM-DD format (optional)' }
+                    },
+                    required: ['project_type']
+                }
+            }
+        ];
+
+        // Convert MCP tools to Gemini function declarations
+        function convertToGeminiFunctions() {
+            return MCP_TOOLS.map(tool => ({
+                name: tool.name,
+                description: tool.description,
+                parameters: tool.parameters
+            }));
+        }
+
+        // Save API key
+        function saveApiKey() {
+            const apiKey = document.getElementById('apiKeyInput').value.trim();
+            if (!apiKey || !apiKey.startsWith('AIza')) {
+                addMessage('system', 'Please enter a valid Gemini API key (starts with AIza...)');
+                return;
+            }
+
+            GEMINI_API_KEY = apiKey;
+            localStorage.setItem('gemini_api_key', apiKey);
+
+            document.getElementById('apiKeySetup').style.display = 'none';
+            document.getElementById('messageInput').disabled = false;
+            document.getElementById('sendButton').disabled = false;
+
+            addMessage('system', '✓ API key saved! You can now chat with the assistant.');
+        }
+
+        // Check for saved API key on load
+        window.addEventListener('load', () => {
+            const savedKey = localStorage.getItem('gemini_api_key');
+            if (savedKey) {
+                GEMINI_API_KEY = savedKey;
+                document.getElementById('apiKeySetup').style.display = 'none';
+                document.getElementById('messageInput').disabled = false;
+                document.getElementById('sendButton').disabled = false;
+            }
+        });
+
+        // Add message to chat
+        function addMessage(type, content) {
+            const messagesDiv = document.getElementById('chatMessages');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `message ${type}`;
+
+            const contentDiv = document.createElement('div');
+            contentDiv.className = 'message-content';
+
+            if (typeof content === 'object') {
+                contentDiv.innerHTML = `<pre>${JSON.stringify(content, null, 2)}</pre>`;
+            } else {
+                contentDiv.innerHTML = content.replace(/\n/g, '<br>');
+            }
+
+            messageDiv.appendChild(contentDiv);
+            messagesDiv.appendChild(messageDiv);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+
+        // Show/hide typing indicator
+        function showTyping(show) {
+            let indicator = document.querySelector('.typing-indicator');
+            if (show && !indicator) {
+                indicator = document.createElement('div');
+                indicator.className = 'typing-indicator active';
+                indicator.innerHTML = '<span></span><span></span><span></span>';
+                document.getElementById('chatMessages').appendChild(indicator);
+            } else if (indicator) {
+                indicator.classList.toggle('active', show);
+            }
+
+            if (show) {
+                document.getElementById('chatMessages').scrollTop =
+                    document.getElementById('chatMessages').scrollHeight;
+            }
+        }
+
+        // Execute MCP tool by calling FastAPI directly
+        async function executeMCPTool(toolName, args) {
+            try {
+                let response;
+
+                switch(toolName) {
+                    case 'list_projects':
+                        response = await fetch(`${API_BASE_URL}/api/daymaster/projects?${new URLSearchParams(args)}`);
+                        break;
+
+                    case 'list_nw_presentations':
+                        response = await fetch(`${API_BASE_URL}/api/bi_guidelines/nw-active-presentations?${new URLSearchParams(args)}`);
+                        break;
+
+                    case 'check_nw_presentation_exists':
+                        response = await fetch(`${API_BASE_URL}/api/presentations/exists?${new URLSearchParams(args)}`);
+                        break;
+
+                    case 'check_task_status':
+                        response = await fetch(`${API_BASE_URL}/api/tasks/${args.task_id}`);
+                        break;
+
+                    case 'get_queue_status':
+                        response = await fetch(`${API_BASE_URL}/api/presentations/concurrency-status`);
+                        break;
+
+                    case 'get_analytics_report':
+                        const params = new URLSearchParams();
+                        if (args.start_date) params.append('start_date', args.start_date);
+                        if (args.end_date) params.append('end_date', args.end_date);
+                        response = await fetch(`${API_BASE_URL}/api/analytics/generate/${args.project_type}?${params}`);
+
+                        if (response.ok) {
+                            return {
+                                success: true,
+                                message: `Analytics report for ${args.project_type} generated successfully. The report is ready for download.`,
+                                contentType: response.headers.get('content-type')
+                            };
+                        }
+                        break;
+
+                    default:
+                        throw new Error(`Unknown tool: ${toolName}`);
+                }
+
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.detail || `API error: ${response.statusText}`);
+                }
+
+                return await response.json();
+
+            } catch (error) {
+                console.error('MCP Tool execution error:', error);
+                return {
+                    error: true,
+                    message: error.message
+                };
+            }
+        }
+
+        // Send message to Gemini
+        async function sendMessage() {
+            const input = document.getElementById('messageInput');
+            const message = input.value.trim();
+
+            if (!message) return;
+
+            // Add user message
+            addMessage('user', message);
+            input.value = '';
+
+            // Add to conversation history
+            conversationHistory.push({
+                role: 'user',
+                parts: [{ text: message }]
+            });
+
+            showTyping(true);
+
+            try {
+                // Call Gemini API with function calling
+                const response = await fetch(`${GEMINI_API_ENDPOINT}?key=${GEMINI_API_KEY}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        contents: conversationHistory,
+                        tools: [{
+                            function_declarations: convertToGeminiFunctions()
+                        }],
+                        systemInstruction: {
+                            parts: [{
+                                text: `You are a helpful assistant for the Creative API system. You can help users manage presentations, projects, and reports. When users ask to perform actions, use the available tools. Be conversational and helpful. When showing data, format it nicely for the user.`
+                            }]
+                        }
+                    })
+                });
+
+                showTyping(false);
+
+                if (!response.ok) {
+                    throw new Error(`Gemini API error: ${response.statusText}`);
+                }
+
+                const data = await response.json();
+                const candidate = data.candidates[0];
+
+                // Check if Gemini wants to call a function
+                if (candidate.content.parts[0].functionCall) {
+                    const functionCall = candidate.content.parts[0].functionCall;
+
+                    addMessage('system', `🔧 Calling function: ${functionCall.name}...`);
+
+                    // Execute the MCP tool
+                    const toolResult = await executeMCPTool(functionCall.name, functionCall.args);
+
+                    // Add function response to conversation
+                    conversationHistory.push({
+                        role: 'model',
+                        parts: [{ functionCall: functionCall }]
+                    });
+
+                    conversationHistory.push({
+                        role: 'user',
+                        parts: [{
+                            functionResponse: {
+                                name: functionCall.name,
+                                response: toolResult
+                            }
+                        }]
+                    });
+
+                    // Get Gemini's response to the function result
+                    const followUpResponse = await fetch(`${GEMINI_API_ENDPOINT}?key=${GEMINI_API_KEY}`, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({
+                            contents: conversationHistory,
+                            tools: [{
+                                function_declarations: convertToGeminiFunctions()
+                            }]
+                        })
+                    });
+
+                    const followUpData = await followUpResponse.json();
+                    const assistantMessage = followUpData.candidates[0].content.parts[0].text;
+
+                    addMessage('bot', assistantMessage);
+                    conversationHistory.push({
+                        role: 'model',
+                        parts: [{ text: assistantMessage }]
+                    });
+
+                } else {
+                    // Regular text response
+                    const assistantMessage = candidate.content.parts[0].text;
+                    addMessage('bot', assistantMessage);
+
+                    conversationHistory.push({
+                        role: 'model',
+                        parts: [{ text: assistantMessage }]
+                    });
+                }
+
+            } catch (error) {
+                showTyping(false);
+                addMessage('system', `<span class="error">Error: ${error.message}</span>`);
+                console.error('Chat error:', error);
+            }
+        }
+
+        function handleKeyPress(event) {
+            if (event.key === 'Enter') {
+                sendMessage();
+            }
+        }
+    </script>
+</body>
+</html>
