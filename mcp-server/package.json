@@ -1,7 +1,7 @@
 {
   "name": "creative-api-mcp-server",
-  "version": "1.0.0",
-  "description": "MCP Server for Creative Python API",
+  "version": "3.0.0",
+  "description": "Comprehensive MCP Server for Creative Python API - 50+ tools for NW, BSR, NSR, DW presentations, analytics, and more",
   "type": "module",
   "main": "index.js",
   "scripts": {
@@ -9,6 +9,19 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4",
-    "axios": "^1.6.0"
-  }
+    "axios": "^1.6.0",
+    "form-data": "^4.0.0"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "creative-api",
+    "presentations",
+    "nw",
+    "bsr",
+    "nsr",
+    "analytics"
+  ],
+  "author": "",
+  "license": "MIT"
 }
