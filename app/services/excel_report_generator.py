@@ -14,7 +14,7 @@ from app.utils.nw_data_utils import sanitize_filename
 from app.utils.path_utils import get_nw_downloads_dir
 # OPTIMIZATION: Use centralized utilities to reduce code duplication
 from app.utils.db_utils import execute_sp_multiple_results
-from app.utils.excel_utils import write_header_row, auto_size_columns, write_data_rows
+from app.utils.excel_utils import write_header_row, auto_size_columns, write_data_rows, clean_report_data
 
 logger = get_logger(__name__)
 
@@ -61,6 +61,9 @@ class ExcelReportGenerator:
                 logger.warning("No results from SP %s", sp_name)
                 write_header_row(ws, ["No Data"])
                 return
+
+            # Clean report data (merge recraft, strip NameGroup prefix)
+            columns, rows = clean_report_data(columns, rows)
 
             if not rows:
                 logger.warning("SP %s returned no rows for presentation_id=%d", sp_name, presentation_id)

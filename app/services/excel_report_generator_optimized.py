@@ -16,6 +16,7 @@ from app.services.nw_reports_service import nw_reports_service
 from app.utils.logging_utils import get_logger
 from app.utils.nw_data_utils import sanitize_filename
 from app.utils.path_utils import get_nw_downloads_dir
+from app.utils.excel_utils import clean_report_data
 
 logger = get_logger(__name__)
 
@@ -263,6 +264,9 @@ class ExcelReportGeneratorOptimized:
 
         ws = self.workbook.create_sheet(sheet_name)
 
+        # Clean report data (merge recraft, strip NameGroup prefix)
+        columns, rows = clean_report_data(columns, rows)
+
         # Write headers
         self._write_header_row(ws, columns)
 
@@ -333,6 +337,25 @@ class ExcelReportGeneratorOptimized:
                 for col_num, value in enumerate(row_list, start=1):
                     ws.cell(row=current_row, column=col_num, value=value)
                 current_row += 1
+
+        # Final pass: clean any remaining ## / $$ in all cells
+        if name_col_idx is not None:
+            name_col_excel = name_col_idx + 1  # 1-based for openpyxl
+            for row_idx in range(2, current_row):
+                name_cell = ws.cell(row=row_idx, column=name_col_excel).value
+                # Only clean non-group rows (Name has no delimiter)
+                if name_cell and isinstance(name_cell, str) and ('##' in name_cell or '$$' in name_cell):
+                    continue
+                for col_idx in range(1, len(columns) + 1):
+                    if col_idx == name_col_excel:
+                        continue
+                    cell = ws.cell(row=row_idx, column=col_idx)
+                    val = cell.value
+                    if val and isinstance(val, str):
+                        if '##' in val:
+                            cell.value = val.split('##')[0].strip()
+                        elif '$$' in val:
+                            cell.value = val.split('$$')[0].strip()
 
         # Auto-size columns
         self._auto_size_columns(ws)

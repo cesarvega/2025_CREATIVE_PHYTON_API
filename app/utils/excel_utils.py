@@ -12,6 +12,168 @@ from app.utils.logging_utils import get_logger
 
 logger = get_logger(__name__)
 
+def merge_recraft_columns(
+    columns: List[str],
+    rows: List,
+) -> tuple[List[str], List[list]]:
+    """Merge TestnameImagePath data into recraft and remove TestnameImagePath column.
+
+    Must be called BEFORE group expansion (expand_grouped_data).
+
+    For group slides, TestnameImagePath contains per-name recraft values
+    delimited by ## (e.g. "True##False##True"). This function copies that
+    raw value into the recraft column so that the subsequent group expansion
+    will split it alongside the Name column, producing one True/False per row.
+
+    For individual slides, TestnameImagePath contains an image path (not
+    relevant to the report). If recraft already has a value (BIT 0/1), it
+    is left unchanged.
+
+    Args:
+        columns: Column names from the stored procedure.
+        rows: Data rows (list of tuples/lists).
+
+    Returns:
+        Tuple of (cleaned_columns, cleaned_rows) with TestnameImagePath
+        removed and its group recraft values transferred to the recraft column.
+    """
+    # Find column indices (case-insensitive)
+    tip_idx = -1
+    recraft_idx = -1
+    for idx, col in enumerate(columns):
+        col_lower = col.lower() if col else ''
+        if col_lower == 'testnameimagepath':
+            tip_idx = idx
+        elif col_lower == 'recraft':
+            recraft_idx = idx
+
+    # Nothing to do if TestnameImagePath is not present
+    if tip_idx == -1:
+        return columns, rows
+
+    cleaned_rows = []
+    for row in rows:
+        row_list = list(row)
+
+        if recraft_idx != -1:
+            tip_value = row_list[tip_idx]
+            if tip_value and isinstance(tip_value, str) and tip_value.strip():
+                tip_stripped = tip_value.strip()
+                # Only override recraft if the value looks like recraft data
+                # (True/False, possibly delimited by ##)
+                # Skip image paths which won't match this pattern
+                parts = [p.strip().lower() for p in tip_stripped.split('##')]
+                is_recraft_data = all(p in ('true', 'false', '1', '0', '') for p in parts)
+                if is_recraft_data:
+                    row_list[recraft_idx] = tip_stripped
+
+        # Remove TestnameImagePath column from the row
+        row_list.pop(tip_idx)
+        cleaned_rows.append(row_list)
+
+    # Remove TestnameImagePath from column names
+    cleaned_columns = list(columns)
+    cleaned_columns.pop(tip_idx)
+
+    return cleaned_columns, cleaned_rows
+
+
+def _strip_namegroup_prefix(columns: List[str], rows: List[list]) -> List[list]:
+    """Remove the sort-order prefix (e.g. 'A|', 'B|', 'C|') from NameGroup values.
+
+    The database stores NameGroup as 'B|Prescreen Survivors' where the letter
+    is used for ordering. This strips the prefix for cleaner report output.
+
+    Args:
+        columns: Column names.
+        rows: Data rows (list of lists, modified in place).
+
+    Returns:
+        The same rows list with NameGroup values cleaned.
+    """
+    ng_idx = -1
+    for idx, col in enumerate(columns):
+        if col and col.lower() == 'namegroup':
+            ng_idx = idx
+            break
+
+    if ng_idx == -1:
+        return rows
+
+    for row in rows:
+        val = row[ng_idx]
+        if val and isinstance(val, str) and '|' in val:
+            row[ng_idx] = val.split('|', 1)[1]
+
+    return rows
+
+
+def _clean_orphaned_delimiters(columns: List[str], rows: List[list]) -> List[list]:
+    """Clean ## or $$ delimiters from non-name columns when Name has no delimiter.
+
+    This handles an edge case where individual slide names were split from a
+    group but other columns (NameRanking, recraft, etc.) still contain the
+    original grouped values with ## delimiters.  In that situation, keep only
+    the first value from the delimited string.
+
+    Args:
+        columns: Column names.
+        rows: Data rows (list of lists, modified in place).
+
+    Returns:
+        The same rows list with orphaned delimiters cleaned.
+    """
+    name_idx = find_column_index(
+        columns,
+        ['name', 'newname', 'namestoexplore', 'namestoavoid', 'candidate']
+    )
+    if name_idx == -1:
+        return rows
+
+    for row in rows:
+        name_val = row[name_idx]
+        # If Name has ## or $$, this is a proper group row - leave it for expansion
+        if name_val and isinstance(name_val, str) and ('##' in name_val or '$$' in name_val):
+            continue
+
+        # Name has no delimiter, so clean any ## or $$ in other columns
+        for col_idx, val in enumerate(row):
+            if col_idx == name_idx:
+                continue
+            if val and isinstance(val, str):
+                if '##' in val:
+                    row[col_idx] = val.split('##')[0].strip()
+                elif '$$' in val:
+                    row[col_idx] = val.split('$$')[0].strip()
+
+    return rows
+
+
+def clean_report_data(
+    columns: List[str],
+    rows: List,
+) -> tuple[List[str], List[list]]:
+    """Apply all report data cleaning transformations.
+
+    Combines all data cleaning steps that run BEFORE group expansion:
+    1. Merge TestnameImagePath into recraft and remove the column
+    2. Strip sort-order prefix from NameGroup (e.g. 'B|Name' -> 'Name')
+    3. Clean orphaned ## delimiters in non-name columns
+
+    Args:
+        columns: Column names from the stored procedure.
+        rows: Data rows (list of tuples/lists).
+
+    Returns:
+        Tuple of (cleaned_columns, cleaned_rows).
+    """
+    columns, rows = merge_recraft_columns(columns, rows)
+    rows = _strip_namegroup_prefix(columns, rows)
+    rows = _clean_orphaned_delimiters(columns, rows)
+
+    return columns, rows
+
+
 # Standard header styling constants
 HEADER_FONT = Font(bold=True, color="FFFFFF")
 HEADER_FILL = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
