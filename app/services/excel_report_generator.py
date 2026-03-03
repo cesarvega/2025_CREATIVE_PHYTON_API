@@ -76,6 +76,22 @@ class ExcelReportGenerator:
             # OPTIMIZATION: Use excel_utils for headers, data writing, and auto-sizing
             write_header_row(ws, columns)
             rows_written = write_data_rows(ws, columns, rows, expand_grouped=expand_grouped_names)
+
+            # Format recraft column: uppercase values and center alignment
+            recraft_col = None
+            for idx, col in enumerate(columns):
+                if col and col.lower() == 'recraft':
+                    recraft_col = idx + 1  # 1-based for openpyxl
+                    break
+            if recraft_col is not None:
+                from openpyxl.styles import Alignment
+                center_align = Alignment(horizontal="center", vertical="center")
+                for row_idx in range(2, 2 + rows_written):
+                    cell = ws.cell(row=row_idx, column=recraft_col)
+                    if cell.value is not None:
+                        cell.value = str(cell.value).upper()
+                    cell.alignment = center_align
+
             auto_size_columns(ws)
 
             logger.info("Sheet '%s' created with %d rows (expanded)", sheet_name, rows_written)

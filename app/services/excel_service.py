@@ -28,6 +28,17 @@ NAME_SUBGROUP_COLUMN = 7          # Column G: Group1 (primary subgroup column)
 
 GROUP_MARKERS = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
 GROUP_DELIMITER = "##"
+
+
+def _parse_group_recraft(raw_sub_group: str) -> bool:
+    """Check if a Group1/Group2 value contains 'R' indicating recraft.
+
+    E.g. "ar1" -> True, "a1" -> False, "br2" -> True, "b2" -> False.
+    The 'R' appears as the second character (after the group letter).
+    """
+    if raw_sub_group and len(raw_sub_group) >= 2:
+        return raw_sub_group[1].lower() == 'r'
+    return False
 # Accept a leading single letter as a valid group marker, optionally followed by
 # punctuation or whitespace. Examples matched: "A", "A:", "A)", "A -", "A."
 # Examples NOT matched: "Group A", "A1", "AA".
@@ -236,12 +247,12 @@ def process_excel_file(
                 final_name = name
                 final_notation = ""
 
-            # Extract group letter from Grupo1/Grupo2 (e.g., "a1" -> "A", "b2" -> "B")
+            # Extract group letter from Grupo1/Grupo2 (e.g., "a1" -> "A", "ar1" -> "AR", "b2" -> "B")
             if raw_name_sub_group and len(raw_name_sub_group) > 0:
-                # Take the first character and uppercase it
                 first_char = raw_name_sub_group[0].upper()
                 if first_char.isalpha():
-                    current_group_letter = first_char
+                    has_recraft = _parse_group_recraft(raw_name_sub_group)
+                    current_group_letter = f"{first_char}R" if has_recraft else first_char
 
             # Extract marker from Type column (for backward compatibility)
             m = _group_marker_regex.match(raw_type)
@@ -256,7 +267,7 @@ def process_excel_file(
             lst_logos.append(raw_logo)
             lst_name_sub_groups.append(raw_name_sub_group)
             lst_group_letters.append(current_group_letter)
-    
+
     else:
         # NEW: Group processing logic
         processed_indices = set()
@@ -295,12 +306,12 @@ def process_excel_file(
                 final_name = name
                 final_notation = ""
 
-            # Extract group letter from Grupo1/Grupo2 (e.g., "a1" -> "A", "b2" -> "B")
+            # Extract group letter from Grupo1/Grupo2 (e.g., "a1" -> "A", "ar1" -> "AR", "b2" -> "B")
             if raw_name_sub_group and len(raw_name_sub_group) > 0:
-                # Take the first character and uppercase it
                 first_char = raw_name_sub_group[0].upper()
                 if first_char.isalpha():
-                    current_group_letter = first_char
+                    has_recraft = _parse_group_recraft(raw_name_sub_group)
+                    current_group_letter = f"{first_char}R" if has_recraft else first_char
 
             # Extract marker from Type column (for backward compatibility)
             if raw_type:

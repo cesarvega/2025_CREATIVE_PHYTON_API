@@ -329,8 +329,8 @@ class FeedbackTemplateGeneratorOpenXML:
         elif presentation_type.lower() in ["katakana", "katakana_bigjap"]:
             template_name = TemplateFilename.WORD_KATAKANA
         else:
-            # Default to normal template (Normal, Nonproprietary, Tagline, etc.)
-            template_name = TemplateFilename.WORD_RATIONALES
+            # Default to phonetics template which includes Pronunciation column
+            template_name = TemplateFilename.WORD_PHONETICS
 
         template_path = templates_dir / template_name
         logger.debug("[OpenXML] Using Feedback template: %s", template_path)
@@ -1110,8 +1110,9 @@ class FeedbackTemplateGeneratorOpenXML:
                     self._set_cell_vertical_center(cell)
 
                     # Column 3: Pronunciation - CENTER ALIGNED
+                    # SP returns this data under 'Rationale' key
                     cell = new_row.cells[2]
-                    cell.text = str(row_dict.get('Pronunciation') or '')
+                    cell.text = str(row_dict.get('Rationale') or '')
                     para = cell.paragraphs[0]
                     para.alignment = WD_ALIGN_PARAGRAPH.CENTER
                     for run in para.runs:
@@ -1121,9 +1122,9 @@ class FeedbackTemplateGeneratorOpenXML:
                     # Apply vertical center using XML
                     self._set_cell_vertical_center(cell)
 
-                    # Column 4: Rationale - CENTER ALIGNED
+                    # Column 4: Rationale - CENTER ALIGNED (left empty)
                     cell = new_row.cells[3]
-                    cell.text = str(row_dict.get('Rationale') or '')
+                    cell.text = ''
                     para = cell.paragraphs[0]
                     para.alignment = WD_ALIGN_PARAGRAPH.CENTER
                     for run in para.runs:

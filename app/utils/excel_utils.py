@@ -20,14 +20,18 @@ def merge_recraft_columns(
 
     Must be called BEFORE group expansion (expand_grouped_data).
 
-    For group slides, TestnameImagePath contains per-name recraft values
-    delimited by ## (e.g. "True##False##True"). This function copies that
-    raw value into the recraft column so that the subsequent group expansion
-    will split it alongside the Name column, producing one True/False per row.
+    Two scenarios:
 
-    For individual slides, TestnameImagePath contains an image path (not
-    relevant to the report). If recraft already has a value (BIT 0/1), it
-    is left unchanged.
+    Scenario A - TestnameImagePath has recraft data:
+        TestnameImagePath contains per-name recraft values delimited by ##
+        (e.g. "True##False##True"). Copy the string into the recraft column.
+        If Name uses $$ delimiter, convert ## to $$ so the subsequent expansion
+        splits correctly.
+
+    Scenario B - TestnameImagePath is empty but Name is grouped:
+        The recraft column has a single BIT value (e.g. "True") but Name is
+        grouped ("A##B##C"). Replicate the recraft value for each name so that
+        expansion produces one value per row (e.g. "True##True##True").
 
     Args:
         columns: Column names from the stored procedure.
@@ -40,12 +44,15 @@ def merge_recraft_columns(
     # Find column indices (case-insensitive)
     tip_idx = -1
     recraft_idx = -1
+    name_idx = -1
     for idx, col in enumerate(columns):
         col_lower = col.lower() if col else ''
         if col_lower == 'testnameimagepath':
             tip_idx = idx
         elif col_lower == 'recraft':
             recraft_idx = idx
+        elif col_lower in ('name', 'newname', 'namestoexplore', 'namestoavoid', 'candidate'):
+            name_idx = idx
 
     # Nothing to do if TestnameImagePath is not present
     if tip_idx == -1:
@@ -57,15 +64,35 @@ def merge_recraft_columns(
 
         if recraft_idx != -1:
             tip_value = row_list[tip_idx]
+            name_value = row_list[name_idx] if name_idx != -1 else None
+
+            # Detect the delimiter used by Name
+            name_delimiter = None
+            name_count = 1
+            if name_value and isinstance(name_value, str):
+                if '##' in name_value:
+                    name_delimiter = '##'
+                    name_count = len(name_value.split('##'))
+                elif '$$' in name_value:
+                    name_delimiter = '$$'
+                    name_count = len(name_value.split('$$'))
+
             if tip_value and isinstance(tip_value, str) and tip_value.strip():
                 tip_stripped = tip_value.strip()
-                # Only override recraft if the value looks like recraft data
-                # (True/False, possibly delimited by ##)
-                # Skip image paths which won't match this pattern
+                # Scenario A: TestnameImagePath has recraft data
                 parts = [p.strip().lower() for p in tip_stripped.split('##')]
                 is_recraft_data = all(p in ('true', 'false', '1', '0', '') for p in parts)
                 if is_recraft_data:
+                    # If Name uses $$, convert ## to $$ so expansion works
+                    if name_delimiter == '$$':
+                        tip_stripped = tip_stripped.replace('##', '$$')
                     row_list[recraft_idx] = tip_stripped
+            elif name_delimiter and name_count > 1:
+                # Scenario B: TestnameImagePath is empty but Name is grouped
+                # Replicate the single recraft value for each name
+                recraft_value = row_list[recraft_idx]
+                recraft_str = str(recraft_value) if recraft_value is not None else 'False'
+                row_list[recraft_idx] = name_delimiter.join([recraft_str] * name_count)
 
         # Remove TestnameImagePath column from the row
         row_list.pop(tip_idx)
@@ -274,6 +301,7 @@ def expand_grouped_data(
 
     # Determine delimiter
     delimiter = '##' if '##' in name_value else '$$'
+    alt_delimiter = '$$' if delimiter == '##' else '##'
 
     # Split the primary name column and filter out empty values
     names = [n.strip() for n in name_value.split(delimiter)]
@@ -281,18 +309,27 @@ def expand_grouped_data(
 
     logger.debug("Expanding row with delimiter '%s' into %d items", delimiter, num_items)
 
-    # Split ALL columns that contain the same delimiter
+    # Split ALL columns that contain the same delimiter OR the alternate delimiter
     split_columns = []
     for col_idx, col_value in enumerate(row_list):
-        if col_value and isinstance(col_value, str) and delimiter in col_value:
-            # Split this column
-            parts = [p.strip() for p in col_value.split(delimiter)]
-            # Pad with empty strings if needed to match num_items
-            while len(parts) < num_items:
-                parts.append('')
-            split_columns.append((col_idx, parts))
+        if col_value and isinstance(col_value, str):
+            if delimiter in col_value:
+                # Split this column by the primary delimiter
+                parts = [p.strip() for p in col_value.split(delimiter)]
+                while len(parts) < num_items:
+                    parts.append('')
+                split_columns.append((col_idx, parts))
+            elif alt_delimiter in col_value:
+                # Column uses the other delimiter (e.g. ## when Name uses $$)
+                parts = [p.strip() for p in col_value.split(alt_delimiter)]
+                while len(parts) < num_items:
+                    parts.append('')
+                split_columns.append((col_idx, parts))
+            else:
+                # No delimiter, repeat value
+                split_columns.append((col_idx, [col_value] * num_items))
         else:
-            # This column doesn't have delimiter, will be repeated
+            # Non-string or empty, repeat value
             split_columns.append((col_idx, [col_value] * num_items))
 
     # Create expanded rows, SKIP completely empty rows

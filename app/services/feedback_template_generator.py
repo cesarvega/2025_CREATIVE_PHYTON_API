@@ -304,8 +304,8 @@ class FeedbackTemplateGenerator:
         elif presentation_type.lower() in ["katakana", "katakana_bigjap"]:
             template_name = TemplateFilename.WORD_KATAKANA
         else:
-            # Default to normal template (Normal, Nonproprietary, Tagline, etc.)
-            template_name = TemplateFilename.WORD_RATIONALES
+            # Default to phonetics template which includes Pronunciation column
+            template_name = TemplateFilename.WORD_PHONETICS
 
         template_path = templates_dir / template_name
         logger.debug("Using Feedback template: %s", template_path)
@@ -690,6 +690,16 @@ class FeedbackTemplateGenerator:
 
             logger.info("Cleared %d rows from table, now has %d rows", rows_deleted, table.Rows.Count)
 
+            # Detect table layout: count header cells to determine if Pronunciation column exists
+            # 8 columns = #, Test Name, Pronunciation, Rationale, Positive, Neutral, Negative, Comments
+            # 7 columns = #, Test Name, Rationale, Positive, Neutral, Negative, Comments
+            try:
+                header_col_count = table.Rows(1).Cells.Count
+            except Exception:
+                header_col_count = 8  # Default to 8-column layout
+            table_has_pronunciation = header_col_count >= 8
+            logger.info("Table header has %d columns, has_pronunciation=%s", header_col_count, table_has_pronunciation)
+
             # Expand grouped rows (##) into 1 row per entry
             expanded_rows: List[dict] = []
             for row in rows:
@@ -708,65 +718,68 @@ class FeedbackTemplateGenerator:
                     # Ensure white background for body rows
                     self._force_row_white_background(new_row)
 
-                    # The SP already provides the data in the correct format
-                    # We just need to copy it to the Word table cells
+                    # Map columns dynamically based on table layout
+                    # 8 cols: #(1), Test Name(2), Pronunciation(3), Rationale(4), Positive(5), Neutral(6), Negative(7), Comments(8)
+                    # 7 cols: #(1), Test Name(2), Rationale(3), Positive(4), Neutral(5), Negative(6), Comments(7)
+                    total_cols = new_row.Cells.Count
+                    if table_has_pronunciation:
+                        pronunciation_col = 3
+                        rationale_col = 4
+                        vote_start_col = 5
+                    else:
+                        pronunciation_col = None
+                        rationale_col = 3
+                        vote_start_col = 4
 
-                    # Set vertical alignment for all cells in the row (center)
-                    # wdCellAlignVerticalCenter = 1
-                    for cell_idx in range(1, new_row.Cells.Count + 1):
+                    # Set vertical alignment for all cells
+                    for cell_idx in range(1, total_cols + 1):
                         new_row.Cells(cell_idx).VerticalAlignment = 1
 
                     # Column 1: Row number - CENTER aligned
-                    if new_row.Cells.Count >= 1:
+                    if total_cols >= 1:
                         cell_range = new_row.Cells(1).Range
                         cell_range.Text = str(idx + 1)
                         cell_range.Font.Size = 10
                         cell_range.Font.Bold = False
                         cell_range.Font.Name = "Calibri"
                         cell_range.ParagraphFormat.Alignment = 1  # wdAlignParagraphCenter
-                        new_row.Cells(1).VerticalAlignment = 1  # wdCellAlignVerticalCenter
 
                     # Column 2: Test Name - LEFT aligned, BOLD
-                    if new_row.Cells.Count >= 2:
+                    if total_cols >= 2:
                         cell_range = new_row.Cells(2).Range
                         cell_range.Text = str(row_dict.get('Test Name') or '')
                         cell_range.Font.Size = 10
-                        cell_range.Font.Bold = True  # Test Name should be bold
+                        cell_range.Font.Bold = True
                         cell_range.Font.Name = "Calibri"
                         cell_range.ParagraphFormat.Alignment = 0  # wdAlignParagraphLeft
-                        new_row.Cells(2).VerticalAlignment = 1  # wdCellAlignVerticalCenter
 
-                    # Column 3: Pronunciation - LEFT aligned
-                    if new_row.Cells.Count >= 3:
-                        cell_range = new_row.Cells(3).Range
-                        cell_range.Text = str(row_dict.get('Pronunciation') or '')
-                        cell_range.Font.Size = 10
-                        cell_range.Font.Bold = False
-                        cell_range.Font.Name = "Calibri"
-                        cell_range.ParagraphFormat.Alignment = 0  # wdAlignParagraphLeft
-                        new_row.Cells(3).VerticalAlignment = 1  # wdCellAlignVerticalCenter
-
-                    # Column 4: Rationale - LEFT aligned
-                    if new_row.Cells.Count >= 4:
-                        cell_range = new_row.Cells(4).Range
+                    # Pronunciation (only if table has 8 columns)
+                    # SP returns this data under 'Rationale' key
+                    if pronunciation_col and total_cols >= pronunciation_col:
+                        cell_range = new_row.Cells(pronunciation_col).Range
                         cell_range.Text = str(row_dict.get('Rationale') or '')
                         cell_range.Font.Size = 10
                         cell_range.Font.Bold = False
                         cell_range.Font.Name = "Calibri"
                         cell_range.ParagraphFormat.Alignment = 0  # wdAlignParagraphLeft
-                        new_row.Cells(4).VerticalAlignment = 1  # wdCellAlignVerticalCenter
 
-                    # Columns 5-8: Positive, Neutral, Negative, Comments/Suggestions - CENTER aligned
-                    # These are left empty for the client to fill
-                    for col_idx in range(5, min(9, new_row.Cells.Count + 1)):
-                        if new_row.Cells.Count >= col_idx:
-                            cell_range = new_row.Cells(col_idx).Range
-                            cell_range.Text = ""
-                            cell_range.Font.Size = 10
-                            cell_range.Font.Bold = False
-                            cell_range.Font.Name = "Calibri"
-                            cell_range.ParagraphFormat.Alignment = 1  # wdAlignParagraphCenter
-                            new_row.Cells(col_idx).VerticalAlignment = 1  # wdCellAlignVerticalCenter
+                    # Rationale - LEFT aligned (left empty)
+                    if total_cols >= rationale_col:
+                        cell_range = new_row.Cells(rationale_col).Range
+                        cell_range.Text = ''
+                        cell_range.Font.Size = 10
+                        cell_range.Font.Bold = False
+                        cell_range.Font.Name = "Calibri"
+                        cell_range.ParagraphFormat.Alignment = 0  # wdAlignParagraphLeft
+
+                    # Remaining columns: Positive, Neutral, Negative, Comments - CENTER aligned, empty
+                    for col_idx in range(vote_start_col, total_cols + 1):
+                        cell_range = new_row.Cells(col_idx).Range
+                        cell_range.Text = ""
+                        cell_range.Font.Size = 10
+                        cell_range.Font.Bold = False
+                        cell_range.Font.Name = "Calibri"
+                        cell_range.ParagraphFormat.Alignment = 1  # wdAlignParagraphCenter
 
                     # Ensure row font is 10pt and not bolded by style inheritance
                     try:

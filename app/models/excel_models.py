@@ -20,7 +20,7 @@ class ProcessedExcelData:
     lst_kana: List[str] = field(default_factory=list)
     lst_logos: List[str] = field(default_factory=list)
     lst_name_sub_groups: List[str] = field(default_factory=list)
-    lst_group_letters: List[str] = field(default_factory=list)  # Group letter (A, B, C) for each row
+    lst_group_letters: List[str] = field(default_factory=list)  # Group letter (A, AR, B, C) for each row
 
     # Derived metadata
     total_rows_processed: int = 0

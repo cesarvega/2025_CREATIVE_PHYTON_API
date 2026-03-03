@@ -294,17 +294,27 @@ class ExcelReportGeneratorOptimized:
 
                 if name_value and isinstance(name_value, str) and ('##' in name_value or '$$' in name_value):
                     delimiter = '##' if '##' in name_value else '$$'
+                    alt_delimiter = '$$' if delimiter == '##' else '##'
                     names = [n.strip() for n in name_value.split(delimiter)]
                     num_items = len(names)
 
-                    # Split ALL columns that contain the same delimiter
+                    # Split ALL columns that contain the same delimiter OR the alternate delimiter
                     split_columns = []
                     for col_idx, col_value in enumerate(row_list):
-                        if col_value and isinstance(col_value, str) and delimiter in col_value:
-                            parts = [p.strip() for p in col_value.split(delimiter)]
-                            while len(parts) < num_items:
-                                parts.append('')
-                            split_columns.append((col_idx, parts))
+                        if col_value and isinstance(col_value, str):
+                            if delimiter in col_value:
+                                parts = [p.strip() for p in col_value.split(delimiter)]
+                                while len(parts) < num_items:
+                                    parts.append('')
+                                split_columns.append((col_idx, parts))
+                            elif alt_delimiter in col_value:
+                                # Column uses the other delimiter (e.g. ## when Name uses $$)
+                                parts = [p.strip() for p in col_value.split(alt_delimiter)]
+                                while len(parts) < num_items:
+                                    parts.append('')
+                                split_columns.append((col_idx, parts))
+                            else:
+                                split_columns.append((col_idx, [col_value] * num_items))
                         else:
                             split_columns.append((col_idx, [col_value] * num_items))
 
@@ -356,6 +366,20 @@ class ExcelReportGeneratorOptimized:
                             cell.value = val.split('##')[0].strip()
                         elif '$$' in val:
                             cell.value = val.split('$$')[0].strip()
+
+        # Format recraft column: uppercase values and center alignment
+        recraft_col = None
+        for idx, col in enumerate(columns):
+            if col and col.lower() == 'recraft':
+                recraft_col = idx + 1  # 1-based for openpyxl
+                break
+        if recraft_col is not None:
+            center_align = Alignment(horizontal="center", vertical="center")
+            for row_idx in range(2, current_row):
+                cell = ws.cell(row=row_idx, column=recraft_col)
+                if cell.value is not None:
+                    cell.value = str(cell.value).upper()
+                cell.alignment = center_align
 
         # Auto-size columns
         self._auto_size_columns(ws)

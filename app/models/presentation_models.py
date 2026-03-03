@@ -378,7 +378,7 @@ class DetailItem(BaseModel):
     )
     group_letter: Optional[str] = Field(
         default="",
-        description="Group letter (A, B, C) indicating the voting behavior for this slide's group."
+        description="Group letter (A, AR, B, C) indicating the voting behavior for this slide's group."
     )
 
 
