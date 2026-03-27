@@ -206,6 +206,7 @@ def process_excel_file(
     lst_logos = []
     lst_name_sub_groups = []
     lst_group_letters = []
+    lst_group_types = []  # "group1" (col G) or "group2" (col H) - controls rationale display
 
     # Collect all rows first - optimized with generator and early filtering
     all_rows = []
@@ -232,9 +233,15 @@ def process_excel_file(
             raw_name_sub_group = _clean(
                 str(row[NAME_SUBGROUP_COLUMN - 1].value) if len(row) >= NAME_SUBGROUP_COLUMN else ""
             )
-            # If column G is empty, fallback to column H (Group2)
+            current_group_type = "group2"  # default: group2 = rationales visible (regular)
+            # If column G has data, it's group1 (rationales hidden, shown on hover)
+            if raw_name_sub_group:
+                current_group_type = "group1"
+            # If column G is empty, fallback to column H (Group2 = rationales visible)
             if not raw_name_sub_group and len(row) >= NAME_SUBGROUP_COLUMN + 1:
                 raw_name_sub_group = _clean(str(row[NAME_SUBGROUP_COLUMN].value))
+                if raw_name_sub_group:
+                    current_group_type = "group2"
 
             name, notation = _split_name_and_notation(raw_name)
 
@@ -267,6 +274,7 @@ def process_excel_file(
             lst_logos.append(raw_logo)
             lst_name_sub_groups.append(raw_name_sub_group)
             lst_group_letters.append(current_group_letter)
+            lst_group_types.append(current_group_type)
 
     else:
         # NEW: Group processing logic
@@ -281,9 +289,15 @@ def process_excel_file(
             raw_name_sub_group = _clean(
                 str(row[NAME_SUBGROUP_COLUMN - 1].value) if len(row) >= NAME_SUBGROUP_COLUMN else ""
             )
-            # If column G is empty, fallback to column H (Group2)
+            current_group_type = "group2"  # default: group2 = rationales visible (regular)
+            # If column G has data, it's group1 (rationales hidden, shown on hover)
+            if raw_name_sub_group:
+                current_group_type = "group1"
+            # If column G is empty, fallback to column H (Group2 = rationales visible)
             if not raw_name_sub_group and len(row) >= NAME_SUBGROUP_COLUMN + 1:
                 raw_name_sub_group = _clean(str(row[NAME_SUBGROUP_COLUMN].value))
+                if raw_name_sub_group:
+                    current_group_type = "group2"
 
             delimiter = GROUP_DELIMITER
 
@@ -331,6 +345,7 @@ def process_excel_file(
                 lst_logos.append(raw_logo)
                 lst_name_sub_groups.append("")
                 lst_group_letters.append(current_group_letter)
+                lst_group_types.append(current_group_type)
                 processed_indices.add(i)
             else:
                 # Group multiple rows with same sub_group
@@ -380,6 +395,7 @@ def process_excel_file(
                 lst_logos.append(raw_logo)
                 lst_name_sub_groups.append(raw_name_sub_group)
                 lst_group_letters.append(current_group_letter)
+                lst_group_types.append(current_group_type)
 
     if not lst_names:
         raise ValueError("The Excel file does not contain valid candidates")
@@ -394,6 +410,7 @@ def process_excel_file(
         lst_logos=lst_logos,
         lst_name_sub_groups=lst_name_sub_groups,
         lst_group_letters=lst_group_letters,
+        lst_group_types=lst_group_types,
         is_phonetics=is_phonetics,
     )
 

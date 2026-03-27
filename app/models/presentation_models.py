@@ -380,6 +380,10 @@ class DetailItem(BaseModel):
         default="",
         description="Group letter (A, AR, B, C) indicating the voting behavior for this slide's group."
     )
+    group_type: Optional[str] = Field(
+        default="group2",
+        description="Group type controlling rationale display: 'group1' (col G, hidden rationales shown on hover) or 'group2' (col H, rationales visible next to name, default)."
+    )
 
 
 class PresentationData(BaseModel):

@@ -1892,6 +1892,7 @@ class PresentationService:
         )
         group_name = excel_data.lst_categories[index] or excel_data.lst_names[index]
         group_letter = excel_data.lst_group_letters[index] if index < len(excel_data.lst_group_letters) else ""
+        group_type = excel_data.lst_group_types[index] if index < len(excel_data.lst_group_types) else "group2"
 
         return DetailItem(
             slide_number=slide_number,
@@ -1910,6 +1911,7 @@ class PresentationService:
             template_id=default_template_id,
             name_sub_group="",
             group_letter=group_letter,
+            group_type=group_type,
         )
         
     def _create_individual_slide(
@@ -1927,6 +1929,7 @@ class PresentationService:
         )
         group_name = current_group or excel_data.lst_categories[index]
         group_letter = excel_data.lst_group_letters[index] if index < len(excel_data.lst_group_letters) else ""
+        group_type = excel_data.lst_group_types[index] if index < len(excel_data.lst_group_types) else "group2"
 
         # For NW projects with notation in the name, add suffix to group_name
         # Check if name has notation by looking for parentheses pattern
@@ -1949,6 +1952,7 @@ class PresentationService:
             template_id=default_template_id,  # May be updated with template rotation
             name_sub_group=excel_data.lst_name_sub_groups[index],
             group_letter=group_letter,
+            group_type=group_type,
         )
 
     def _create_summary_slide(
@@ -2471,9 +2475,11 @@ class PresentationService:
                 bg_index += 1
 
             # Insert the slide with the determined background path and template ID
-            # Combine group_letter and group_name in format: "A|Prescreen Survivors"
+            # Combine group_letter, group_name, and group_type in format:
+            # "AR|Prescreen Survivors $ Description $ group1"
             group_name_raw = slide.get("group_name") or ""
             group_letter_raw = slide.get("group_letter") or ""
+            group_type_raw = slide.get("group_type") or "group2"
 
             if group_letter_raw and group_name_raw:
                 # Format: "A|Prescreen Survivors"
@@ -2483,6 +2489,12 @@ class PresentationService:
                 group_name_with_letter = group_name_raw
             else:
                 group_name_with_letter = ""
+
+            # Append group type as last $ segment (e.g. "AR|Name $ Desc $ group1")
+            # group1 = rationales hidden (hover tooltip), group2 = rationales visible (default)
+            # Only append if we have a NameGroup value and group_type is not the default (group2)
+            if group_name_with_letter and group_type_raw == "group1":
+                group_name_with_letter = f"{group_name_with_letter} $ {group_type_raw}"
 
             detail_params = (
                 presentation_id,

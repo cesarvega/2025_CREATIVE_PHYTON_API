@@ -103,10 +103,20 @@ class FeedbackTemplateGeneratorOpenXML:
                 word_app.Visible = False
                 word_app.DisplayAlerts = 0
 
-                # Open .doc file
+                # Open .doc file (with retry for COM busy errors)
                 logger.debug("[OpenXML] Opening source .doc file: %s", doc_path)
                 source_path = str(doc_path.absolute())
-                doc = word_app.Documents.Open(source_path)
+                import time as _time
+                for _open_attempt in range(3):
+                    try:
+                        doc = word_app.Documents.Open(source_path)
+                        break
+                    except Exception as open_err:
+                        if _open_attempt < 2:
+                            logger.warning("[OpenXML] Documents.Open attempt %d failed: %s. Retrying...", _open_attempt + 1, str(open_err))
+                            _time.sleep(2)
+                        else:
+                            raise
 
                 # Save as .docx (format 16 = wdFormatXMLDocument)
                 # Ensure output directory exists
@@ -122,15 +132,23 @@ class FeedbackTemplateGeneratorOpenXML:
                 # Format 16 = wdFormatXMLDocument (.docx)
                 WD_FORMAT_XML_DOCUMENT = 16
 
-                try:
-                    doc.SaveAs2(output_path_str, WD_FORMAT_XML_DOCUMENT)
-                    logger.info("[OpenXML] SaveAs2 completed successfully")
-                except Exception as save_error:
-                    logger.error("[OpenXML] SaveAs2 failed: %s", str(save_error))
-                    logger.error("[OpenXML] Attempted path: %s", output_path_str)
-                    logger.error("[OpenXML] Parent exists: %s", docx_path.parent.exists())
-                    logger.error("[OpenXML] Parent is dir: %s", docx_path.parent.is_dir())
-                    raise
+                import time as _time
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        doc.SaveAs2(output_path_str, WD_FORMAT_XML_DOCUMENT)
+                        logger.info("[OpenXML] SaveAs2 completed successfully")
+                        break
+                    except Exception as save_error:
+                        if attempt < max_retries - 1:
+                            logger.warning("[OpenXML] SaveAs2 attempt %d failed: %s. Retrying...", attempt + 1, str(save_error))
+                            _time.sleep(2)
+                        else:
+                            logger.error("[OpenXML] SaveAs2 failed after %d attempts: %s", max_retries, str(save_error))
+                            logger.error("[OpenXML] Attempted path: %s", output_path_str)
+                            logger.error("[OpenXML] Parent exists: %s", docx_path.parent.exists())
+                            logger.error("[OpenXML] Parent is dir: %s", docx_path.parent.is_dir())
+                            raise
 
                 doc.Close(SaveChanges=False)
                 logger.debug("[OpenXML] Document closed")

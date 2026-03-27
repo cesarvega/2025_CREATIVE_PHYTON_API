@@ -21,6 +21,7 @@ class ProcessedExcelData:
     lst_logos: List[str] = field(default_factory=list)
     lst_name_sub_groups: List[str] = field(default_factory=list)
     lst_group_letters: List[str] = field(default_factory=list)  # Group letter (A, AR, B, C) for each row
+    lst_group_types: List[str] = field(default_factory=list)  # "group1" (col G, rationales hidden/hover) or "group2" (col H, rationales visible, default)
 
     # Derived metadata
     total_rows_processed: int = 0
@@ -76,6 +77,7 @@ class ProcessedExcelData:
             "logo": self._safe_get(self.lst_logos, index),
             "name_sub_group": self._safe_get(self.lst_name_sub_groups, index),
             "group_letter": self._safe_get(self.lst_group_letters, index),
+            "group_type": self._safe_get(self.lst_group_types, index),
         }
 
     def as_dict(self) -> Dict[str, Any]:
@@ -90,6 +92,7 @@ class ProcessedExcelData:
             "lst_logos": self.lst_logos,
             "lst_name_sub_groups": self.lst_name_sub_groups,
             "lst_group_letters": self.lst_group_letters,
+            "lst_group_types": self.lst_group_types,
             "total_rows_processed": self.total_rows_processed,
             "candidate_count": self.candidate_count,
             "group_count": self.group_count,
@@ -122,6 +125,7 @@ class ProcessedExcelDataModel(BaseModel):
     lst_logos: List[str] = Field(default_factory=list)
     lst_name_sub_groups: List[str] = Field(default_factory=list)
     lst_group_letters: List[str] = Field(default_factory=list)
+    lst_group_types: List[str] = Field(default_factory=list)
     total_rows_processed: int = 0
     candidate_count: int = 0
     group_count: int = 0
