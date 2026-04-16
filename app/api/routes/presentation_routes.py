@@ -2699,7 +2699,7 @@ async def create_feedback_template_with_backup(
             task_id=task_id,
             task_type="create_feedback_template_with_backup",
             func=_create_feedback_template_with_backup_background,
-            args=(task_id, request.presentation_id, display_name),
+            args=(task_id, request.presentation_id, display_name, request.with_sound_files),
             priority=TaskPriority.NORMAL,
         )
 

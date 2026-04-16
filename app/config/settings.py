@@ -86,6 +86,18 @@ class Settings(BaseSettings):
             "NW_Files/backgrounds"
         )
 
+    @property
+    def sound_files_dir(self) -> Path:
+        """Get sound files directory for MP3 pronunciation files.
+
+        Production: C:/SoundFiles
+        Development: NW_Files/SoundFiles
+        """
+        return self._get_path_for_env(
+            "C:/SoundFiles",
+            "NW_Files/SoundFiles"
+        )
+
     # Application paths
     app_dir: Path = Path(__file__).parent.parent.parent.resolve()
 

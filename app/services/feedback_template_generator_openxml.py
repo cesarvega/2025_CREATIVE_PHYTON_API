@@ -52,6 +52,7 @@ class FeedbackTemplateGeneratorOpenXML:
         self.template_path: Optional[Path] = None
         self.temp_dir: Optional[Path] = None
         self.converted_template_path: Optional[Path] = None
+        self._feedback_names: List[str] = []  # Test names for sound file embedding
 
     def _convert_doc_to_docx(self, doc_path: Path) -> Path:
         """Convert .doc file to .docx using COM automation.
@@ -182,6 +183,7 @@ class FeedbackTemplateGeneratorOpenXML:
         presentation_id: int,
         display_name: str,
         progress_callback=None,
+        with_sound_files: bool = False,
     ) -> Path:
         """Generate complete Feedback Template document for NW presentation using OpenXML.
 
@@ -311,6 +313,15 @@ class FeedbackTemplateGeneratorOpenXML:
             # Save as modern .docx format
             doc.save(str(output_path))
             logger.info("[OpenXML] Document saved successfully to: %s", output_path)
+
+            # PHASE 5: Embed sound files via COM (95-100%)
+            if progress_callback:
+                progress_callback(95)
+            if with_sound_files and self._feedback_names:
+                try:
+                    self._embed_sound_files_via_com(output_path, display_name)
+                except Exception as sound_error:
+                    logger.warning("[OpenXML] Sound file embedding failed (non-fatal): %s", str(sound_error))
 
             if progress_callback:
                 progress_callback(100)
@@ -586,7 +597,7 @@ class FeedbackTemplateGeneratorOpenXML:
                     text_run = text_para.add_run(combined_header_text)
                     text_run.font.size = Pt(8.5)
                     text_run.font.bold = True
-                    text_run.font.name = "Calibri"
+                    text_run.font.name = "Open Sans"
                     logger.info(f"[OpenXML] Text added: '{combined_header_text[:100]}...'")
 
                     # Remove all borders to make table invisible
@@ -731,7 +742,7 @@ class FeedbackTemplateGeneratorOpenXML:
                     left_run = left_para.add_run(left_text)
                     left_run.font.size = Pt(9)
                     left_run.font.bold = True
-                    left_run.font.name = "Calibri"
+                    left_run.font.name = "Open Sans"
 
                     # Right text cell (Company + Date) - use separate paragraphs for more spacing
                     right_cell = row.cells[2]
@@ -748,7 +759,7 @@ class FeedbackTemplateGeneratorOpenXML:
                         right_run = right_para.add_run(right_text_lines[0])
                         right_run.font.size = Pt(9)
                         right_run.font.bold = True
-                        right_run.font.name = "Calibri"
+                        right_run.font.name = "Open Sans"
 
                         # Additional lines (Date, etc.)
                         for line in right_text_lines[1:]:
@@ -760,7 +771,7 @@ class FeedbackTemplateGeneratorOpenXML:
                             right_run2 = right_para2.add_run(line)
                             right_run2.font.size = Pt(9)
                             right_run2.font.bold = True
-                            right_run2.font.name = "Calibri"
+                            right_run2.font.name = "Open Sans"
                     else:
                         # Fallback: no text
                         right_para = right_cell.paragraphs[0]
@@ -1083,6 +1094,12 @@ class FeedbackTemplateGeneratorOpenXML:
             logger.info("[OpenXML] Expanded %d SP rows into %d table rows (group delimiter: ##/$$)",
                        len(rows), len(expanded_rows))
 
+            # Store test names for sound file embedding later
+            self._feedback_names = [
+                str(row_dict.get('Test Name') or '').strip()
+                for row_dict in expanded_rows
+            ]
+
             # Add rows for each result from SP (after expansion)
             for idx, row_dict in enumerate(expanded_rows):
                 try:
@@ -1111,44 +1128,44 @@ class FeedbackTemplateGeneratorOpenXML:
                     for run in para.runs:
                         run.font.size = Pt(10)
                         run.font.bold = False
-                        run.font.name = "Calibri"
+                        run.font.name = "Open Sans"
                     # Apply vertical center using XML
                     self._set_cell_vertical_center(cell)
 
-                    # Column 2: Test Name (Candidate) - IN BOLD, CENTER ALIGNED
+                    # Column 2: Test Name (Candidate) - CENTER ALIGNED, no bold
                     cell = new_row.cells[1]
                     cell.text = str(row_dict.get('Test Name') or '')
                     para = cell.paragraphs[0]
                     para.alignment = WD_ALIGN_PARAGRAPH.CENTER
                     for run in para.runs:
                         run.font.size = Pt(10)
-                        run.font.bold = True
-                        run.font.name = "Calibri"
-                    # Apply vertical center using XML
-                    self._set_cell_vertical_center(cell)
-
-                    # Column 3: Pronunciation - CENTER ALIGNED
-                    # SP returns this data under 'Rationale' key
-                    cell = new_row.cells[2]
-                    cell.text = str(row_dict.get('Rationale') or '')
-                    para = cell.paragraphs[0]
-                    para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    for run in para.runs:
-                        run.font.size = Pt(10)
                         run.font.bold = False
-                        run.font.name = "Calibri"
+                        run.font.name = "Open Sans"
                     # Apply vertical center using XML
                     self._set_cell_vertical_center(cell)
 
-                    # Column 4: Rationale - CENTER ALIGNED (left empty)
-                    cell = new_row.cells[3]
+                    # Column 3: Pronunciation - CENTER ALIGNED (left empty)
+                    cell = new_row.cells[2]
                     cell.text = ''
                     para = cell.paragraphs[0]
                     para.alignment = WD_ALIGN_PARAGRAPH.CENTER
                     for run in para.runs:
                         run.font.size = Pt(10)
                         run.font.bold = False
-                        run.font.name = "Calibri"
+                        run.font.name = "Open Sans"
+                    # Apply vertical center using XML
+                    self._set_cell_vertical_center(cell)
+
+                    # Column 4: Rationale - CENTER ALIGNED
+                    # SP returns this data under 'Rationale' key
+                    cell = new_row.cells[3]
+                    cell.text = str(row_dict.get('Rationale') or '')
+                    para = cell.paragraphs[0]
+                    para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    for run in para.runs:
+                        run.font.size = Pt(10)
+                        run.font.bold = False
+                        run.font.name = "Open Sans"
                     # Apply vertical center using XML
                     self._set_cell_vertical_center(cell)
 
@@ -1163,13 +1180,13 @@ class FeedbackTemplateGeneratorOpenXML:
                             for run in para.runs:
                                 run.font.size = Pt(10)
                                 run.font.bold = False
-                                run.font.name = "Calibri"
+                                run.font.name = "Open Sans"
                         else:
                             # Add a run with proper formatting for empty cells
                             run = para.add_run()
                             run.font.size = Pt(10)
                             run.font.bold = False
-                            run.font.name = "Calibri"
+                            run.font.name = "Open Sans"
                         # Apply vertical center using XML
                         self._set_cell_vertical_center(cell)
 
@@ -1191,6 +1208,179 @@ class FeedbackTemplateGeneratorOpenXML:
 
         except Exception as e:
             logger.error("[OpenXML] Error populating feedback table from SP: %s", str(e), exc_info=True)
+
+    def _find_sound_file(self, test_name: str, display_name: str) -> Optional[Path]:
+        """Find MP3 sound file for a test name.
+
+        Search order:
+        1. Project-specific folder: C:\\SoundFiles\\{display_name}_MR\\{NAME}.MP3
+        2. Global folder: C:\\SoundFiles\\{NAME}.MP3
+
+        Args:
+            test_name: The test name (e.g. "SKELTEGRA")
+            display_name: Project display name for project-specific folder lookup
+
+        Returns:
+            Path to MP3 file if found, None otherwise
+        """
+        if not test_name:
+            return None
+
+        sound_dir = settings.sound_files_dir
+        name_upper = test_name.strip().upper()
+
+        # Try project-specific folder first
+        if display_name:
+            project_folder = sound_dir / f"{display_name}_MR"
+            project_path = project_folder / f"{name_upper}.MP3"
+            if project_path.exists():
+                return project_path
+
+        # Try global folder
+        global_path = sound_dir / f"{name_upper}.MP3"
+        if global_path.exists():
+            return global_path
+
+        return None
+
+    def _embed_sound_files_via_com(self, doc_path: Path, display_name: str) -> None:
+        """Embed MP3 sound files into the Pronunciation column using Word COM.
+
+        Opens the saved document with Word COM and inserts OLE objects (MP3 files)
+        as icons in the Pronunciation column (column 3) of the feedback table.
+
+        Args:
+            doc_path: Path to the saved .docx file
+            display_name: Project display name for sound file lookup
+        """
+        import time as _time
+
+        if not self._feedback_names:
+            return
+
+        # Check how many sound files exist before opening COM
+        sound_files = []
+        for name in self._feedback_names:
+            mp3_path = self._find_sound_file(name, display_name)
+            sound_files.append(mp3_path)
+
+        found_count = sum(1 for f in sound_files if f is not None)
+        if found_count == 0:
+            logger.info("[OpenXML] No sound files found for any test names, skipping COM embedding")
+            return
+
+        logger.info("[OpenXML] Found %d/%d sound files, embedding via COM...", found_count, len(self._feedback_names))
+
+        com_initialized = False
+        word_app = None
+
+        try:
+            pythoncom.CoInitialize()
+            com_initialized = True
+        except Exception:
+            pass
+
+        try:
+            from app.utils.com_manager import com_manager
+            with com_manager.acquire("Word.Application for sound embedding"):
+                word_app = win32com.client.Dispatch("Word.Application")
+                word_app.Visible = False
+                word_app.DisplayAlerts = 0
+
+                doc_path_str = str(doc_path.absolute())
+                doc = None
+
+                for _attempt in range(3):
+                    try:
+                        doc = word_app.Documents.Open(doc_path_str)
+                        break
+                    except Exception as open_err:
+                        if _attempt < 2:
+                            logger.warning("[OpenXML] COM Documents.Open attempt %d failed: %s", _attempt + 1, str(open_err))
+                            _time.sleep(2)
+                        else:
+                            raise
+
+                if not doc:
+                    raise RuntimeError("Failed to open document via COM")
+
+                try:
+                    # Get the first table in the document (feedback table)
+                    if doc.Tables.Count < 1:
+                        logger.warning("[OpenXML] No tables found in document for sound embedding")
+                        return
+
+                    table = doc.Tables(1)
+                    # Table has header row (row 1), data starts at row 2
+                    # Pronunciation is column 3
+
+                    for idx, (name, mp3_path) in enumerate(zip(self._feedback_names, sound_files)):
+                        if mp3_path is None:
+                            continue
+
+                        row_num = idx + 2  # +2 because row 1 is header, COM is 1-based
+                        try:
+                            if row_num > table.Rows.Count:
+                                logger.warning("[OpenXML] Row %d exceeds table rows (%d), stopping", row_num, table.Rows.Count)
+                                break
+
+                            # Get the Pronunciation cell (column 3)
+                            cell = table.Cell(row_num, 3)
+                            cell_range = cell.Range
+
+                            # Collapse range to start to avoid replacing existing content
+                            cell_range.Collapse(1)  # wdCollapseStart
+
+                            # Embed MP3 as OLE object with WMP icon
+                            wmp_exe = r"C:\Program Files\Windows Media Player\wmplayer.exe"
+                            ole_kwargs = {
+                                "FileName": str(mp3_path.absolute()),
+                                "LinkToFile": False,
+                                "DisplayAsIcon": True,
+                                "IconLabel": f"{name.upper()}.MP3",
+                            }
+                            # Use WMP icon if available for a recognizable play button
+                            if Path(wmp_exe).exists():
+                                ole_kwargs["IconFileName"] = wmp_exe
+                                ole_kwargs["IconIndex"] = 0
+
+                            cell_range.InlineShapes.AddOLEObject(**ole_kwargs)
+
+                            # Center the OLE icon in the cell
+                            for para in cell.Range.Paragraphs:
+                                para.Alignment = 1  # wdAlignParagraphCenter
+
+                            logger.debug("[OpenXML] Embedded sound: %s -> row %d", mp3_path.name, row_num)
+
+                        except Exception as cell_err:
+                            logger.warning("[OpenXML] Error embedding sound for '%s' in row %d: %s", name, row_num, str(cell_err))
+
+                    # Save the document
+                    doc.Save()
+                    logger.info("[OpenXML] Sound files embedded and document saved via COM")
+
+                finally:
+                    if doc:
+                        try:
+                            doc.Close(SaveChanges=False)
+                        except Exception:
+                            pass
+
+        except Exception as e:
+            logger.error("[OpenXML] Error embedding sound files via COM: %s", str(e), exc_info=True)
+            raise
+
+        finally:
+            if word_app:
+                try:
+                    word_app.Quit()
+                except Exception:
+                    pass
+            if com_initialized:
+                try:
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass
 
     def _remove_table_borders(self, table) -> None:
         """Remove all borders from a table to make it invisible.

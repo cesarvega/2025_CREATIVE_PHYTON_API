@@ -176,6 +176,7 @@ class DownloadResultsRequest(BaseModel):
 class CreateFeedbackTemplateRequest(BaseModel):
     """Request for creating a Feedback Template document."""
     presentation_id: int = Field(..., description="Presentation ID to generate feedback template for")
+    with_sound_files: bool = Field(False, description="Include MP3 sound files in the ZIP bundle when available")
 
 
 class CreateFeedbackTemplateResponse(BaseModel):

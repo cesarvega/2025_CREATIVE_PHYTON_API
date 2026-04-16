@@ -436,6 +436,7 @@ def _create_feedback_template_with_backup_background(
     task_id: str,
     presentation_id: int,
     display_name: str,
+    with_sound_files: bool = False,
 ):
     """Background task for generating feedback template and zipping with backup if available."""
     # Determine which generator to use based on feature flag
@@ -480,6 +481,7 @@ def _create_feedback_template_with_backup_background(
                 presentation_id=presentation_id,
                 display_name=display_name,
                 progress_callback=progress_callback,
+                with_sound_files=with_sound_files,
             )
         else:
             # COM mode: Use COM concurrency control (legacy)
@@ -585,6 +587,7 @@ def _create_feedback_template_with_backup_background(
                 "backup_file_path": str(backup_path) if backup_path and backup_path.exists() else None,
                 "backup_file_name": backup_path.name if backup_path and backup_path.exists() else None,
                 "backup_included": bundle_created,
+                "with_sound_files": with_sound_files,
                 "warning": bundle_warning,
                 "generation_mode": "OpenXML" if use_openxml else "COM",
             },

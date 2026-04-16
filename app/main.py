@@ -68,6 +68,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=settings.cors_methods_list,
     allow_headers=settings.cors_headers_list,
+    expose_headers=["Content-Disposition"],
 )
 
 # Include API routes
