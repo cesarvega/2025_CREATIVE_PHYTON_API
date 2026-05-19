@@ -32,11 +32,34 @@ class BIGuidelinesService:
                 return v
         return None
 
+    @staticmethod
+    def _derive_project_type(presentation_type: Optional[str]) -> str:
+        """Derive project_type from PresentationType column value.
+
+        Mapping:
+            'Design'                     -> 'DW'
+            'BSR', 'BSR-Japan'           -> 'BSR'
+            'NSR', 'NSR-Japan'           -> 'NSR'
+            Everything else (Normal, Katakana, Phonetics, …) -> 'NW'
+        """
+        if not presentation_type:
+            return "NW"
+        pt = presentation_type.upper()
+        if pt == "DESIGN":
+            return "DW"
+        if pt.startswith("BSR"):
+            return "BSR"
+        if pt.startswith("NSR"):
+            return "NSR"
+        return "NW"
+
     def get_active_presentations(
         self,
         search: Optional[str] = None,
         page: int = 1,
         limit: int = 50,
+        status: str = "OPEN",
+        project_type: Optional[str] = None,
     ) -> Tuple[List[ActivePresentation], int]:
         """Retrieve paginated and filtered active presentations from BI_GUIDELINES.
 
@@ -44,6 +67,9 @@ class BIGuidelinesService:
             search: Optional search term to filter by project or display name.
             page: Page number (1-indexed).
             limit: Number of results per page.
+            status: Status filter. One of "OPEN", "CLOSED", or "ALL".
+            project_type: Optional project type filter ("NW", "DW"). When provided,
+                filters by the derived project type based on PresentationType column.
 
         Returns:
             Tuple containing (list of ActivePresentation objects, total count).
@@ -54,48 +80,71 @@ class BIGuidelinesService:
         """
         offset = (page - 1) * limit
 
-        # Build query with optional search filter
-        base_query = """
-            SELECT [PresentationId], [Project], [DisplayName], [UploadedBy],
-                   [UploadedDate], [PresentationStatus], [LastUpdateDate]
-            FROM [BI_GUIDELINES].[dbo].[nw_Master]
-            WHERE [PresentationStatus] = 'OPEN'
-        """
+        # Build WHERE conditions list with parameterized values
+        conditions: list[str] = []
+        params: list = []
 
+        # Status filter
+        normalized_status = (status or "OPEN").upper()
+        if normalized_status != "ALL":
+            conditions.append("[PresentationStatus] = ?")
+            params.append(normalized_status)
+
+        # Project type filter — maps to PresentationType column values
+        if project_type:
+            pt = project_type.upper()
+            if pt == "DW":
+                conditions.append("[PresentationType] = 'Design'")
+            elif pt == "NW":
+                # NW = everything except Design, BSR*, NSR*
+                conditions.append(
+                    "([PresentationType] IS NULL OR "
+                    "([PresentationType] NOT LIKE 'BSR%' "
+                    "AND [PresentationType] NOT LIKE 'NSR%' "
+                    "AND [PresentationType] <> 'Design'))"
+                )
+            # BSR/NSR should use the bsr-active-presentations endpoint, but handle gracefully
+            elif pt == "BSR":
+                conditions.append("[PresentationType] LIKE 'BSR%'")
+            elif pt == "NSR":
+                conditions.append("[PresentationType] LIKE 'NSR%'")
+
+        # Search filter
         if search:
             search_pattern = f"%{search}%"
-            query = base_query + """
-                AND ([Project] LIKE ? OR [DisplayName] LIKE ?)
-                ORDER BY [LastUpdateDate] DESC
-                OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
-            """
-            count_query = """
-                SELECT COUNT(*) as Total
-                FROM [BI_GUIDELINES].[dbo].[nw_Master]
-                WHERE [PresentationStatus] = 'OPEN'
-                AND ([Project] LIKE ? OR [DisplayName] LIKE ?)
-            """
-            query_params = (search_pattern, search_pattern, offset, limit)
-            count_params = (search_pattern, search_pattern)
-        else:
-            query = base_query + """
-                ORDER BY [LastUpdateDate] DESC
-                OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
-            """
-            count_query = """
-                SELECT COUNT(*) as Total
-                FROM [BI_GUIDELINES].[dbo].[nw_Master]
-                WHERE [PresentationStatus] = 'OPEN'
-            """
-            query_params = (offset, limit)
-            count_params = ()
+            conditions.append("([Project] LIKE ? OR [DisplayName] LIKE ?)")
+            params.append(search_pattern)
+            params.append(search_pattern)
+
+        where_clause = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+
+        base_query = f"""
+            SELECT [PresentationId], [Project], [DisplayName], [UploadedBy],
+                   [UploadedDate], [PresentationStatus], [LastUpdateDate],
+                   [PresentationType]
+            FROM [BI_GUIDELINES].[dbo].[nw_Master]
+            {where_clause}
+            ORDER BY [LastUpdateDate] DESC
+            OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
+        """
+
+        count_query = f"""
+            SELECT COUNT(*) as Total
+            FROM [BI_GUIDELINES].[dbo].[nw_Master]
+            {where_clause}
+        """
+
+        query_params = tuple(params) + (offset, limit)
+        count_params = tuple(params)
 
         logger.debug(
-            "BI_GUIDELINES - Fetching active presentations: search=%s, page=%d, limit=%d, offset=%d",
+            "BI_GUIDELINES - Fetching active presentations: search=%s, page=%d, limit=%d, offset=%d, status=%s, project_type=%s",
             search or "(none)",
             page,
             limit,
             offset,
+            normalized_status,
+            project_type or "(all)",
         )
 
         with get_connection_scope(timeout=30) as cursor:
@@ -105,13 +154,21 @@ class BIGuidelinesService:
             total = total_row.Total if total_row else 0
 
             # Get paginated results
-            cursor.execute(query, query_params)
+            cursor.execute(base_query, query_params)
             rows = cursor.fetchall()
 
             presentations = []
             for row in rows:
-                # FIXED: Build correct link - NW presentations use nw.bipresents.com
-                link = f"https://nw.bipresents.com/{row.DisplayName}"
+                pres_type = row.PresentationType
+                derived_project_type = self._derive_project_type(pres_type)
+
+                # Build correct link based on derived project type
+                if derived_project_type in ("BSR", "NSR"):
+                    project_prefix = row.Project[:2].lower() if row.Project and len(row.Project) >= 2 else ""
+                    link_id = f"{project_prefix}{row.PresentationId}" if project_prefix else str(row.PresentationId)
+                    link = f"https://bipresents.com/{link_id}"
+                else:
+                    link = f"https://nw.bipresents.com/{row.DisplayName}"
 
                 presentations.append(
                     ActivePresentation(
@@ -123,6 +180,8 @@ class BIGuidelinesService:
                         link=link,
                         presentation_status=row.PresentationStatus,
                         last_update_date=row.LastUpdateDate,
+                        project_type=derived_project_type,
+                        presentation_type=pres_type,
                     )
                 )
 
@@ -141,6 +200,8 @@ class BIGuidelinesService:
         search: Optional[str] = None,
         page: int = 1,
         limit: int = 50,
+        status: str = "OPEN",
+        project_type: Optional[str] = None,
     ) -> Tuple[List[ActivePresentation], int]:
         """Retrieve paginated and filtered active BSR presentations via stored procedure.
 
@@ -148,35 +209,69 @@ class BIGuidelinesService:
         the same schema as ActivePresentation. The stored procedure returns all BSR
         presentations ordered by PresentationId DESC with a pre-generated BSR link.
 
-        Since the SP takes no parameters, filtering by status='OPEN', search, and
-        pagination are applied in Python to match the behavior of get_active_presentations.
+        Since the SP takes no parameters, filtering by status, search, project_type,
+        and pagination are applied in Python to match the behavior of get_active_presentations.
+
+        Args:
+            search: Optional search term to filter by project or display name.
+            page: Page number (1-indexed).
+            limit: Number of results per page.
+            status: Status filter. One of "OPEN", "CLOSED", or "ALL".
+            project_type: Optional project type filter ("BSR", "NSR"). When provided,
+                filters results by derived project type.
         """
+        normalized_status = (status or "OPEN").upper()
+
         logger.debug(
-            "BI_GUIDELINES - Fetching BSR active presentations: search=%s, page=%d, limit=%d",
+            "BI_GUIDELINES - Fetching BSR active presentations: search=%s, page=%d, limit=%d, status=%s",
             search or "(none)",
             page,
             limit,
+            normalized_status,
         )
 
         with get_connection_scope(timeout=30) as cursor:
             # Execute stored procedure to get BSR presentations
             # SP returns: PresentationId, Project, DisplayName, UploadedBy, UploadedDate,
             #             Link (pre-generated BSR link), PresentationStatus, LastUpdateDate
+            # NOTE: SP does NOT return PresentationType, so we fetch it separately.
             cursor.execute("{CALL [BI_GUIDELINES].[dbo].[BSR_ActivePresentations]}")
 
             # Fetch all rows and column names
             columns = [column[0] for column in cursor.description]
             rows = cursor.fetchall()
 
+            # Fetch PresentationType from bsr_Master to enrich SP results
+            cursor.execute(
+                "SELECT PresentationId, PresentationType FROM [BI_GUIDELINES].[dbo].[bsr_Master]"
+            )
+            ptype_map: dict = {
+                row.PresentationId: row.PresentationType for row in cursor.fetchall()
+            }
+
         # Convert to dictionaries for easier processing and case-insensitive access
         row_dicts: List[dict] = [dict(zip(columns, row)) for row in rows]
 
-        # Filter by PresentationStatus = 'OPEN' (similar to get_active_presentations)
-        def is_open(d: dict) -> bool:
-            status = self._get_ci(d, "PresentationStatus", "Status", "status")
-            return str(status).upper() == "OPEN" if status is not None else False
+        # Enrich with PresentationType from bsr_Master
+        for d in row_dicts:
+            pid = self._get_ci(d, "PresentationId", "PresentationID", "presentationid")
+            if pid is not None and "PresentationType" not in d:
+                d["PresentationType"] = ptype_map.get(int(pid))
 
-        filtered = [d for d in row_dicts if is_open(d)]
+        # Filter by PresentationStatus matching the requested status. When status
+        # is "ALL", no status filter is applied.
+        if normalized_status == "ALL":
+            filtered = list(row_dicts)
+        else:
+            def matches_status(d: dict) -> bool:
+                row_status = self._get_ci(d, "PresentationStatus", "Status", "status")
+                return (
+                    str(row_status).upper() == normalized_status
+                    if row_status is not None
+                    else False
+                )
+
+            filtered = [d for d in row_dicts if matches_status(d)]
 
         # Optional search on project or display name (case-insensitive, contains)
         if search:
@@ -188,6 +283,14 @@ class BIGuidelinesService:
                 display = str(display_val).lower() if display_val is not None else ""
                 return term in project or term in display
             filtered = [d for d in filtered if matches(d)]
+
+        # Optional project_type filter (BSR or NSR)
+        if project_type:
+            target_pt = project_type.upper()
+            def matches_project_type(d: dict) -> bool:
+                ptype = self._get_ci(d, "PresentationType", "presentationtype", "Type")
+                return self._derive_project_type(ptype if ptype else None) == target_pt
+            filtered = [d for d in filtered if matches_project_type(d)]
 
         total = len(filtered)
 
@@ -244,6 +347,8 @@ class BIGuidelinesService:
                 # Always use project_prefix + presentation_id format
                 link = f"https://bipresents.com/{link_id}"
 
+            derived_project_type = self._derive_project_type(presentation_type)
+
             presentations.append(
                 ActivePresentation(
                     presentation_id=int(presentation_id) if presentation_id is not None else 0,
@@ -254,6 +359,8 @@ class BIGuidelinesService:
                     link=link,
                     presentation_status=str(presentation_status),
                     last_update_date=last_update_date,
+                    project_type=derived_project_type,
+                    presentation_type=str(presentation_type) if presentation_type else None,
                 )
             )
 

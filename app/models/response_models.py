@@ -41,6 +41,8 @@ class ActivePresentation(BaseModel):
     link: str
     presentation_status: str
     last_update_date: Optional[datetime] = None
+    project_type: Optional[str] = None
+    presentation_type: Optional[str] = None
 
 
 class ActivePresentationsResponse(BaseModel):

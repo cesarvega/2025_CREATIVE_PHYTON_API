@@ -6,7 +6,7 @@ from the BI_GUIDELINES database.
 
 import pyodbc
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Form, Depends
 
 from app.config.db import (
@@ -92,22 +92,38 @@ async def get_nw_active_presentations(
         le=500,
         description="Number of results per page (max 500)",
     ),
+    status: Literal["OPEN", "CLOSED", "ALL"] = Query(
+        "OPEN",
+        description="Filter by presentation status. Use 'ALL' to return both OPEN and CLOSED.",
+    ),
+    project_type: Optional[Literal["NW", "DW"]] = Query(
+        None,
+        description="Optional project type filter. 'NW' for standard naming, 'DW' for Design presentations. "
+        "When omitted, returns both NW and DW (original mixed behavior).",
+    ),
 ) -> ActivePresentationsResponse:
     """Get paginated active NW presentations from BI_GUIDELINES database.
 
-    This endpoint queries the nw_Master table for presentations with status 'OPEN'
-    and returns them sorted by last update date in descending order.
+    This endpoint queries the nw_Master table and returns results sorted by last
+    update date in descending order. By default only presentations with status
+    'OPEN' are returned, matching the original behavior of this endpoint.
 
     Example usage:
-    - Get first 50 presentations: `GET /api/bi_guidelines/nw-active-presentations`
+    - Get first 50 OPEN presentations: `GET /api/bi_guidelines/nw-active-presentations`
+    - Get CLOSED presentations: `GET /api/bi_guidelines/nw-active-presentations?status=CLOSED`
+    - Get both: `GET /api/bi_guidelines/nw-active-presentations?status=ALL`
     - Search for "SOLE": `GET /api/bi_guidelines/nw-active-presentations?search=SOLE`
     - Get page 2 with 100 results: `GET /api/bi_guidelines/nw-active-presentations?page=2&limit=100`
+    - Filter by NW only: `GET /api/bi_guidelines/nw-active-presentations?project_type=NW`
+    - Filter by DW only: `GET /api/bi_guidelines/nw-active-presentations?project_type=DW`
     """
     try:
         presentations, total = bi_guidelines_service.get_active_presentations(
             search=search,
             page=page,
             limit=limit,
+            status=status,
+            project_type=project_type,
         )
         return ActivePresentationsResponse(
             presentations=presentations,
@@ -151,17 +167,28 @@ async def get_bsr_active_presentations(
         le=500,
         description="Number of results per page (max 500)",
     ),
+    status: Literal["OPEN", "CLOSED", "ALL"] = Query(
+        "OPEN",
+        description="Filter by presentation status. Use 'ALL' to return both OPEN and CLOSED.",
+    ),
+    project_type: Optional[Literal["BSR", "NSR"]] = Query(
+        None,
+        description="Optional project type filter. 'BSR' for BSR presentations, 'NSR' for NSR presentations. "
+        "When omitted, returns both BSR and NSR (original mixed behavior).",
+    ),
 ) -> ActivePresentationsResponse:
     """Get paginated active BSR presentations from BI_GUIDELINES database.
 
     Uses the [dbo].[BSR_ActivePresentations] stored procedure as data source
-    and applies search + pagination in the API layer.
+    and applies status filter, search, project_type filter, and pagination in the API layer.
     """
     try:
         presentations, total = bi_guidelines_service.get_bsr_active_presentations(
             search=search,
             page=page,
             limit=limit,
+            status=status,
+            project_type=project_type,
         )
         return ActivePresentationsResponse(
             presentations=presentations,

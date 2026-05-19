@@ -277,7 +277,7 @@ class FeedbackTemplateGeneratorOpenXML:
 
             # PHASE 2: Populate tables with results (70-80%)
             logger.info("[OpenXML] Phase 2: Populating tables")
-            self._populate_feedback_tables(doc, presentation_id)
+            self._populate_feedback_tables(doc, presentation_id, presentation_type)
 
             if progress_callback:
                 progress_callback(80)
@@ -941,12 +941,13 @@ class FeedbackTemplateGeneratorOpenXML:
         except Exception as e:
             logger.warning("[OpenXML] Error formatting header: %s", str(e))
         
-    def _populate_feedback_tables(self, doc: Document, presentation_id: int) -> None:
+    def _populate_feedback_tables(self, doc: Document, presentation_id: int, presentation_type: str = "Normal") -> None:
         """Populate the feedback table using the nw_wdToIndicateFeedback SP.
 
         Args:
             doc: python-docx Document object
             presentation_id: Presentation ID
+            presentation_type: Presentation type (Normal, Katakana, etc.)
         """
         try:
             if not doc.tables:
@@ -985,37 +986,28 @@ class FeedbackTemplateGeneratorOpenXML:
                     return
 
                 # Populate the table with the data
-                self._populate_feedback_table_from_sp(main_table, columns, rows)
+                self._populate_feedback_table_from_sp(main_table, columns, rows, presentation_type)
 
         except Exception as e:
             logger.error("[OpenXML] Error populating feedback tables: %s", str(e), exc_info=True)
 
-    def _populate_feedback_table_from_sp(self, table, columns: List[str], rows: List) -> None:
+    def _populate_feedback_table_from_sp(self, table, columns: List[str], rows: List, presentation_type: str = "Normal") -> None:
         """Populate feedback table directly from SP results.
 
-        The nw_wdToIndicateFeedback SP returns data in this format:
-        Col 0: ' ' (row number)
-        Col 1: 'Test Name'
-        Col 2: 'Rationale'
-        Col 3: 'Positive' (empty for client)
-        Col 4: 'Neutral' (empty for client)
-        Col 5: 'Negative' (empty for client)
-        Col 6: 'Comments/Suggestions' (empty for client)
+        For Normal presentations, the SP returns 7 columns:
+        ' ', 'Test Name', 'Rationale', 'Positive', 'Neutral', 'Negative', 'Comments/Suggestions'
+        Template has 8 columns: #, Test Name, Pronunciation (empty), Rationale, Positive, Neutral, Negative, Comments
 
-        But the Word template table has this structure:
-        Col 1: # (row number)
-        Col 2: Test Name
-        Col 3: Pronunciation (left empty - SP doesn't return this field)
-        Col 4: Rationale
-        Col 5: Positive (empty checkbox)
-        Col 6: Neutral (empty checkbox)
-        Col 7: Negative (empty checkbox)
-        Col 8: Comments/Suggestions (empty)
+        For Katakana presentations, the SP returns 8 columns:
+        ' ', 'Test Name', 'Katakana Names', 'Rationale', 'Positive', 'Neutral', 'Negative', 'Comments/Suggestions'
+        Template has 7 columns: #, Test Name, Katakana Names, Positive, Neutral, Negative, Comments
+        (Rationale is removed per legacy behavior)
 
         Args:
             table: python-docx Table object
             columns: List of column names from SP
             rows: List of row tuples from SP
+            presentation_type: Presentation type (Normal, Katakana, etc.)
         """
         try:
             logger.info("[OpenXML] Starting to populate table with %d rows from SP", len(rows))
@@ -1038,33 +1030,41 @@ class FeedbackTemplateGeneratorOpenXML:
                 return [part.strip() for part in text.split(delimiter) if part and part.strip()]
 
             def expand_grouped_rows(row_dict: dict) -> List[dict]:
-                """Expand SP row into multiple rows when Test Name/Rationale contain '##'."""
+                """Expand SP row into multiple rows when Test Name/Rationale/Katakana Names contain '##'."""
                 test_name_parts = split_grouped_text(row_dict.get("Test Name"))
                 rationale_parts = split_grouped_text(row_dict.get("Rationale"))
+                katakana_parts = split_grouped_text(row_dict.get("Katakana Names"))
 
                 # No grouping: return as-is (but with basic unescape/strip)
-                if len(test_name_parts) <= 1 and len(rationale_parts) <= 1:
+                if len(test_name_parts) <= 1 and len(rationale_parts) <= 1 and len(katakana_parts) <= 1:
                     return [
                         {
                             "Test Name": (test_name_parts[0] if test_name_parts else "").strip(),
                             "Rationale": (rationale_parts[0] if rationale_parts else "").strip(),
+                            "Katakana Names": (katakana_parts[0] if katakana_parts else "").strip(),
                         }
                     ]
 
                 # Align list lengths
-                count = max(len(test_name_parts), len(rationale_parts), 1)
+                count = max(len(test_name_parts), len(rationale_parts), len(katakana_parts), 1)
                 if not test_name_parts:
                     test_name_parts = [""] * count
                 if not rationale_parts:
                     rationale_parts = [""] * count
+                if not katakana_parts:
+                    katakana_parts = [""] * count
                 if len(test_name_parts) == 1 and count > 1:
                     test_name_parts = test_name_parts * count
                 if len(rationale_parts) == 1 and count > 1:
                     rationale_parts = rationale_parts * count
+                if len(katakana_parts) == 1 and count > 1:
+                    katakana_parts = katakana_parts * count
                 while len(test_name_parts) < count:
                     test_name_parts.append(test_name_parts[-1] if test_name_parts else "")
                 while len(rationale_parts) < count:
                     rationale_parts.append(rationale_parts[-1] if rationale_parts else "")
+                while len(katakana_parts) < count:
+                    katakana_parts.append(katakana_parts[-1] if katakana_parts else "")
 
                 expanded = []
                 for i in range(count):
@@ -1072,6 +1072,7 @@ class FeedbackTemplateGeneratorOpenXML:
                         {
                             "Test Name": (test_name_parts[i] or "").strip(),
                             "Rationale": (rationale_parts[i] or "").strip(),
+                            "Katakana Names": (katakana_parts[i] or "").strip(),
                         }
                     )
                 return expanded
@@ -1144,51 +1145,81 @@ class FeedbackTemplateGeneratorOpenXML:
                     # Apply vertical center using XML
                     self._set_cell_vertical_center(cell)
 
-                    # Column 3: Pronunciation - CENTER ALIGNED (left empty)
-                    cell = new_row.cells[2]
-                    cell.text = ''
-                    para = cell.paragraphs[0]
-                    para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    for run in para.runs:
-                        run.font.size = Pt(10)
-                        run.font.bold = False
-                        run.font.name = "Open Sans"
-                    # Apply vertical center using XML
-                    self._set_cell_vertical_center(cell)
+                    # Determine column layout based on presentation type
+                    is_katakana = presentation_type and presentation_type.upper().startswith("KATAKANA")
+                    num_cells = len(new_row.cells)
 
-                    # Column 4: Rationale - CENTER ALIGNED
-                    # SP returns this data under 'Rationale' key
-                    cell = new_row.cells[3]
-                    cell.text = str(row_dict.get('Rationale') or '')
-                    para = cell.paragraphs[0]
-                    para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                    for run in para.runs:
-                        run.font.size = Pt(10)
-                        run.font.bold = False
-                        run.font.name = "Open Sans"
-                    # Apply vertical center using XML
-                    self._set_cell_vertical_center(cell)
-
-                    # Columns 5-8: Positive, Neutral, Negative, Comments/Suggestions - CENTER aligned
-                    for col_idx in range(4, min(8, len(new_row.cells))):
-                        cell = new_row.cells[col_idx]
-                        cell.text = ""
+                    if is_katakana:
+                        # Katakana template: 7 columns
+                        # Col 3: Katakana Names, NO Rationale, votes start at col 4
+                        cell = new_row.cells[2]
+                        cell.text = str(row_dict.get('Katakana Names') or '')
                         para = cell.paragraphs[0]
                         para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        # Ensure font formatting even for empty cells
-                        if para.runs:
-                            for run in para.runs:
-                                run.font.size = Pt(10)
-                                run.font.bold = False
-                                run.font.name = "Open Sans"
-                        else:
-                            # Add a run with proper formatting for empty cells
-                            run = para.add_run()
+                        for run in para.runs:
                             run.font.size = Pt(10)
                             run.font.bold = False
                             run.font.name = "Open Sans"
-                        # Apply vertical center using XML
                         self._set_cell_vertical_center(cell)
+
+                        # Columns 4-7: Positive, Neutral, Negative, Comments/Suggestions
+                        for col_idx in range(3, min(7, num_cells)):
+                            cell = new_row.cells[col_idx]
+                            cell.text = ""
+                            para = cell.paragraphs[0]
+                            para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                            if para.runs:
+                                for run in para.runs:
+                                    run.font.size = Pt(10)
+                                    run.font.bold = False
+                                    run.font.name = "Open Sans"
+                            else:
+                                run = para.add_run()
+                                run.font.size = Pt(10)
+                                run.font.bold = False
+                                run.font.name = "Open Sans"
+                            self._set_cell_vertical_center(cell)
+                    else:
+                        # Normal/Phonetics template: 8 columns
+                        # Col 3: Pronunciation (empty), Col 4: Rationale, votes start at col 5
+                        cell = new_row.cells[2]
+                        cell.text = ''
+                        para = cell.paragraphs[0]
+                        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        for run in para.runs:
+                            run.font.size = Pt(10)
+                            run.font.bold = False
+                            run.font.name = "Open Sans"
+                        self._set_cell_vertical_center(cell)
+
+                        # Column 4: Rationale
+                        cell = new_row.cells[3]
+                        cell.text = str(row_dict.get('Rationale') or '')
+                        para = cell.paragraphs[0]
+                        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        for run in para.runs:
+                            run.font.size = Pt(10)
+                            run.font.bold = False
+                            run.font.name = "Open Sans"
+                        self._set_cell_vertical_center(cell)
+
+                        # Columns 5-8: Positive, Neutral, Negative, Comments/Suggestions
+                        for col_idx in range(4, min(8, num_cells)):
+                            cell = new_row.cells[col_idx]
+                            cell.text = ""
+                            para = cell.paragraphs[0]
+                            para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                            if para.runs:
+                                for run in para.runs:
+                                    run.font.size = Pt(10)
+                                    run.font.bold = False
+                                    run.font.name = "Open Sans"
+                            else:
+                                run = para.add_run()
+                                run.font.size = Pt(10)
+                                run.font.bold = False
+                                run.font.name = "Open Sans"
+                            self._set_cell_vertical_center(cell)
 
                     # Set white background for ALL cells using XML
                     for cell in new_row.cells:

@@ -206,7 +206,7 @@ class FeedbackTemplateGenerator:
                 progress_callback(70)
             logger.info("Phase 2: Populating tables")
             is_phonetics = presentation_type.lower() == "phonetics"
-            self._populate_feedback_tables(doc, presentation_id, is_phonetics)
+            self._populate_feedback_tables(doc, presentation_id, is_phonetics, presentation_type)
 
             # PHASE 3: Get "By The Numbers" data for pie chart (80-85%)
             if progress_callback:
@@ -532,7 +532,7 @@ class FeedbackTemplateGenerator:
         except Exception as e:
             logger.warning("Error formatting header: %s", str(e))
 
-    def _populate_feedback_tables(self, doc, presentation_id: int, is_phonetics: bool) -> None:
+    def _populate_feedback_tables(self, doc, presentation_id: int, is_phonetics: bool, presentation_type: str = "Normal") -> None:
         """Populate the feedback table using the correct stored procedure.
 
         Uses nw_wdToIndicateFeedback SP which returns data already formatted for the Word table.
@@ -590,37 +590,37 @@ class FeedbackTemplateGenerator:
                     return
 
                 # Populate the table with the data
-                self._populate_feedback_table_from_sp(main_table, columns, rows)
+                self._populate_feedback_table_from_sp(main_table, columns, rows, presentation_type)
 
         except Exception as e:
             logger.error("Error populating feedback tables: %s", str(e), exc_info=True)
 
-    def _populate_feedback_table_from_sp(self, table, columns, rows) -> None:
+    def _populate_feedback_table_from_sp(self, table, columns, rows, presentation_type: str = "Normal") -> None:
         """Populate feedback table directly from SP results.
 
         The nw_wdToIndicateFeedback SP returns data in this format:
         Col 0: ' ' (row number)
         Col 1: 'Test Name'
-        Col 2: 'Rationale'
-        Col 3: 'Positive' (empty for client)
-        Col 4: 'Neutral' (empty for client)
-        Col 5: 'Negative' (empty for client)
-        Col 6: 'Comments/Suggestions' (empty for client)
+        Col 2: 'Rationale' (or 'Katakana Names' for Katakana presentations)
+        Col 3: 'Rationale' (only for Katakana - extra column)
+        Col 4+: 'Positive', 'Neutral', 'Negative', 'Comments/Suggestions'
 
-        But the Word template table has this structure:
-        Col 1: # (row number)
-        Col 2: Test Name
-        Col 3: Pronunciation (left empty - SP doesn't return this field)
-        Col 4: Rationale
-        Col 5: Positive (empty checkbox)
-        Col 6: Neutral (empty checkbox)
-        Col 7: Negative (empty checkbox)
-        Col 8: Comments/Suggestions (empty)
+        For Katakana/Katakana_BigJap presentations:
+        - SP returns: ' ', 'Test Name', 'Katakana Names', 'Rationale', 'Positive', ...
+        - Template has 7 cols: #, Test Name(英語表記), Katakana(カタカナ表記), Positive, Neutral, Negative, Comments
+        - The 'Rationale' column is removed (matching legacy behavior)
+        - 'Katakana Names' maps to column 3
+
+        For Phonetics/Normal presentations:
+        - SP returns: ' ', 'Test Name', 'Rationale', 'Positive', ...
+        - Template has 8 cols: #, Test Name, Pronunciation, Rationale, Positive, Neutral, Negative, Comments
+        - 'Rationale' maps to Pronunciation (col 3), Rationale col left empty
 
         Args:
             table: Word Table object
             columns: List of column names from SP
             rows: List of row tuples from SP
+            presentation_type: Presentation type (Normal, Phonetics, Katakana, etc.)
         """
         try:
             logger.info("Starting to populate table with %d rows from SP", len(rows))
@@ -644,33 +644,30 @@ class FeedbackTemplateGenerator:
                 return [part.strip() for part in text.split(delimiter) if part and part.strip()]
 
             def expand_grouped_rows(row_dict: dict) -> List[dict]:
-                """Expand SP row into multiple rows when Test Name/Rationale contain '##'."""
+                """Expand SP row into multiple rows when Test Name/Rationale/Katakana Names contain '##'."""
                 test_name_parts = split_grouped_text(row_dict.get("Test Name"))
                 rationale_parts = split_grouped_text(row_dict.get("Rationale"))
+                katakana_parts = split_grouped_text(row_dict.get("Katakana Names"))
 
                 # No grouping: return as-is (but with basic unescape/strip)
-                if len(test_name_parts) <= 1 and len(rationale_parts) <= 1:
+                if len(test_name_parts) <= 1 and len(rationale_parts) <= 1 and len(katakana_parts) <= 1:
                     return [
                         {
                             "Test Name": (test_name_parts[0] if test_name_parts else "").strip(),
                             "Rationale": (rationale_parts[0] if rationale_parts else "").strip(),
+                            "Katakana Names": (katakana_parts[0] if katakana_parts else "").strip(),
                         }
                     ]
 
                 # Align list lengths
-                count = max(len(test_name_parts), len(rationale_parts), 1)
-                if not test_name_parts:
-                    test_name_parts = [""] * count
-                if not rationale_parts:
-                    rationale_parts = [""] * count
-                if len(test_name_parts) == 1 and count > 1:
-                    test_name_parts = test_name_parts * count
-                if len(rationale_parts) == 1 and count > 1:
-                    rationale_parts = rationale_parts * count
-                while len(test_name_parts) < count:
-                    test_name_parts.append(test_name_parts[-1] if test_name_parts else "")
-                while len(rationale_parts) < count:
-                    rationale_parts.append(rationale_parts[-1] if rationale_parts else "")
+                count = max(len(test_name_parts), len(rationale_parts), len(katakana_parts), 1)
+                for parts in [test_name_parts, rationale_parts, katakana_parts]:
+                    if not parts:
+                        parts.extend([""] * count)
+                    elif len(parts) == 1 and count > 1:
+                        parts.extend([parts[0]] * (count - 1))
+                    while len(parts) < count:
+                        parts.append(parts[-1] if parts else "")
 
                 expanded = []
                 for i in range(count):
@@ -678,6 +675,7 @@ class FeedbackTemplateGenerator:
                         {
                             "Test Name": (test_name_parts[i] or "").strip(),
                             "Rationale": (rationale_parts[i] or "").strip(),
+                            "Katakana Names": (katakana_parts[i] or "").strip(),
                         }
                     )
                 return expanded
@@ -690,15 +688,20 @@ class FeedbackTemplateGenerator:
 
             logger.info("Cleared %d rows from table, now has %d rows", rows_deleted, table.Rows.Count)
 
-            # Detect table layout: count header cells to determine if Pronunciation column exists
+            # Detect table layout: count header cells to determine column mapping
             # 8 columns = #, Test Name, Pronunciation, Rationale, Positive, Neutral, Negative, Comments
-            # 7 columns = #, Test Name, Rationale, Positive, Neutral, Negative, Comments
+            # 7 columns (Katakana) = #, Test Name(英語表記), Katakana(カタカナ表記), Positive, Neutral, Negative, Comments
+            # 7 columns (other) = #, Test Name, Rationale, Positive, Neutral, Negative, Comments
             try:
                 header_col_count = table.Rows(1).Cells.Count
             except Exception:
                 header_col_count = 8  # Default to 8-column layout
-            table_has_pronunciation = header_col_count >= 8
-            logger.info("Table header has %d columns, has_pronunciation=%s", header_col_count, table_has_pronunciation)
+            is_katakana = presentation_type.lower() in ["katakana", "katakana_bigjap"]
+            table_has_pronunciation = header_col_count >= 8 and not is_katakana
+            logger.info(
+                "Table header has %d columns, is_katakana=%s, has_pronunciation=%s",
+                header_col_count, is_katakana, table_has_pronunciation
+            )
 
             # Expand grouped rows (##) into 1 row per entry
             expanded_rows: List[dict] = []
@@ -718,15 +721,24 @@ class FeedbackTemplateGenerator:
                     # Ensure white background for body rows
                     self._force_row_white_background(new_row)
 
-                    # Map columns dynamically based on table layout
-                    # 8 cols: #(1), Test Name(2), Pronunciation(3), Rationale(4), Positive(5), Neutral(6), Negative(7), Comments(8)
-                    # 7 cols: #(1), Test Name(2), Rationale(3), Positive(4), Neutral(5), Negative(6), Comments(7)
+                    # Map columns dynamically based on table layout and presentation type
+                    # 8 cols (Phonetics): #(1), Test Name(2), Pronunciation(3), Rationale(4), Positive(5), Neutral(6), Negative(7), Comments(8)
+                    # 7 cols (Katakana):  #(1), Test Name(2), Katakana Names(3), Positive(4), Neutral(5), Negative(6), Comments(7)
+                    # 7 cols (other):     #(1), Test Name(2), Rationale(3), Positive(4), Neutral(5), Negative(6), Comments(7)
                     total_cols = new_row.Cells.Count
-                    if table_has_pronunciation:
+                    if is_katakana:
+                        # Katakana: col 3 = Katakana Names, no Rationale column, votes start at 4
+                        katakana_col = 3
+                        pronunciation_col = None
+                        rationale_col = None  # Rationale is removed for Katakana (legacy behavior)
+                        vote_start_col = 4
+                    elif table_has_pronunciation:
+                        katakana_col = None
                         pronunciation_col = 3
                         rationale_col = 4
                         vote_start_col = 5
                     else:
+                        katakana_col = None
                         pronunciation_col = None
                         rationale_col = 3
                         vote_start_col = 4
@@ -753,8 +765,17 @@ class FeedbackTemplateGenerator:
                         cell_range.Font.Name = "Calibri"
                         cell_range.ParagraphFormat.Alignment = 0  # wdAlignParagraphLeft
 
-                    # Pronunciation (only if table has 8 columns)
-                    # SP returns this data under 'Rationale' key
+                    # Column 3: Katakana Names (only for Katakana presentations)
+                    if katakana_col and total_cols >= katakana_col:
+                        cell_range = new_row.Cells(katakana_col).Range
+                        cell_range.Text = str(row_dict.get('Katakana Names') or '')
+                        cell_range.Font.Size = 10
+                        cell_range.Font.Bold = False
+                        cell_range.Font.Name = "Calibri"
+                        cell_range.ParagraphFormat.Alignment = 0  # wdAlignParagraphLeft
+
+                    # Pronunciation (only if table has 8 columns, non-Katakana)
+                    # SP returns this data under 'Rationale' key for Phonetics
                     if pronunciation_col and total_cols >= pronunciation_col:
                         cell_range = new_row.Cells(pronunciation_col).Range
                         cell_range.Text = str(row_dict.get('Rationale') or '')
@@ -763,8 +784,8 @@ class FeedbackTemplateGenerator:
                         cell_range.Font.Name = "Calibri"
                         cell_range.ParagraphFormat.Alignment = 0  # wdAlignParagraphLeft
 
-                    # Rationale - LEFT aligned (left empty)
-                    if total_cols >= rationale_col:
+                    # Rationale - LEFT aligned (left empty for feedback form)
+                    if rationale_col and total_cols >= rationale_col:
                         cell_range = new_row.Cells(rationale_col).Range
                         cell_range.Text = ''
                         cell_range.Font.Size = 10
