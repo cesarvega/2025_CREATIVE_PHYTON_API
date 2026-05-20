@@ -60,6 +60,7 @@ class BIGuidelinesService:
         limit: int = 50,
         status: str = "OPEN",
         project_type: Optional[str] = None,
+        presentation_type: Optional[str] = None,
     ) -> Tuple[List[ActivePresentation], int]:
         """Retrieve paginated and filtered active presentations from BI_GUIDELINES.
 
@@ -70,6 +71,8 @@ class BIGuidelinesService:
             status: Status filter. One of "OPEN", "CLOSED", or "ALL".
             project_type: Optional project type filter ("NW", "DW"). When provided,
                 filters by the derived project type based on PresentationType column.
+            presentation_type: Optional exact PresentationType filter (e.g. "Normal",
+                "Katakana"). When provided, filters by exact match on PresentationType.
 
         Returns:
             Tuple containing (list of ActivePresentation objects, total count).
@@ -108,6 +111,11 @@ class BIGuidelinesService:
                 conditions.append("[PresentationType] LIKE 'BSR%'")
             elif pt == "NSR":
                 conditions.append("[PresentationType] LIKE 'NSR%'")
+
+        # Presentation type filter — exact match on PresentationType column
+        if presentation_type:
+            conditions.append("[PresentationType] = ?")
+            params.append(presentation_type)
 
         # Search filter
         if search:

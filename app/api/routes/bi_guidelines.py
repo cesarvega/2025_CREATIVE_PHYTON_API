@@ -101,6 +101,11 @@ async def get_nw_active_presentations(
         description="Optional project type filter. 'NW' for standard naming, 'DW' for Design presentations. "
         "When omitted, returns both NW and DW (original mixed behavior).",
     ),
+    presentation_type: Optional[str] = Query(
+        None,
+        description="Optional presentation type filter (e.g. 'Normal', 'Katakana', 'Phonetics', 'Nonproprietary', 'Tagline'). "
+        "Filters by exact PresentationType value in nw_Master. When omitted, returns all types.",
+    ),
 ) -> ActivePresentationsResponse:
     """Get paginated active NW presentations from BI_GUIDELINES database.
 
@@ -124,6 +129,7 @@ async def get_nw_active_presentations(
             limit=limit,
             status=status,
             project_type=project_type,
+            presentation_type=presentation_type,
         )
         return ActivePresentationsResponse(
             presentations=presentations,
