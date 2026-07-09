@@ -350,7 +350,10 @@ def process_excel_file(
             else:
                 # Group multiple rows with same sub_group
                 grouped_names = [final_name]
-                grouped_rationales = [raw_rationale] if raw_rationale else []
+                # Keep rationales index-aligned with names: an empty first rationale
+                # must still occupy its slot so downstream name→rationale pairing
+                # (backup group slides, frontend) stays correct.
+                grouped_rationales = [raw_rationale]
                 processed_indices.add(i)
 
                 # Look for other rows with same sub_group

@@ -1077,8 +1077,12 @@ class PresentationService:
             # Load saved PowerPoint template file
             pptx_path = output_base / main_ppt_filename if main_ppt_filename else None
             if not pptx_path or not pptx_path.exists():
-                # Try alternate naming
-                pptx_files = list(output_base.glob("*.pptx"))
+                # Try alternate naming. Exclude generated backups: using a
+                # backup_*.pptx as base would duplicate the generated slides.
+                pptx_files = [
+                    f for f in output_base.glob("*.pptx")
+                    if not f.name.lower().startswith("backup_")
+                ]
                 if pptx_files:
                     pptx_path = pptx_files[0]
                 else:
@@ -1635,13 +1639,35 @@ class PresentationService:
             insert_position = max(0, request.page_number - 1)
             logger.info("Converting page_number %d to zero-based insert position %d", request.page_number, insert_position)
 
-            # Generate the presentation using OpenXML service
-            pptx_bytes = openxml_pptx_service.generate_backup_presentation(
-                pptx_bytes=request.pptx_file,
-                excel_data=excel_data,
-                insert_position=insert_position,
-                is_big_japanese=is_big_japanese,
-            )
+            if settings.use_frontend_style_backup:
+                # Front-end-styled renderer (mirrors the web viewer design).
+                # Resolve background rotation images (user's selection) — same
+                # semantics as _insert_detail_records: rotate the selected
+                # templates across name-evaluation slides.
+                background_images = self._resolve_background_images(
+                    request.background_type, request.background_name
+                )
+
+                pptx_bytes = openxml_pptx_service.generate_backup_presentation(
+                    pptx_bytes=request.pptx_file,
+                    excel_data=excel_data,
+                    insert_position=insert_position,
+                    is_big_japanese=is_big_japanese,
+                    background_images=background_images,
+                )
+            else:
+                # Classic pre-redesign renderer (feature flag off)
+                from app.services.openxml_pptx_service_legacy import (
+                    openxml_pptx_service_legacy,
+                )
+
+                logger.info("Using LEGACY backup slide design (use_frontend_style_backup=False)")
+                pptx_bytes = openxml_pptx_service_legacy.generate_backup_presentation(
+                    pptx_bytes=request.pptx_file,
+                    excel_data=excel_data,
+                    insert_position=insert_position,
+                    is_big_japanese=is_big_japanese,
+                )
 
             # Save backup directly in the project folder (no Presentations subfolder)
             output_base, _ = resolve_project_output(
@@ -1685,6 +1711,54 @@ class PresentationService:
         except Exception as e:
             logger.error("Error generating OpenXML PowerPoint: %s", str(e))
             raise
+
+    def _resolve_background_images(
+        self, background_type: Optional[str], background_name: Optional[str]
+    ) -> List[str]:
+        """Resolve the user's background selection to absolute image paths (in order).
+
+        Mirrors the rotation setup in _insert_detail_records: names come from
+        NameCandidateBGName ("Hexagon1|Hexagon2|SidePlus"), paths from nw_Templates
+        (web-relative, e.g. "images/BackGrounds/Backgrounds2019/Hexagon1.jpg") and
+        resolve physically under the front-end assets folder.
+        """
+        try:
+            bg_type = (background_type or "").strip().lower()
+            bg_name = (background_name or "").strip()
+            if bg_type != "rotate" or not bg_name or bg_name.lower() == "default":
+                return []
+
+            from app.services.template_selector import background_image_selector
+
+            names = background_image_selector.parse_background_names(bg_name)
+            path_map = background_image_selector.get_background_image_paths(bg_name)
+
+            # Web-relative paths live under the front-end assets folder
+            # (base_dir_nw = .../nw2/nw_slides -> assets root = .../nw2/assets)
+            assets_root = settings.base_dir_nw.parent / "assets"
+
+            resolved: List[str] = []
+            for name in names:
+                info = path_map.get(name)
+                rel_path = (
+                    info.get("template_file_name") if isinstance(info, dict) else info
+                ) or ""
+                if not rel_path:
+                    logger.warning("No template path found for background '%s'", name)
+                    continue
+                candidate = assets_root / rel_path
+                if candidate.exists():
+                    resolved.append(str(candidate))
+                else:
+                    logger.warning("Background image not found on disk: %s", candidate)
+
+            logger.info(
+                "Resolved %d/%d background image(s) for rotation", len(resolved), len(names)
+            )
+            return resolved
+        except Exception as e:
+            logger.warning("Failed to resolve background images: %s", str(e))
+            return []
 
     def _generate_slides_from_excel(
         self,

@@ -201,6 +201,10 @@ class Settings(BaseSettings):
 
     # Backup generation settings
     use_openxml_backup: bool = True  # Feature flag: True = OpenXML (faster), False = COM (legacy)
+    # Feature flag: True = backup slides mirror the web viewer design (Gotham fonts,
+    # name+rationale group lists, vote toggles, background rotation, white canvas);
+    # False = classic pre-redesign slide layout (openxml_pptx_service_legacy).
+    use_frontend_style_backup: bool = False
 
     # Feedback template generation settings
     use_openxml_feedback: bool = True  # Feature flag: True = OpenXML (5-10x faster), False = COM (legacy)

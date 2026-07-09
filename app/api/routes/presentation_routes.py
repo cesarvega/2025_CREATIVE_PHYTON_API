@@ -629,7 +629,13 @@ async def replace_project_images(
             with open(ppt_path, "wb") as f:
                 f.write(ppt_bytes)
         else:
-            candidates = sorted(output_base.glob("*.pptx"), key=lambda f: f.stat().st_mtime, reverse=True)
+            # Exclude generated backups: using a backup_*.pptx as the base would
+            # re-insert the generated slides on top of the previous ones (duplication)
+            candidates = sorted(
+                (f for f in output_base.glob("*.pptx") if not f.name.lower().startswith("backup_")),
+                key=lambda f: f.stat().st_mtime,
+                reverse=True,
+            )
             if candidates:
                 ppt_path = candidates[0]
             elif main_ppt_filename_db:
