@@ -49,16 +49,27 @@ class BSRWordReportGenerator:
         attrs_html = "<br/>".join(attrs) if attrs else ""
         keycon_html = self._build_keycon_html(concepts)
 
-        # Word automation
+        # Word automation.
+        #
+        # DispatchEx forces a NEW isolated Word instance. Word registers as a
+        # MULTI-USE COM server, so a plain Dispatch() attaches to any Word that
+        # is already running (a hung instance from a failed run, or the user's
+        # interactive Word). If that instance is blocked by a modal dialog,
+        # every automation call is rejected ('Call was rejected by callee'),
+        # which pywin32 surfaces as AttributeError: Open.Bookmarks /
+        # Open.SaveAs2. Excel never hits this because it registers single-use.
+        #
+        # COM concurrency is already serialized by the caller (the BSR
+        # background task holds com_manager for the whole orchestration).
+        word = None
         doc = None
         try:
-            from app.utils.com_manager import com_manager
-            with com_manager.acquire("Word.Application Dispatch"):
-                self.word = win32com.client.Dispatch("Word.Application")
-                self.word.Visible = False
-                self.word.DisplayAlerts = 0
+            word = win32com.client.DispatchEx("Word.Application")
+            self.word = word
+            word.Visible = False
+            word.DisplayAlerts = 0
 
-            doc = self.word.Documents.Open(str(template))
+            doc = word.Documents.Open(str(template), AddToRecentFiles=False)
 
             # Replace bookmarks
             self._replace_bookmark_with_text(doc, "HEADER", header_text)
@@ -78,20 +89,23 @@ class BSRWordReportGenerator:
             safe = sanitize_filename(project_name or f"BSR_{presentation_id}")
             out_path = downloads / f"{safe}.doc"
             doc.SaveAs2(str(out_path), FileFormat=WD_FORMAT_DOCUMENT)
-            doc.Close()
             logger.info("Word report saved to: %s", out_path)
             return out_path
         finally:
             try:
                 if doc is not None:
-                    doc.Close()
+                    doc.Close(SaveChanges=0)
             except Exception:
                 pass
             try:
-                if self.word is not None:
-                    self.word.Quit()
+                if word is not None:
+                    word.Quit()
             except Exception:
-                pass
+                # If Quit is rejected the process may linger; log it so a stuck
+                # WINWORD.EXE can be identified and killed instead of silently
+                # breaking every future run that attaches to it.
+                logger.error("Word.Quit() failed; a WINWORD.EXE process may remain running")
+            self.word = None
 
     def _build_notes_html(self, notes: List) -> str:
         parts: List[str] = []
@@ -141,21 +155,49 @@ class BSRWordReportGenerator:
                 pass
 
     def _build_cf_html(self, html: str) -> bytes:
-        # Build CF_HTML per spec
-        html_bytes = html.encode("utf-8")
-        prefix = (
-            "Version:0.9\r\n" \
-            "StartHTML:00000097\r\n" \
-            "EndHTML:{end_html:08d}\r\n" \
-            "StartFragment:00000131\r\n" \
-            "EndFragment:{end_frag:08d}\r\n"
-        )
+        """Build a CF_HTML clipboard payload with correctly computed byte offsets.
+
+        The header exposes four offsets (StartHTML, EndHTML, StartFragment,
+        EndFragment) that MUST point to real byte positions within the final
+        buffer. Because every offset is zero-padded to a fixed 8 digits, the
+        header length is constant once its template is known, so we can compute
+        the offsets deterministically instead of hardcoding them (the previous
+        hardcoded 97/131 values were wrong and corrupted the paste, causing the
+        pasted HTML to overrun and replace the whole document body).
+        """
         wrapper_start = b"<html><body><!--StartFragment-->"
         wrapper_end = b"<!--EndFragment--></body></html>"
+        html_bytes = html.encode("utf-8")
         full_html = wrapper_start + html_bytes + wrapper_end
-        end_html = 97 + len("EndHTML:00000000\r\nStartFragment:00000131\r\nEndFragment:00000000\r\n") + len(full_html)
-        end_frag = 131 + len(html_bytes)
-        header = prefix.format(end_html=end_html, end_frag=end_frag).encode("ascii")
+
+        header_template = (
+            "Version:0.9\r\n"
+            "StartHTML:{start_html:08d}\r\n"
+            "EndHTML:{end_html:08d}\r\n"
+            "StartFragment:{start_fragment:08d}\r\n"
+            "EndFragment:{end_fragment:08d}\r\n"
+        )
+
+        # The header has a fixed length once all offsets are 8-digit padded,
+        # so format it once with placeholder zeros to measure it in bytes.
+        header_len = len(
+            header_template.format(
+                start_html=0, end_html=0, start_fragment=0, end_fragment=0
+            ).encode("ascii")
+        )
+
+        start_html = header_len
+        start_fragment = header_len + len(wrapper_start)
+        end_fragment = start_fragment + len(html_bytes)
+        end_html = header_len + len(full_html)
+
+        header = header_template.format(
+            start_html=start_html,
+            end_html=end_html,
+            start_fragment=start_fragment,
+            end_fragment=end_fragment,
+        ).encode("ascii")
+
         return header + full_html
 
     def _copy_html_to_clipboard(self, html: str) -> None:

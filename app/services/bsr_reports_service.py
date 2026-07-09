@@ -31,7 +31,7 @@ class BSRReportsService:
         try:
             with get_connection_scope(timeout=30) as cursor:
                 cursor.execute(
-                    "SELECT TOP 1 project, displayname FROM [BI_GUIDELINES].[dbo].[bsr_Master] WHERE id = ?",
+                    "SELECT TOP 1 project, displayname FROM [BI_GUIDELINES].[dbo].[bsr_Master] WHERE PresentationId = ?",
                     (presentation_id,),
                 )
                 row = cursor.fetchone()
@@ -77,7 +77,9 @@ class BSRReportsService:
                     """
                     SELECT D.SlideDescription, PC.Comments
                     FROM BSR_PageComments PC
-                    INNER JOIN BSR_Details D ON PC.SlideNumber = D.SlideNumber
+                    INNER JOIN BSR_Details D
+                        ON PC.PresentationId = D.PresentationId
+                        AND PC.SlideNumber = D.SlideNumber
                     WHERE PC.PresentationId = ?
                     ORDER BY PC.SlideNumber
                     """,
