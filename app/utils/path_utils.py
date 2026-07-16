@@ -10,15 +10,16 @@ from app.config.settings import settings
 
 _INVALID_FS_CHARS = r'[<>:"/\\|?*]'
 _SANITIZE_PATTERN = re.compile(_INVALID_FS_CHARS)
-_REPLACE_PATTERN = re.compile(r"[\s\-.]+")
+_REPLACE_PATTERN = re.compile(r"[\s.]+")
 
 
 def sanitize_folder_name(folder_name: str) -> str:
     """Sanitize a folder name for filesystem usage.
 
-    Matches the legacy behavior from PPTX conversions: removes invalid characters,
-    replaces whitespace/special separators with single underscores, trims leading
-    and trailing punctuation, and uppercases within a safe length.
+    Removes invalid characters, replaces whitespace/dots with single underscores,
+    trims leading and trailing punctuation, and uppercases within a safe length.
+    Hyphens are preserved: the frontend requests slide images using the raw
+    display name, so folder names must keep them (e.g. "TRI-TAM").
     """
     sanitized = _SANITIZE_PATTERN.sub("", folder_name)
     sanitized = _REPLACE_PATTERN.sub("_", sanitized)

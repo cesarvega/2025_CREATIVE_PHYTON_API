@@ -614,6 +614,7 @@ class FeedbackTemplateGeneratorOpenXML:
         """Rebuild header with simple single-row layout: Logo | Project Info | Company/Date."""
         try:
             logo_path = settings.app_dir / "templates" / "bi_logo.png"
+            formatted_count = 0
 
             for section_idx, section in enumerate(doc.sections):
                 for header in self._get_section_headers(section):
@@ -643,8 +644,9 @@ class FeedbackTemplateGeneratorOpenXML:
                             text_parts.append(text)
 
                     if not text_parts:
-                        # Trigger fallback so header is never left empty
-                        raise RuntimeError(f"No header text found for section {section_idx + 1}")
+                        # Empty header part (e.g. unused first-page/even-page header) - skip it
+                        logger.info(f"[OpenXML] Header part in section {section_idx + 1} has no text, skipping")
+                        continue
 
                     logger.info(f"[OpenXML] DEBUG - All collected text_parts: {text_parts}")
 
@@ -692,8 +694,9 @@ class FeedbackTemplateGeneratorOpenXML:
 
                     # Check if we have valid content
                     if not left_text and not right_text:
-                        # Trigger fallback so header is never left empty
-                        raise RuntimeError(f"No valid header text after parsing for section {section_idx + 1}")
+                        # Nothing usable after parsing - skip this header part
+                        logger.info(f"[OpenXML] No valid header text after parsing in section {section_idx + 1}, skipping")
+                        continue
 
                     # Clear existing content
                     for para in list(header.paragraphs):
@@ -797,7 +800,13 @@ class FeedbackTemplateGeneratorOpenXML:
                     spacing_para = header.add_paragraph()
                     spacing_para.paragraph_format.space_after = Pt(12)  # 12pt space after header
 
-            logger.info("[OpenXML] Modern header formatting completed")
+                    formatted_count += 1
+
+            if formatted_count == 0:
+                # No header had usable text - trigger legacy fallback
+                raise RuntimeError("No header text found in any section")
+
+            logger.info("[OpenXML] Modern header formatting completed (%d header parts)", formatted_count)
 
         except Exception as e:
             logger.error("[OpenXML] Error building modern header: %s", str(e), exc_info=True)
@@ -1260,17 +1269,25 @@ class FeedbackTemplateGeneratorOpenXML:
         sound_dir = settings.sound_files_dir
         name_upper = test_name.strip().upper()
 
-        # Try project-specific folder first
-        if display_name:
-            project_folder = sound_dir / f"{display_name}_MR"
-            project_path = project_folder / f"{name_upper}.MP3"
-            if project_path.exists():
-                return project_path
+        # Names may carry trailing notations like "AIMDUEL (C)" or "NAME (P) (T)",
+        # but sound files are stored without them. Try the exact name first,
+        # then the name with trailing parenthetical notations stripped.
+        candidates = [name_upper]
+        cleaned = re.sub(r'(\s*\([^)]*\))+\s*$', '', name_upper).strip()
+        if cleaned and cleaned != name_upper:
+            candidates.append(cleaned)
 
-        # Try global folder
-        global_path = sound_dir / f"{name_upper}.MP3"
-        if global_path.exists():
-            return global_path
+        for candidate in candidates:
+            # Try project-specific folder first
+            if display_name:
+                project_path = sound_dir / f"{display_name}_MR" / f"{candidate}.MP3"
+                if project_path.exists():
+                    return project_path
+
+            # Try global folder
+            global_path = sound_dir / f"{candidate}.MP3"
+            if global_path.exists():
+                return global_path
 
         return None
 
@@ -1368,7 +1385,7 @@ class FeedbackTemplateGeneratorOpenXML:
                                 "FileName": str(mp3_path.absolute()),
                                 "LinkToFile": False,
                                 "DisplayAsIcon": True,
-                                "IconLabel": f"{name.upper()}.MP3",
+                                "IconLabel": mp3_path.name,
                             }
                             # Use WMP icon if available for a recognizable play button
                             if Path(wmp_exe).exists():
@@ -1640,6 +1657,21 @@ class FeedbackTemplateGeneratorOpenXML:
 
             logger.info("[OpenXML] Pie chart data: Positive=%d, Neutral=%d, Reconsider=%d",
                        positive, neutral, reconsider)
+
+            # matplotlib cannot draw a pie with total 0 (NaN wedge angles);
+            # skip the chart but still remove the placeholder text
+            if positive + neutral + reconsider == 0:
+                logger.info("[OpenXML] All pie chart counts are 0, skipping chart generation")
+                for paragraph in doc.paragraphs:
+                    if "PieChart" in paragraph.text:
+                        paragraph.clear()
+                for table in doc.tables:
+                    for row in table.rows:
+                        for cell in row.cells:
+                            for paragraph in cell.paragraphs:
+                                if "PieChart" in paragraph.text:
+                                    paragraph.clear()
+                return
 
             # Create pie chart with matplotlib
             labels = ['Positive', 'Neutral', 'Reconsider']

@@ -849,6 +849,11 @@ class WordReportGeneratorOpenXML:
             logger.info("[OpenXML Word Report] Pie chart data: Positive=%d, Neutral=%d, Reconsider=%d",
                        positive, neutral, reconsider)
 
+            # matplotlib cannot draw a pie with total 0 (NaN wedge angles)
+            if positive + neutral + reconsider == 0:
+                logger.info("[OpenXML Word Report] All pie chart counts are 0, skipping chart generation")
+                return
+
             # Create pie chart with matplotlib
             labels = ['Positive', 'Neutral', 'Reconsider']
             sizes = [positive, neutral, reconsider]
