@@ -522,6 +522,14 @@ async def replace_project_images(
         description="Page number (insert position). Optional; uses existing value if omitted.",
     ),
     project_name: str = Form(..., description="Existing project folder name"),
+    render_v2: bool | None = Form(
+        None,
+        description=(
+            "Override the backup render v2 feature flag for THIS regeneration only "
+            "(true = new web-viewer-exact render, false = current render, omitted = "
+            "use settings.use_backup_render_v2). Intended for pre-release testing."
+        ),
+    ),
     project_type: str = Depends(validate_project_type),
 ):
     """Regenerate project using OpenXML backup flow with existing Excel in project root.
@@ -950,7 +958,9 @@ async def replace_project_images(
             cursor.connection.commit()
 
         # Regenerate backup (uses Excel from root + PPTX)
-        backup_info = presentation_service.generate_backup_presentation(presentation_id)
+        backup_info = presentation_service.generate_backup_presentation(
+            presentation_id, render_v2=render_v2
+        )
         logger.info(
             "Backup regenerated for PresentationId=%d: %s",
             presentation_id,
@@ -981,6 +991,7 @@ async def replace_project_images(
                 test_name_order="Default",
                 project_type=project_type,
                 overwrite_existing=True,
+                render_v2=render_v2,
             )
 
             create_result = presentation_service.create_presentation(create_request)

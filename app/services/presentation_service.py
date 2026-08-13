@@ -535,14 +535,25 @@ class PresentationService:
                     with open(backup_path, "rb") as f:
                         backup_pptx_bytes = f.read()
 
-                    # Convert backup PowerPoint to images
-                    result_dict = pptx_service.convert_pptx_to_images(
-                        file_content=backup_pptx_bytes,
-                        filename=backup_path.name,
-                        display_name=request.display_name,
-                        project_type=request.project_type,
-                        skip_cleanup=True,  # Preserve original Excel/PPTX when reconverting backup
+                    # v2: while converting, transiently register the bold-flagged
+                    # Gotham Medium so the server rasterizes bold runs with the
+                    # true Medium face — the same face embedded in the PPTX —
+                    # instead of synthetic bold. Viewer JPGs then match what
+                    # client PowerPoint shows. No font is installed permanently.
+                    render_v2 = (
+                        request.render_v2
+                        if request.render_v2 is not None
+                        else settings.use_backup_render_v2
                     )
+                    with self._transient_gotham_bold(enabled=render_v2):
+                        # Convert backup PowerPoint to images
+                        result_dict = pptx_service.convert_pptx_to_images(
+                            file_content=backup_pptx_bytes,
+                            filename=backup_path.name,
+                            display_name=request.display_name,
+                            project_type=request.project_type,
+                            skip_cleanup=True,  # Preserve original Excel/PPTX when reconverting backup
+                        )
                     pptx_data = PPTXConversionResponse(**result_dict)
 
                     logger.info(
@@ -946,7 +957,7 @@ class PresentationService:
             ) from e
 
     def generate_backup_presentation(
-        self, presentation_id: int, progress_callback=None
+        self, presentation_id: int, progress_callback=None, render_v2: Optional[bool] = None
     ) -> Dict[str, Any]:
         """
         Generate a backup PowerPoint presentation from saved Excel and PPTX files.
@@ -1126,6 +1137,7 @@ class PresentationService:
                 has_groups=True,  # Default assumption
                 test_name_order="Default",  # Use Default for backup generation
                 project_type="NW",  # Default to NW
+                render_v2=render_v2,  # Per-request feature flag override (None = use settings)
             )
 
             # 5. Process Excel file (55-65%)
@@ -1639,6 +1651,14 @@ class PresentationService:
             insert_position = max(0, request.page_number - 1)
             logger.info("Converting page_number %d to zero-based insert position %d", request.page_number, insert_position)
 
+            # Backup render v2 feature flag: per-request override wins over the
+            # global setting (lets us test the new render before flipping it on).
+            render_v2 = (
+                request.render_v2
+                if request.render_v2 is not None
+                else settings.use_backup_render_v2
+            )
+
             if settings.use_frontend_style_backup:
                 # Front-end-styled renderer (mirrors the web viewer design).
                 # Resolve background rotation images (user's selection) — same
@@ -1654,6 +1674,7 @@ class PresentationService:
                     insert_position=insert_position,
                     is_big_japanese=is_big_japanese,
                     background_images=background_images,
+                    render_v2=render_v2,
                 )
             else:
                 # Classic pre-redesign renderer (feature flag off)
@@ -1711,6 +1732,67 @@ class PresentationService:
         except Exception as e:
             logger.error("Error generating OpenXML PowerPoint: %s", str(e))
             raise
+
+    @staticmethod
+    def _transient_gotham_bold(enabled: bool):
+        """Context manager: session-register the render-v2 Gotham helper TTFs.
+
+        While active, GDI resolves the standalone "Gotham Medium" family
+        (GothamMediumFamily.ttf), so backup→image conversions rasterize the v2
+        medium runs ("Gotham Medium"+b=1) as Medium + synthetic bold — matching
+        both the original viewer look and what client PowerPoint produces from
+        the embedded regular fntdata. Nothing is installed permanently — the
+        registration lasts only for the conversion. Never broadcasts
+        WM_FONTCHANGE (a synchronous broadcast can hang the session); newly
+        started PowerPoint processes see session-registered fonts anyway.
+        Non-fatal: yields normally even if registration fails.
+        """
+        import ctypes
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _ctx():
+            fonts_dir = settings.app_dir / "templates" / "fonts"
+            # Only the standalone "Gotham Medium" family: with it registered,
+            # "Gotham Medium"+b=1 rasterizes as Medium + synthetic bold — the
+            # same result GDI produces for installed-"Gotham"+bold, so viewer
+            # JPGs keep the original heavy look. (GothamMediumAsBold.ttf is NOT
+            # registered: it would suppress GDI's synthesis and lighten the
+            # small Gotham-bold runs vs the original render.)
+            candidates = [
+                fonts_dir / "GothamMediumFamily.ttf",
+            ]
+            added: List[str] = []
+            if enabled:
+                gdi = ctypes.WinDLL("gdi32")
+                for font_path in candidates:
+                    if not font_path.exists():
+                        continue
+                    try:
+                        if gdi.AddFontResourceW(str(font_path)):
+                            added.append(str(font_path))
+                    except Exception as font_err:
+                        logger.warning(
+                            "Transient font registration failed (non-fatal): %s", font_err
+                        )
+                if added:
+                    logger.info(
+                        "Transient Gotham faces registered for conversion: %s",
+                        [Path(p).name for p in added],
+                    )
+            try:
+                yield
+            finally:
+                if added:
+                    gdi = ctypes.WinDLL("gdi32")
+                    for font_path in added:
+                        try:
+                            gdi.RemoveFontResourceW(font_path)
+                        except Exception:
+                            pass
+                    logger.info("Transient Gotham faces removed")
+
+        return _ctx()
 
     def _resolve_background_images(
         self, background_type: Optional[str], background_name: Optional[str]

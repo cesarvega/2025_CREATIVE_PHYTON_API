@@ -206,6 +206,18 @@ class Settings(BaseSettings):
     # False = classic pre-redesign slide layout (openxml_pptx_service_legacy).
     use_frontend_style_backup: bool = True
 
+    # Feature flag (2026-07-16): backup render v2 — group slides replicate the web
+    # viewer's exact algorithm (columns of max 7 rows packed at the top, fixed
+    # 25px-equivalent font, Retain/Recraft card, New Names/New Comments on every
+    # group layout, front-end amber #F9A825), text properties are written at run
+    # level so all PowerPoint viewers honor them, and fonts are embedded via
+    # PowerPoint COM so machines without Gotham render correctly.
+    # False = current behavior (code deploys dark). Flip to True to release
+    # WITHOUT redeploying (env var USE_BACKUP_RENDER_V2 + service restart, or
+    # change this default). Per-request override for pre-release testing:
+    # form field `render_v2` on POST /api/presentations/replace-project-images/.
+    use_backup_render_v2: bool = True
+
     # Feedback template generation settings
     use_openxml_feedback: bool = True  # Feature flag: True = OpenXML (5-10x faster), False = COM (legacy)
 

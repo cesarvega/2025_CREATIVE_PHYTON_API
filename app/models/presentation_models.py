@@ -232,6 +232,13 @@ class CreatePresentationRequest(BaseModel):
         description="Presentation classification stored in the database.",
     )
     user_name: str = Field(..., description="Username that initiated the creation process.")
+    render_v2: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Per-request override for the backup render v2 feature flag. "
+            "None = use settings.use_backup_render_v2; True/False = force for this request."
+        ),
+    )
     mobile_link_bsr: Optional[str] = Field(
         default=None, description="Optional URL pointing to the BSR mobile experience."
     )

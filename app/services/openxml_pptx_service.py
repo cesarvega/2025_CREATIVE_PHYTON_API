@@ -6,7 +6,9 @@ using the python-pptx library with direct OpenXML manipulation.
 """
 
 import math
+import re
 import textwrap
+import zipfile
 from copy import deepcopy
 from io import BytesIO
 from pathlib import Path
@@ -19,6 +21,7 @@ from pptx.enum.shapes import MSO_SHAPE
 from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from pptx.util import Inches, Pt
 
+from app.config.settings import settings
 from app.models.presentation_models import ProcessedExcelData
 from app.utils.logging_utils import get_logger
 
@@ -37,6 +40,23 @@ TOGGLE_TRACK_GRAY = RGBColor(204, 204, 204)  # #ccc (front-end switch track)
 CHECKBOX_BORDER = RGBColor(221, 221, 221)  # #ddd (front-end group checkbox border)
 RECRAFT_AMBER = RGBColor(251, 192, 45)  # #fbc02d (front-end "R" recraft box)
 
+# ---- Render v2 constants (settings.use_backup_render_v2) --------------------
+# Values measured live on the web viewer (group component CSS + DOM metrics,
+# 1382px stage = 13.333in slide, so 1px = 0.6947pt).
+RECRAFT_AMBER_V2 = RGBColor(249, 168, 37)  # #f9a825 (measured on the live viewer)
+# Standalone medium-weight family (v2), used WITH b=1: every renderer starts
+# from the same Medium base and applies its synthetic bold, matching the
+# original heavy look. Clients resolve it from the embedded regular fntdata;
+# the server registers templates/fonts/GothamMediumFamily.ttf transiently
+# while converting viewer JPGs (see _transient_gotham_bold).
+FONT_GOTHAM_MEDIUM = "Gotham Medium"
+TOGGLE_LABEL_GRAY = RGBColor(85, 85, 85)  # #555 (Retain/Recraft card labels)
+SWITCH_FILL_GRAY = RGBColor(158, 158, 158)  # #9e9e9e (active NONE segment)
+GROUP_ROW_PITCH_IN = 0.54  # 56px row pitch (50px min-height + 6px gap)
+GROUP_ROWS_PER_COLUMN = 7  # chunkOptionsIntoColumns(options, 7, 3)
+GROUP_NAME_PT = 17.4  # 25px label (fixed, never scales with row count)
+GROUP_NAME_SMALL_PT = 13.9  # 20px when the longest rationale exceeds 25 chars
+
 
 class OpenXMLPPTXService:
     """Service for generating PowerPoint presentations using OpenXML (python-pptx)."""
@@ -52,6 +72,7 @@ class OpenXMLPPTXService:
         insert_position: int = 5,
         is_big_japanese: bool = False,
         background_images: Optional[List[str]] = None,
+        render_v2: bool = False,
     ) -> bytes:
         """
         Generate a backup presentation using OpenXML.
@@ -65,6 +86,9 @@ class OpenXMLPPTXService:
                 rotation (user's selection). Rotation advances on every
                 name-evaluation slide (single and group), but the image is only
                 painted on individual slides — mirroring the web viewer.
+            render_v2: Feature-flagged render fixes (settings.use_backup_render_v2):
+                group slides use the web viewer's exact layout algorithm and text
+                properties are promoted to run level for viewer compatibility.
 
         Returns:
             bytes: Generated PowerPoint file as bytes
@@ -73,7 +97,10 @@ class OpenXMLPPTXService:
             ValueError: If inputs are invalid or processing fails
         """
         try:
-            logger.info("Starting OpenXML backup generation at position %d", insert_position)
+            logger.info(
+                "Starting OpenXML backup generation at position %d (render_v2=%s)",
+                insert_position, render_v2,
+            )
 
             # Load the presentation
             presentation = Presentation(BytesIO(pptx_bytes))
@@ -85,16 +112,35 @@ class OpenXMLPPTXService:
             inserted = self._build_slides_from_excel(
                 presentation, excel_rows, insert_position, is_big_japanese,
                 background_images=background_images,
+                render_v2=render_v2,
             )
 
             logger.info("Inserted %d slides using OpenXML", inserted)
+
+            if render_v2:
+                # Copy paragraph-level defRPr onto runs lacking rPr so viewers
+                # that ignore defRPr (PowerPoint Online, Google Slides,
+                # LibreOffice) still render Gotham at the intended size instead
+                # of falling back to a different default per text box.
+                # Only the slides we generated are touched (contiguous block +
+                # the Name Summary slide appended at the end).
+                generated = list(presentation.slides)[insert_position:insert_position + inserted]
+                for gen_slide in generated:
+                    self._promote_paragraph_props_to_runs(gen_slide)
 
             # Save to bytes
             buffer = BytesIO()
             presentation.save(buffer)
             buffer.seek(0)
+            result_bytes = buffer.read()
 
-            return buffer.read()
+            if render_v2:
+                # Embed Gotham in-process (zip surgery, ~milliseconds). Replaces
+                # the old PowerPoint COM embed, which cold-started PowerPoint and
+                # subsetted every font family (~60-90s per backup).
+                result_bytes = self._embed_gotham_fonts(result_bytes)
+
+            return result_bytes
 
         except Exception as e:
             logger.error("OpenXML backup generation failed: %s", str(e))
@@ -259,6 +305,7 @@ class OpenXMLPPTXService:
         start_position: int = 5,
         is_big_japanese: bool = True,
         background_images: Optional[List[str]] = None,
+        render_v2: bool = False,
     ) -> int:
         """Insert slides based on Excel rows. Returns count of slides inserted."""
         if not excel_data:
@@ -395,7 +442,9 @@ class OpenXMLPPTXService:
                     self._apply_solid_white_background(presentation, slide)
 
             if item["type"] == "category":
-                self._render_category_slide(presentation, slide, item["category_text"])
+                self._render_category_slide(
+                    presentation, slide, item["category_text"], render_v2=render_v2
+                )
             elif item["type"] == "group":
                 self._render_group_slide(
                     presentation,
@@ -405,6 +454,7 @@ class OpenXMLPPTXService:
                     rows=item["rows"],
                     show_rationales=item.get("show_rationales", True),
                     group_letter=item.get("group_letter", ""),
+                    render_v2=render_v2,
                 )
             else:
                 row = item["row"]
@@ -417,6 +467,7 @@ class OpenXMLPPTXService:
                     notation_text=row["notation_text"],
                     katakana_text=row["katakana_text"],
                     is_big_japanese=is_big_japanese,
+                    render_v2=render_v2,
                 )
             current_position += 1
             inserted += 1
@@ -481,7 +532,7 @@ class OpenXMLPPTXService:
         return ""
 
     def _render_category_slide(
-        self, presentation: Presentation, slide, category_text: str
+        self, presentation: Presentation, slide, category_text: str, render_v2: bool = False
     ) -> None:
         """Render category text centered. If text contains '$', split into two lines and double bottom font size."""
         parts = [part.strip() for part in category_text.split("$", 1)]
@@ -508,22 +559,28 @@ class OpenXMLPPTXService:
             Pt(max(bottom_font.pt, top_font.pt + 6)) if bottom_lines else bottom_font
         )
 
+        # v2: "Gotham Medium" + b=1 — both server (transient TTF) and client
+        # (embedded regular fntdata) start from the same Medium base and both
+        # apply synthetic bold, reproducing the original heavy look everywhere.
+        cat_font = FONT_GOTHAM_MEDIUM if render_v2 else FONT_GOTHAM
+        cat_bold = True
+
         for idx, line in enumerate(top_lines):
             para = tf.paragraphs[idx] if idx == 0 else tf.add_paragraph()
             para.text = line
             para.alignment = PP_ALIGN.CENTER
-            para.font.name = FONT_GOTHAM
+            para.font.name = cat_font
             para.font.size = top_font
-            para.font.bold = True
+            para.font.bold = cat_bold
             para.font.color.rgb = RGBColor(0, 0, 0)
 
         for line in bottom_lines:
             para = tf.add_paragraph()
             para.text = line
             para.alignment = PP_ALIGN.CENTER
-            para.font.name = FONT_GOTHAM
+            para.font.name = cat_font
             para.font.size = bottom_font
-            para.font.bold = True
+            para.font.bold = cat_bold
             para.font.color.rgb = RGBColor(0, 0, 139)  # deep navy
 
     def _render_name_rationale_slide(
@@ -536,6 +593,7 @@ class OpenXMLPPTXService:
         notation_text: str = "",
         katakana_text: str = "",
         is_big_japanese: bool = False,
+        render_v2: bool = False,
     ) -> None:
         """Render name/rationale slide with a simple layout similar to the provided design."""
         slide_width = presentation.slide_width
@@ -573,13 +631,13 @@ class OpenXMLPPTXService:
             split_notation = ""
         effective_notation = (notation_text or "").strip() or split_notation
 
-        # Name and katakana block — front-end: GothamMedium, measured 55pt on the
-        # rendered canvas (the CSS says 120px but the component is scaled down),
-        # cap top at y≈2.5in
+        # Name and katakana block — front-end: GothamMedium. Render v2: measured
+        # live on the viewer, 110px on a 1382px stage = 76pt, box top y≈2.22in.
+        # v1 keeps the original 55pt (kept for the flag-off regression).
         left = self._x(slide_width, 0.62)
-        top_block = Inches(2.35)
+        top_block = Inches(2.22) if render_v2 else Inches(2.35)
         block_width = slide_width - left - Inches(0.75)
-        block_height = Inches(1.4)
+        block_height = Inches(1.5) if render_v2 else Inches(1.4)
         name_box = slide.shapes.add_textbox(left, top_block, block_width, block_height)
         name_tf = name_box.text_frame
         name_tf.clear()
@@ -589,12 +647,26 @@ class OpenXMLPPTXService:
         )
         name_para = name_tf.paragraphs[0]
         name_para.text = display_name
-        name_font_size = self._fit_font_size(
-            display_name, base_size=55, min_size=28, max_chars=max(14, int(27 * sx))
-        )
-        name_para.font.name = FONT_GOTHAM
+        if render_v2:
+            name_font_size = self._fit_font_size(
+                display_name, base_size=76, min_size=32, max_chars=max(12, int(20 * sx))
+            )
+        else:
+            name_font_size = self._fit_font_size(
+                display_name, base_size=55, min_size=28, max_chars=max(14, int(27 * sx))
+            )
+        if render_v2:
+            # Pure Medium, NO bold: the viewer renders the big name with the
+            # GothamMedium webfont at w=500 (no synthesis). Clients resolve the
+            # family from the embedded regular fntdata; the server from the
+            # transiently registered TTF. (Category slides differ: they DO use
+            # b=1 to reproduce the viewer's synthetic-bold JPG look.)
+            name_para.font.name = FONT_GOTHAM_MEDIUM
+            name_para.font.bold = False
+        else:
+            name_para.font.name = FONT_GOTHAM
+            name_para.font.bold = True  # v1: resolves to Medium+synthetic on the server
         name_para.font.size = Pt(name_font_size)
-        name_para.font.bold = True  # bold resolves to the Medium face (front: GothamMedium)
         name_para.alignment = PP_ALIGN.LEFT
         name_para.font.color.rgb = TEXT_BLACK
 
@@ -640,7 +712,8 @@ class OpenXMLPPTXService:
         toggle_spacing = max(Inches(1.45), self._x(slide_width, 1.62))
         for idx, toggle_label in enumerate(["Positive", "Neutral", "Negative", "Recraft"]):
             self._add_toggle_switch(
-                slide, toggle_start + toggle_spacing * idx, sentiment_top, toggle_label
+                slide, toggle_start + toggle_spacing * idx, sentiment_top, toggle_label,
+                render_v2=render_v2,
             )
 
         # Notation on the toggle row (e.g., "(C)", "(T)", "(CB)") — front-end: x≈10.9in
@@ -684,9 +757,13 @@ class OpenXMLPPTXService:
         para.font.color.rgb = PLACEHOLDER_GRAY
         para.alignment = PP_ALIGN.LEFT
 
-    def _add_toggle_switch(self, slide, left, top, label: str) -> None:
+    def _add_toggle_switch(self, slide, left, top, label: str, render_v2: bool = False) -> None:
         """Draw a small pill-style toggle switch with a label, mimicking the
-        front-end vote controls (Positive / Neutral / Negative / Recraft)."""
+        front-end vote controls (Positive / Neutral / Negative / Recraft).
+
+        v2: the front end renders these labels in Roboto 14px REGULAR (w=400,
+        no bold) — a bold label reads much heavier than the app, so v2 drops
+        the bold flag and uses 10pt."""
         track_w = Inches(0.35)
         track_h = Inches(0.19)
         track = slide.shapes.add_shape(
@@ -723,8 +800,8 @@ class OpenXMLPPTXService:
         para = tf.paragraphs[0]
         para.text = label
         para.font.name = FONT_GOTHAM
-        para.font.size = Pt(11)
-        para.font.bold = True  # Medium face (front labels use a medium weight)
+        para.font.size = Pt(10) if render_v2 else Pt(11)
+        para.font.bold = not render_v2  # front: Roboto 14px w=400 (regular)
         para.font.color.rgb = TEXT_BLACK
         para.alignment = PP_ALIGN.LEFT
 
@@ -751,6 +828,7 @@ class OpenXMLPPTXService:
         rows: List[Dict[str, str]],
         show_rationales: bool = True,
         group_letter: str = "",
+        render_v2: bool = False,
     ) -> None:
         """Render a grouped slide mirroring the front-end layout.
 
@@ -766,6 +844,17 @@ class OpenXMLPPTXService:
         - B: cyclic vote button — its default state looks like a checkbox
         - C: voting disabled — names only, no boxes, aligned to the left margin
         """
+        if render_v2:
+            self._render_group_slide_v2(
+                presentation,
+                slide,
+                category_text=category_text,
+                rows=rows,
+                show_rationales=show_rationales,
+                group_letter=group_letter,
+            )
+            return
+
         slide_width = presentation.slide_width
         slide_height = presentation.slide_height
 
@@ -921,11 +1010,12 @@ class OpenXMLPPTXService:
                 rpara.alignment = PP_ALIGN.LEFT
                 rpara.font.color.rgb = TEXT_BLACK
 
-    def _add_recraft_box(self, slide, left, top, size) -> None:
+    def _add_recraft_box(self, slide, left, top, size, color: Optional[RGBColor] = None) -> None:
         """Amber-bordered 'R' recraft box, mirroring the front-end control."""
+        amber = color if color is not None else RECRAFT_AMBER
         box = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, size, size)
         box.fill.background()
-        box.line.color.rgb = RECRAFT_AMBER
+        box.line.color.rgb = amber
         box.line.width = Pt(1.25)
         box.shadow.inherit = False
         tf = box.text_frame
@@ -939,7 +1029,7 @@ class OpenXMLPPTXService:
         para.font.name = FONT_GOTHAM
         para.font.size = Pt(10)
         para.font.bold = True
-        para.font.color.rgb = RECRAFT_AMBER
+        para.font.color.rgb = amber
         para.alignment = PP_ALIGN.CENTER
 
     def _render_group_grid(
@@ -1010,6 +1100,419 @@ class OpenXMLPPTXService:
                 para.font.bold = False
                 para.alignment = PP_ALIGN.LEFT
                 para.font.color.rgb = TEXT_BLACK
+
+    # ------------------------------------------------------------------
+    # Render v2 (settings.use_backup_render_v2) — exact web-viewer algorithm
+    # ------------------------------------------------------------------
+
+    def _render_group_slide_v2(
+        self,
+        presentation: Presentation,
+        slide,
+        *,
+        category_text: str,
+        rows: List[Dict[str, str]],
+        show_rationales: bool = True,
+        group_letter: str = "",
+    ) -> None:
+        """Group slide replicating the web viewer's GroupSlideComponent exactly.
+
+        Front-end algorithm (extracted from the nw2 Angular bundle):
+        - Layout chosen by rationale VISIBILITY, not by row count: visible
+          rationales -> single-column list (name | rationale); hidden/empty
+          rationales -> columns of max 7 rows (chunkOptionsIntoColumns(_, 7, 3)),
+          packed at the top with a fixed 0.54in pitch.
+        - Name font is FIXED at 25px (17.4pt) — 20px (13.9pt) only when the
+          longest rationale exceeds 25 characters. It never scales with count.
+        - Every group slide shows the Retain/Recraft NONE-ALL card (when voting
+          is enabled) and the New Names / New Comments boxes.
+
+        Deliberate deviation: the front end silently truncates groups at 21
+        names (3 columns x 7). The backup keeps ALL names by adding columns
+        (and shrinking the font at 4-5 columns) — a paper form must be complete.
+        """
+        slide_width = presentation.slide_width
+        total_rows = len(rows)
+
+        margin_left = Inches(0.25)
+        margin_right = Inches(0.4)
+        available_width = slide_width - margin_left - margin_right
+
+        # Category heading — same as v1 (matches front: GothamLight 30px ~21pt)
+        heading_top = Inches(0.34)
+        heading_box = slide.shapes.add_textbox(
+            margin_left, heading_top, available_width, Inches(0.5)
+        )
+        heading_para = heading_box.text_frame.paragraphs[0]
+        heading_para.text = category_text or "Category"
+        heading_para.font.name = FONT_GOTHAM
+        heading_para.font.size = Pt(21)
+        heading_para.font.bold = False
+        heading_para.font.color.rgb = TEXT_BLACK
+        heading_para.alignment = PP_ALIGN.LEFT
+
+        letter = (group_letter or "").strip().upper()
+        show_checkbox = not letter.startswith("C")
+        show_recraft = letter == "AR" or letter.startswith("B")
+
+        rationale_values = [(entry.get("rationale_text") or "").strip() for entry in rows]
+        rationales_visible = show_rationales and any(rationale_values)
+
+        content_top = Inches(1.14)
+        card_top = Inches(5.22)
+        content_height = card_top - content_top - Inches(0.05)
+
+        # Front: getDynamicFontSize() — 25px, or 20px when the longest visible
+        # rationale exceeds 25 characters.
+        if rationales_visible and max(len(r) for r in rationale_values) > 25:
+            name_pt = GROUP_NAME_SMALL_PT
+        else:
+            name_pt = GROUP_NAME_PT
+
+        checkbox_size = Inches(0.24)  # front checkbox input: 25px square
+
+        if rationales_visible:
+            # Single-column list: [checkbox] [R] Name .... Rationale
+            row_pitch = min(Inches(GROUP_ROW_PITCH_IN), int(content_height / max(1, total_rows)))
+            name_left = self._x(slide_width, 1.15) if show_checkbox else margin_left
+            rationale_left = self._x(slide_width, 4.91)
+            name_width = rationale_left - name_left - Inches(0.2)
+            rationale_width = slide_width - margin_right - rationale_left
+
+            for row_idx, entry in enumerate(rows):
+                y_pos = content_top + row_pitch * row_idx
+                box_y = y_pos + (row_pitch - checkbox_size) / 2
+                if show_checkbox:
+                    self._add_group_checkbox_v2(slide, margin_left, box_y, checkbox_size)
+                    if show_recraft:
+                        self._add_recraft_box(
+                            slide, self._x(slide_width, 0.55), box_y, checkbox_size,
+                            color=RECRAFT_AMBER_V2,
+                        )
+                self._add_group_text_v2(
+                    slide, name_left, y_pos, name_width, row_pitch,
+                    self._compose_group_name_line(entry), name_pt,
+                )
+                rationale_text = rationale_values[row_idx]
+                if rationale_text:
+                    self._add_group_text_v2(
+                        slide, rationale_left, y_pos, rationale_width, row_pitch,
+                        rationale_text, name_pt,
+                    )
+        else:
+            # Columns of max 7 rows, packed at the top (front: chunkOptionsIntoColumns).
+            # The front caps at 3 columns and DROPS the rest; the backup instead
+            # adds columns (4-5) with a smaller font so every name is present.
+            ncols = max(1, math.ceil(total_rows / GROUP_ROWS_PER_COLUMN))
+            if ncols > 5:
+                ncols = 5
+            rows_per_col = max(GROUP_ROWS_PER_COLUMN, math.ceil(total_rows / ncols))
+            row_pitch = min(Inches(GROUP_ROW_PITCH_IN), int(content_height / rows_per_col))
+            # Front: column pitch is FIXED at available/3 regardless of how many
+            # columns are populated (measured: col2 at the same x with 2 or 3
+            # columns). Only our 4-5 column extension packs them tighter.
+            col_pitch = int(available_width / max(3, ncols))
+            if ncols == 4:
+                name_pt = 14.0
+            elif ncols >= 5:
+                name_pt = 12.0
+
+            # Front offsets within a column: checkbox at the column start, "R"
+            # box at +0.30in, name at +0.89in (all 16:9 reference, x-scaled).
+            recraft_offset = self._x(slide_width, 0.30)
+            text_offset = self._x(slide_width, 0.89) if show_checkbox else 0
+
+            for col_idx in range(ncols):
+                entries = rows[col_idx * rows_per_col:(col_idx + 1) * rows_per_col]
+                col_x = margin_left + col_pitch * col_idx
+                for row_idx, entry in enumerate(entries):
+                    y_pos = content_top + row_pitch * row_idx
+                    box_y = y_pos + (row_pitch - checkbox_size) / 2
+                    if show_checkbox:
+                        self._add_group_checkbox_v2(slide, col_x, box_y, checkbox_size)
+                        if show_recraft:
+                            self._add_recraft_box(
+                                slide, col_x + recraft_offset, box_y, checkbox_size,
+                                color=RECRAFT_AMBER_V2,
+                            )
+                    self._add_group_text_v2(
+                        slide, col_x + text_offset, y_pos,
+                        col_pitch - text_offset - Inches(0.1), row_pitch,
+                        self._compose_group_name_line(entry), name_pt,
+                    )
+
+        # Retain / Recraft NONE-ALL card (front: controls-card, shown whenever
+        # voting is enabled; letter C disables voting entirely).
+        if show_checkbox:
+            self._add_retain_recraft_card_v2(
+                slide, slide_width, card_top, include_recraft=show_recraft
+            )
+
+        # New Names / New Comments boxes — on EVERY group layout (front behavior)
+        group_box_w = self._x(slide_width, 4.04)
+        self._add_input_box(slide, self._x(slide_width, 1.99), Inches(6.05), group_box_w, Inches(0.8), "New Names")
+        self._add_input_box(slide, self._x(slide_width, 7.27), Inches(6.05), group_box_w, Inches(0.8), "New Comments")
+
+    def _add_group_checkbox_v2(self, slide, left, top, size) -> None:
+        """Empty vote checkbox (#ddd border), front-end style."""
+        box = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, size, size)
+        box.fill.background()
+        box.line.color.rgb = CHECKBOX_BORDER
+        box.line.width = Pt(1)
+        box.shadow.inherit = False
+
+    def _add_group_text_v2(self, slide, left, top, width, height, text: str, size_pt: float) -> None:
+        """Vertically-centered Gotham Light black text (group rows)."""
+        box = slide.shapes.add_textbox(left, top, width, height)
+        tf = box.text_frame
+        tf.word_wrap = True
+        tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+        para = tf.paragraphs[0]
+        para.text = text
+        para.font.name = FONT_GOTHAM
+        para.font.size = Pt(size_pt)
+        para.font.bold = False
+        para.font.color.rgb = TEXT_BLACK
+        para.alignment = PP_ALIGN.LEFT
+
+    def _add_retain_recraft_card_v2(
+        self, slide, slide_width, card_top, *, include_recraft: bool
+    ) -> None:
+        """Bottom-left Retain/Recraft card with NONE-ALL switches (front controls-card)."""
+        card_left = self._x(slide_width, 0.19)
+        card_width = self._x(slide_width, 3.60 if include_recraft else 1.90)
+        card = slide.shapes.add_shape(
+            MSO_SHAPE.ROUNDED_RECTANGLE, card_left, card_top, card_width, Inches(0.78)
+        )
+        try:
+            card.adjustments[0] = 0.08
+        except Exception:
+            pass
+        card.fill.solid()
+        card.fill.fore_color.rgb = RGBColor(255, 255, 255)
+        card.line.color.rgb = CHECKBOX_BORDER
+        card.line.width = Pt(0.75)
+        card.shadow.inherit = False
+
+        toggles = [("Retain", 0.36)]
+        if include_recraft:
+            toggles.append(("Recraft", 2.06))
+        for label_text, x_ref in toggles:
+            x_pos = self._x(slide_width, x_ref)
+            label_box = slide.shapes.add_textbox(
+                x_pos, card_top + Inches(0.05), self._x(slide_width, 1.5), Inches(0.25)
+            )
+            lp = label_box.text_frame.paragraphs[0]
+            lp.text = label_text
+            lp.font.name = FONT_GOTHAM
+            lp.font.size = Pt(11)
+            lp.font.bold = False
+            lp.font.color.rgb = TOGGLE_LABEL_GRAY
+            lp.alignment = PP_ALIGN.LEFT
+            self._add_none_all_switch_v2(
+                slide, x_pos, card_top + Inches(0.37), self._x(slide_width, 1.50), Inches(0.28)
+            )
+
+    def _add_none_all_switch_v2(self, slide, left, top, width, height) -> None:
+        """Two-segment NONE/ALL switch, NONE active (default state on the viewer)."""
+        half = int(width / 2)
+        track = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, width, height)
+        track.fill.solid()
+        track.fill.fore_color.rgb = RGBColor(255, 255, 255)
+        track.line.color.rgb = CHECKBOX_BORDER
+        track.line.width = Pt(0.75)
+        track.shadow.inherit = False
+
+        none_seg = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, half, height)
+        none_seg.fill.solid()
+        none_seg.fill.fore_color.rgb = SWITCH_FILL_GRAY
+        none_seg.line.fill.background()
+        none_seg.shadow.inherit = False
+        tf = none_seg.text_frame
+        tf.margin_left = 0
+        tf.margin_right = 0
+        tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+        np_ = tf.paragraphs[0]
+        np_.text = "NONE"
+        np_.font.name = FONT_GOTHAM
+        np_.font.size = Pt(8)
+        np_.font.bold = True
+        np_.font.color.rgb = RGBColor(255, 255, 255)
+        np_.alignment = PP_ALIGN.CENTER
+
+        all_box = slide.shapes.add_textbox(left + half, top, width - half, height)
+        atf = all_box.text_frame
+        atf.margin_left = 0
+        atf.margin_right = 0
+        atf.vertical_anchor = MSO_ANCHOR.MIDDLE
+        ap = atf.paragraphs[0]
+        ap.text = "ALL"
+        ap.font.name = FONT_GOTHAM
+        ap.font.size = Pt(8)
+        ap.font.bold = True
+        ap.font.color.rgb = PLACEHOLDER_GRAY
+        ap.alignment = PP_ALIGN.CENTER
+
+    def _embed_gotham_fonts(self, pptx_bytes: bytes) -> bytes:
+        """Embed Gotham into the PPTX package (pure OpenXML zip surgery, no COM).
+
+        The payload is NOT a raw TTF: PowerPoint only accepts fntdata parts in
+        its own TTEmbed compressed format — raw TTFs trigger the "Install
+        Embedded Fonts ... General Failure" dialog on machines without the
+        font. The assets in templates/fonts/Gotham_*.fntdata were produced ONCE
+        by PowerPoint itself (scratchpad make_fntdata.py: a deck whose Gotham
+        runs contain the full printable Latin-1 charset, saved via COM with
+        EmbedTrueTypeFonts, parts extracted). PowerPoint embeds only a
+        <p:regular> face for this family — bold runs use synthetic bold, same
+        as decks PowerPoint embeds natively.
+
+        Non-fatal: returns the input unchanged if assets are missing or the
+        package already embeds fonts.
+        """
+        try:
+            fonts_dir = settings.app_dir / "templates" / "fonts"
+            # (typeface, panose, asset prefix). Regular = Light, bold = true
+            # Medium: on machines without Gotham, bold runs render the actual
+            # Medium face instead of synthetic bold over Light. The viewer JPG
+            # conversion mirrors this by transiently registering the
+            # bold-flagged Medium (see presentation_service transient font).
+            families = [
+                ("Gotham", "02000504020000020004", "Gotham"),
+                ("Gotham Medium", "02000604040000020004", "GothamMedium"),
+            ]
+            family_faces = []
+            for typeface, panose, prefix in families:
+                faces = [
+                    (face, fonts_dir / f"{prefix}_{face}.fntdata")
+                    for face in ("regular", "bold", "italic", "boldItalic")
+                    if (fonts_dir / f"{prefix}_{face}.fntdata").exists()
+                ]
+                if faces:
+                    family_faces.append((typeface, panose, faces))
+            if not family_faces:
+                logger.warning(
+                    "No Gotham fntdata assets in %s, skipping font embedding", fonts_dir
+                )
+                return pptx_bytes
+
+            src = zipfile.ZipFile(BytesIO(pptx_bytes))
+            pres_xml = src.read("ppt/presentation.xml").decode("utf-8")
+            if "p:embeddedFontLst" in pres_xml:
+                logger.info("Presentation already embeds fonts, skipping")
+                return pptx_bytes
+
+            rels_xml = src.read("ppt/_rels/presentation.xml.rels").decode("utf-8")
+            content_types = src.read("[Content_Types].xml").decode("utf-8")
+
+            font_rel_type = (
+                "http://schemas.openxmlformats.org/officeDocument/2006/relationships/font"
+            )
+            max_rid = max(int(m) for m in re.findall(r'Id="rId(\d+)"', rels_xml))
+            new_rels = []
+            embedded_fonts = []
+            parts = {}
+            part_idx = 0
+            for typeface, panose, faces in family_faces:
+                face_tags = []
+                for face, asset_path in faces:
+                    part_idx += 1
+                    rid = f"rId{max_rid + part_idx}"
+                    part_name = f"fonts/font{part_idx}.fntdata"
+                    new_rels.append(
+                        f'<Relationship Id="{rid}" Type="{font_rel_type}" Target="{part_name}"/>'
+                    )
+                    face_tags.append(f'<p:{face} r:id="{rid}"/>')
+                    parts[f"ppt/{part_name}"] = asset_path.read_bytes()
+                embedded_fonts.append(
+                    "<p:embeddedFont>"
+                    f'<p:font typeface="{typeface}" panose="{panose}" pitchFamily="2" charset="0"/>'
+                    + "".join(face_tags)
+                    + "</p:embeddedFont>"
+                )
+
+            rels_xml = rels_xml.replace(
+                "</Relationships>", "".join(new_rels) + "</Relationships>"
+            )
+
+            if 'Extension="fntdata"' not in content_types:
+                content_types = content_types.replace(
+                    "</Types>",
+                    '<Default Extension="fntdata" ContentType="application/x-fontdata"/></Types>',
+                )
+
+            # Root attribute + embeddedFontLst (schema position: after notesSz)
+            if "embedTrueTypeFonts" not in pres_xml:
+                pres_xml = pres_xml.replace(
+                    "<p:presentation ", '<p:presentation embedTrueTypeFonts="1" ', 1
+                )
+            font_lst = (
+                "<p:embeddedFontLst>" + "".join(embedded_fonts) + "</p:embeddedFontLst>"
+            )
+            anchor = re.search(r"<p:notesSz[^>]*/>", pres_xml) or re.search(
+                r"<p:sldSz[^>]*/>", pres_xml
+            )
+            if anchor:
+                pres_xml = (
+                    pres_xml[: anchor.end()] + font_lst + pres_xml[anchor.end():]
+                )
+            else:
+                pres_xml = pres_xml.replace(
+                    "</p:presentation>", font_lst + "</p:presentation>", 1
+                )
+
+            replaced = {
+                "ppt/presentation.xml": pres_xml.encode("utf-8"),
+                "ppt/_rels/presentation.xml.rels": rels_xml.encode("utf-8"),
+                "[Content_Types].xml": content_types.encode("utf-8"),
+            }
+
+            out_buffer = BytesIO()
+            with zipfile.ZipFile(out_buffer, "w", zipfile.ZIP_DEFLATED) as dst:
+                for item in src.infolist():
+                    data = replaced.get(item.filename) or src.read(item.filename)
+                    dst.writestr(item, data)
+                for part_name, data in parts.items():
+                    dst.writestr(part_name, data)
+
+            logger.info(
+                "Embedded fonts via OpenXML (PowerPoint-native fntdata): %s",
+                [(tf, [f for f, _ in fc]) for tf, _, fc in family_faces],
+            )
+            return out_buffer.getvalue()
+
+        except Exception as embed_err:
+            logger.warning(
+                "OpenXML font embedding failed (non-fatal): %s", str(embed_err)
+            )
+            return pptx_bytes
+
+    def _promote_paragraph_props_to_runs(self, slide) -> None:
+        """Copy each paragraph's defRPr onto runs that have no rPr.
+
+        python-pptx's `paragraph.font` writes to pPr/defRPr. PowerPoint desktop
+        honors it, but PowerPoint Online, Google Slides and LibreOffice largely
+        ignore defRPr — every text box falls back to a different default font,
+        which reads as "the font changes on every slide". Promoting the same
+        properties to run level is semantically identical per ECMA-376 and
+        honored by every viewer.
+        """
+        from pptx.oxml.ns import qn
+
+        for shape in slide.shapes:
+            if not shape.has_text_frame:
+                continue
+            for p in shape.text_frame._txBody.findall(qn("a:p")):
+                ppr = p.find(qn("a:pPr"))
+                if ppr is None:
+                    continue
+                defrpr = ppr.find(qn("a:defRPr"))
+                if defrpr is None:
+                    continue
+                for r in p.findall(qn("a:r")):
+                    if r.find(qn("a:rPr")) is None:
+                        rpr = deepcopy(defrpr)
+                        rpr.tag = qn("a:rPr")
+                        r.insert(0, rpr)
 
     @staticmethod
     def _compose_group_name_line(entry: Dict[str, str]) -> str:
